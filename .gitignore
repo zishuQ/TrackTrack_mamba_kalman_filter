@@ -1,0 +1,10 @@
+__pycache__/
+
+outputs/
+.vscode/
+*.json
+*.pth.tar
+*.pth
+*.log
+*.csv
+*.egg-info/
