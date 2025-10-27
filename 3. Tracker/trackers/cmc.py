@@ -16,7 +16,7 @@ class CMC:
     def get_warp_matrix(self):
         line = self.gmcFile.readline()
         tokens = line.split("\t")
-        warp_matrix = np.eye(2, 3, dtype=np.float_)
+        warp_matrix = np.eye(2, 3, dtype=np.float64)
         warp_matrix[0, 0] = float(tokens[1])
         warp_matrix[0, 1] = float(tokens[2])
         warp_matrix[0, 2] = float(tokens[3])
