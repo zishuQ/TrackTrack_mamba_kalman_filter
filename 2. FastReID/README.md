@@ -6,6 +6,20 @@ Save weights files under "./weights/"
   - [mot20_sbs_S50.pth](https://drive.google.com/file/d/1RhMnTt9JCuZUWk-jPhDPX2NQCZ5g_O3m/view?usp=drive_link)
   - [dance_sbs_S50.pth](https://drive.google.com/file/d/1c9Vn4PADNKFrCuS0HxhPz3PcTvvLWVhc/view?usp=drive_link)
 
+### One-command auto download
+Install dependency (if not already):
+```
+pip install gdown
+```
+Run inside this folder:
+```
+python download_reid_weights.py            # all
+python download_reid_weights.py --only mot17
+python download_reid_weights.py --only mot20
+python download_reid_weights.py --only dance
+```
+Existing weights are skipped.
+
 
 ## Training
 Trained weights will be created under "./weights/"
