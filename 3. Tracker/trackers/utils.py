@@ -234,9 +234,9 @@ def iterative_assignment(tracks, dets_high, dets_low, dets_del_high, match_thr, 
             cost[:, d] = 1.
 
     # Find indices of unmatched tracks and detections
-    m_tracks = [t for t, _ in matches]
+    m_tracks = set(t for t, _ in matches)
     u_tracks = [t for t in range(len(tracks)) if t not in m_tracks]
-    m_dets = [d for _, d in matches]
+    m_dets = set(d for _, d in matches)
     u_dets = [d for d in range(len(dets)) if d not in m_dets]
 
     return matches, u_tracks, u_dets
