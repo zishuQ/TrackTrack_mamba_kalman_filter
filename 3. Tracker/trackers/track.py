@@ -120,7 +120,7 @@ class Track(BaseTrack):
 
     @property
     def cxcywh(self):
-        # Get current position in bounding box format `(center x, center y, aspect ratio, height)`.
+        # Get current position in bounding box format `(center x, center y, width, height)`.
         if self.mean is None:
             cx = (self.box[0] + self.box[2]) / 2
             cy = (self.box[1] + self.box[3]) / 2
