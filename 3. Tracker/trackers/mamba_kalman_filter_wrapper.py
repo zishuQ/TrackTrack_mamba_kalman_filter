@@ -89,15 +89,13 @@ class MambaKalmanFilterWrapper(object):
             
             return mean, covariance
     
-    def project(self, mean, covariance, confidence, track_id):
+    def project(self, mean, covariance, track_id):
         """
         Project state to measurement space.
-        Note: confidence parameter is ignored in Mamba version (adaptive noise is learned).
         
         Args:
             mean: numpy array of shape (8,)
             covariance: numpy array of shape (8, 8)
-            confidence: detection confidence (ignored)
             track_id: unique identifier for the track
         
         Returns:
@@ -117,16 +115,14 @@ class MambaKalmanFilterWrapper(object):
             
             return mean, covariance
     
-    def update(self, mean, covariance, measurement, confidence, track_id):
+    def update(self, mean, covariance, measurement, track_id):
         """
         Update state with new measurement.
-        Note: confidence parameter is ignored in Mamba version (adaptive noise is learned).
         
         Args:
             mean: numpy array of shape (8,)
             covariance: numpy array of shape (8, 8)
             measurement: numpy array of shape (4,)
-            confidence: detection confidence (ignored)
             track_id: unique identifier for the track
         
         Returns:

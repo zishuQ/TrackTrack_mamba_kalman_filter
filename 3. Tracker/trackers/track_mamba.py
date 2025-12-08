@@ -1,6 +1,5 @@
 import numpy as np
 from trackers.utils import get_prev_box
-from trackers.mamba_kalman_filter_wrapper import MambaKalmanFilterWrapper
 
 
 def get_vel(b_1, b_2):
@@ -71,17 +70,12 @@ class TrackMamba(BaseTrack):
         self.feat = beta * self.feat + (1 - beta) * feat
         self.feat /= np.linalg.norm(self.feat)
 
-    def initiate(self, frame_id, counter, shared_kalman_filter=None):
+    def initiate(self, frame_id, counter, shared_kalman_filter):
         # Get new track id
         self.track_id = counter.get_track_id()
 
-        # Initiate Kalman filter (use shared instance if provided)
-        if shared_kalman_filter is not None:
-            self.kalman_filter = shared_kalman_filter
-        else:
-            # Fallback to standard KF if no shared filter
-            from trackers.kalman_filter import KalmanFilter
-            self.kalman_filter = KalmanFilter()
+        # Use shared MambaKalmanFilter instance
+        self.kalman_filter = shared_kalman_filter
         
         self.mean, self.covariance = self.kalman_filter.initiate(self.cxcywh.copy())
 
@@ -105,7 +99,7 @@ class TrackMamba(BaseTrack):
     def update(self, frame_id, detection):
         # Update Kalman filter & Feature with MambaKalmanFilter
         self.mean, self.covariance = self.kalman_filter.update(self.mean, self.covariance,
-                                                               detection.cxcywh.copy(), detection.score, self.track_id)
+                                                               detection.cxcywh.copy(), self.track_id)
         self.update_features(detection.feat.copy(), detection.score)
 
         # Update history

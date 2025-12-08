@@ -103,8 +103,7 @@ class TrackerMamba(object):
         # Filter out the removed tracks and clean up Mamba states
         removed_tracks = [t for t in self.tracks if t.state == TrackState.Removed]
         for track in removed_tracks:
-            if self.shared_kalman_filter is not None and hasattr(track, 'track_id'):
-                self.shared_kalman_filter.delete_track(track.track_id)
+            self.shared_kalman_filter.delete_track(track.track_id)
         
         self.tracks = [t for t in self.tracks if t.state != TrackState.Removed]
 
@@ -135,8 +134,7 @@ class TrackerMamba(object):
         # Filter out the removed tracks and clean up Mamba states
         removed_tracks = [t for t in self.tracks if t.state == TrackState.Removed]
         for track in removed_tracks:
-            if self.shared_kalman_filter is not None and hasattr(track, 'track_id'):
-                self.shared_kalman_filter.delete_track(track.track_id)
+            self.shared_kalman_filter.delete_track(track.track_id)
         
         self.tracks = [t for t in self.tracks if t.state != TrackState.Removed]
 
