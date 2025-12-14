@@ -14,6 +14,14 @@ def set_parameters(args, vid_name, mode):
             args.pickle_path = args.pickle_dir + 'mot17_val_0.80.pickle'
             args.pickle_path_95 = args.pickle_dir + 'mot17_val_0.95.pickle'
             args.data_path = args.data_dir + 'MOT17/train/'
+        elif mode == 'val_custom':
+            args.pickle_path = args.pickle_dir + 'mot17_val_custom_0.80.pickle'
+            args.pickle_path_95 = args.pickle_dir + 'mot17_val_custom_0.95.pickle'
+            args.data_path = args.data_dir + 'MOT17/train/'
+        elif mode == 'train_custom':
+            args.pickle_path = args.pickle_dir + 'mot17_train_custom_0.80.pickle'
+            args.pickle_path_95 = args.pickle_dir + 'mot17_train_custom_0.95.pickle'
+            args.data_path = args.data_dir + 'MOT17/train/'
         else:
             args.pickle_path = args.pickle_dir + 'mot17_test_0.80.pickle'
             args.pickle_path_95 = args.pickle_dir + 'mot17_test_0.95.pickle'
@@ -33,6 +41,14 @@ def set_parameters(args, vid_name, mode):
         if mode == 'val':
             args.pickle_path = args.pickle_dir + 'mot20_val_0.80.pickle'
             args.pickle_path_95 = args.pickle_dir + 'mot20_val_0.95.pickle'
+            args.data_path = args.data_dir + 'MOT20/train/'
+        elif mode == 'val_custom':
+            args.pickle_path = args.pickle_dir + 'mot20_val_custom_0.80.pickle'
+            args.pickle_path_95 = args.pickle_dir + 'mot20_val_custom_0.95.pickle'
+            args.data_path = args.data_dir + 'MOT20/train/'
+        elif mode == 'train_custom':
+            args.pickle_path = args.pickle_dir + 'mot20_train_custom_0.80.pickle'
+            args.pickle_path_95 = args.pickle_dir + 'mot20_train_custom_0.95.pickle'
             args.data_path = args.data_dir + 'MOT20/train/'
         else:
             args.pickle_path = args.pickle_dir + 'mot20_test_0.80.pickle'
@@ -88,6 +104,9 @@ def write_results(filename, results):
 
 
 def evaluate(args, trackers_to_eval, dataset):
+    # Determine split name for seqmap
+    split_name = args.mode if args.mode in ['val', 'val_custom', 'train_custom'] else 'val'
+    
     # Set evaluation configurations
     eval_config = {'USE_PARALLEL': True,
                    'NUM_PARALLEL_CORES': 8,
@@ -112,7 +131,7 @@ def evaluate(args, trackers_to_eval, dataset):
                       'TRACKERS_TO_EVAL': [trackers_to_eval],
                       'CLASSES_TO_EVAL': ['pedestrian'],
                       'BENCHMARK': dataset if 'MOT' in dataset else 'MOT17',
-                      'SPLIT_TO_EVAL': 'val',
+                      'SPLIT_TO_EVAL': split_name,
                       'INPUT_AS_ZIP': False,
                       'PRINT_CONFIG': False,
                       'DO_PREPROC': True,
@@ -120,7 +139,7 @@ def evaluate(args, trackers_to_eval, dataset):
                       'OUTPUT_SUB_FOLDER': '',
                       'TRACKER_DISPLAY_NAMES': None,
                       'SEQMAP_FOLDER': None,
-                      'SEQMAP_FILE': './trackeval/seqmap/%s/val.txt' % dataset.lower(),
+                      'SEQMAP_FILE': './trackeval/seqmap/%s/%s.txt' % (dataset.lower(), split_name),
                       'SEQ_INFO': None,
                       'GT_LOC_FORMAT': '{gt_folder}/{seq}/gt/gt.txt',
                       'SKIP_SPLIT_FOL': True}
@@ -139,4 +158,5 @@ def evaluate(args, trackers_to_eval, dataset):
     deta = np.mean(res['MotChallenge2DBox'][trackers_to_eval]['COMBINED_SEQ']['pedestrian']['HOTA']['DetA']).item()
 
     # Print
-    print('%.3f %.3f %.3f %.3f %.3f' % (hota * 100, idf1 * 100, mota * 100, assa * 100, deta * 100), flush=True)
+    print(f'{"HOTA":<10}{"MOTA":<10}{"IDF1":<10}{"DetA":<10}{"AssA":<10}', flush=True)
+    print(f'{hota:<10.6f}{mota:<10.6f}{idf1:<10.6f}{deta:<10.6f}{assa:<10.6f}', flush=True)
