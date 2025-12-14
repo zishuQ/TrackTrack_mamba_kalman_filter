@@ -2,6 +2,7 @@ import os
 import torch
 import pickle
 import argparse
+from tqdm import tqdm
 from utils.etc import *
 from AFLink.AppFreeLink import *
 from AFLink.model import PostLinker
@@ -19,7 +20,7 @@ def make_parser():
     parser.add_argument("--data_dir", type=str, default="/home/shang/datasets/")
     parser.add_argument("--dataset", type=str, default="MOT17")
     parser.add_argument("--mode", type=str, default="val")
-    parser.add_argument("--seed", type=float, default=10000)
+    parser.add_argument("--seed", type=int, default=10000)
 
     # For trackers
     parser.add_argument("--min_len", type=int, default=3)
@@ -36,7 +37,8 @@ def make_parser():
 def track(detections, detections_95, data_path, result_folder, mode):
     # For each video
     total_time, total_count = 0, 0
-    for vid_name in detections.keys():
+    vid_names = list(detections.keys())
+    for vid_name in tqdm(vid_names, desc="Processing videos", unit="video"):
         # Set proper parameters
         set_parameters(args, vid_name, mode)
 
@@ -55,7 +57,8 @@ def track(detections, detections_95, data_path, result_folder, mode):
 
         # For each frame
         results = []
-        for frame_id in detections[vid_name].keys():
+        frame_ids = sorted(detections[vid_name].keys())
+        for frame_id in tqdm(frame_ids, desc=f"  {vid_name}", leave=False, unit="frame"):
             # Run tracking
             start = time.time()
             if detections[vid_name][frame_id] is not None:
@@ -113,27 +116,27 @@ def run():
     # Track
     total_time, total_count = track(detections, detections_95, args.data_path, result_folder, args.mode)
 
-    # Post-processing
-    print('Running post-processing...')
-    for result_file in os.listdir(result_folder):
-        # Set Path
-        path_in = result_folder + '/' + str(result_file)
-        path_out = result_folder + '_post/' + str(result_file)
-
-        # Link
-        if 'Dance' in args.dataset:
-            linker = AFLink(path_in=path_in, path_out=path_out, model=model, dataset=aflink_dataset,
-                            thrT=(0, 20), thrS=100, thrP=0.05)
-            linker.link()
-
-        # Gaussian Interpolation
-        if 'MOT' in args.dataset:
-            gb_interpolation(path_in, path_out, interval=30, tau=12)
+    # Post-processing (DISABLED for baseline evaluation)
+    # print('Running post-processing...')
+    # for result_file in os.listdir(result_folder):
+    #     # Set Path
+    #     path_in = result_folder + '/' + str(result_file)
+    #     path_out = result_folder + '_post/' + str(result_file)
+    #
+    #     # Link
+    #     if 'Dance' in args.dataset:
+    #         linker = AFLink(path_in=path_in, path_out=path_out, model=model, dataset=aflink_dataset,
+    #                         thrT=(0, 20), thrS=100, thrP=0.05)
+    #         linker.link()
+    #
+    #     # Gaussian Interpolation
+    #     if 'MOT' in args.dataset:
+    #         gb_interpolation(path_in, path_out, interval=30, tau=12)
 
     # Evaluation
-    if args.mode == 'val':
+    if 'val' in args.mode or 'train' in args.mode:
         print('Evaluating...')
-        evaluate(args, trackers_to_eval + '_post', args.dataset)
+        evaluate(args, trackers_to_eval, args.dataset)  # Changed from '_post' to evaluate baseline
 
     # Logging
     print(total_count / total_time, flush=True)

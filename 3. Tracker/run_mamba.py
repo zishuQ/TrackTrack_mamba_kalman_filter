@@ -3,6 +3,7 @@ import sys
 import torch
 import pickle
 import argparse
+from tqdm import tqdm
 
 # Add parent directory to path to access mamba_kalman_filter module
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
@@ -46,7 +47,8 @@ def make_parser():
 def track(detections, detections_95, data_path, result_folder, mode):
     # For each video
     total_time, total_count = 0, 0
-    for vid_name in detections.keys():
+    vid_names = list(detections.keys())
+    for vid_name in tqdm(vid_names, desc="Processing videos", unit="video"):
         # Set proper parameters
         set_parameters(args, vid_name, mode)
 
@@ -69,7 +71,7 @@ def track(detections, detections_95, data_path, result_folder, mode):
             # Auto-detect model path based on dataset
             if 'MOT20' in args.dataset:
                 model_path = '../mamba_kalman_filter/checkpoints/MOT20_best_model.pth'
-            else:
+            elif 'MOT17' in args.dataset:
                 model_path = '../mamba_kalman_filter/checkpoints/MOT17_best_model.pth'
         
         tracker.shared_kalman_filter = MambaKalmanFilterWrapper.get_shared_instance(
@@ -78,7 +80,8 @@ def track(detections, detections_95, data_path, result_folder, mode):
 
         # For each frame
         results = []
-        for frame_id in detections[vid_name].keys():
+        frame_ids = sorted(detections[vid_name].keys())
+        for frame_id in tqdm(frame_ids, desc=f"  {vid_name}", leave=False, unit="frame"):
             # Run tracking
             start = time.time()
             if detections[vid_name][frame_id] is not None:
@@ -158,7 +161,7 @@ def run():
     #         gb_interpolation(path_in, path_out, interval=30, tau=12)
 
     # Evaluation
-    if args.mode == 'val':
+    if 'val' in args.mode or 'train' in args.mode:
         print('Evaluating...')
         evaluate(args, trackers_to_eval, args.dataset)  # Changed from '_post' to evaluate baseline
 
