@@ -43,14 +43,14 @@ def track(detections, detections_95, data_path, result_folder, mode):
         set_parameters(args, vid_name, mode)
 
         # Set max time lost
-        seq_info = open(data_path + vid_name + '/seqinfo.ini', mode='r')
-        for s_i in seq_info.readlines():
-            if 'frameRate' in s_i:
-                args.max_time_lost = int(s_i.split('=')[-1]) * 2
-            if 'imWidth' in s_i:
-                args.img_w = int(s_i.split('=')[-1])
-            if 'imHeight' in s_i:
-                args.img_h = int(s_i.split('=')[-1])
+        with open(data_path + vid_name + '/seqinfo.ini', mode='r') as seq_info:
+            for s_i in seq_info.readlines():
+                if 'frameRate' in s_i:
+                    args.max_time_lost = int(s_i.split('=')[-1]) * 2
+                if 'imWidth' in s_i:
+                    args.img_w = int(s_i.split('=')[-1])
+                if 'imHeight' in s_i:
+                    args.img_h = int(s_i.split('=')[-1])
 
         # Set tracker
         tracker = Tracker(args, vid_name)

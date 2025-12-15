@@ -53,14 +53,14 @@ def track(detections, detections_95, data_path, result_folder, mode):
         set_parameters(args, vid_name, mode)
 
         # Set max time lost
-        seq_info = open(data_path + vid_name + '/seqinfo.ini', mode='r')
-        for s_i in seq_info.readlines():
-            if 'frameRate' in s_i:
-                args.max_time_lost = int(s_i.split('=')[-1]) * 2
-            if 'imWidth' in s_i:
-                args.img_w = int(s_i.split('=')[-1])
-            if 'imHeight' in s_i:
-                args.img_h = int(s_i.split('=')[-1])
+        with open(data_path + vid_name + '/seqinfo.ini', mode='r') as seq_info:
+            for s_i in seq_info.readlines():
+                if 'frameRate' in s_i:
+                    args.max_time_lost = int(s_i.split('=')[-1]) * 2
+                if 'imWidth' in s_i:
+                    args.img_w = int(s_i.split('=')[-1])
+                if 'imHeight' in s_i:
+                    args.img_h = int(s_i.split('=')[-1])
 
         # Set tracker
         tracker = TrackerMamba(args, vid_name)
@@ -70,7 +70,7 @@ def track(detections, detections_95, data_path, result_folder, mode):
         if model_path is None:
             # Auto-detect model path based on dataset
             if 'MOT20' in args.dataset:
-                model_path = '../mamba_kalman_filter/checkpoints/MOT20_best_model.pth'
+                model_path = '../mamba_kalman_filter/checkpoints/MOT20_best_model.pth.exp4_3'
             elif 'MOT17' in args.dataset:
                 model_path = '../mamba_kalman_filter/checkpoints/MOT17_best_model.pth'
         
@@ -110,6 +110,10 @@ def track(detections, detections_95, data_path, result_folder, mode):
         # Logging & Write results
         result_filename = os.path.join(result_folder, '{}.txt'.format(vid_name))
         write_results(result_filename, results)
+        
+        # Clean up all remaining tracks' hidden states after video ends
+        for track in tracker.tracks:
+            tracker.shared_kalman_filter.delete_track(track.track_id)
 
     return total_time, total_count
 
