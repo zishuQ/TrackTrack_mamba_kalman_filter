@@ -70,13 +70,16 @@ def track(detections, detections_95, data_path, result_folder, mode):
         if model_path is None:
             # Auto-detect model path based on dataset
             if 'MOT20' in args.dataset:
-                model_path = '../mamba_kalman_filter/checkpoints/MOT20_best_model.pth.exp4_3'
+                model_path = '../mamba_kalman_filter/checkpoints/MOT20_best_model.pth.exp12_3'
             elif 'MOT17' in args.dataset:
-                model_path = '../mamba_kalman_filter/checkpoints/MOT17_best_model.pth'
+                model_path = '../mamba_kalman_filter/checkpoints/MOT20_best_model.pth.exp12_3'
         
         tracker.shared_kalman_filter = MambaKalmanFilterWrapper.get_shared_instance(
             model_path=model_path, device='cuda'
         )
+        
+        # Set image size for normalization (different videos may have different sizes)
+        tracker.shared_kalman_filter.set_image_size(args.img_w, args.img_h)
 
         # For each frame
         results = []
@@ -119,10 +122,10 @@ def track(detections, detections_95, data_path, result_folder, mode):
 
 
 def run():
-    # Initialize AFLink
-    model = PostLinker()
-    model.load_state_dict(torch.load('./AFLink/AFLink_epoch20.pth'))
-    aflink_dataset = LinkData('', '')
+    # # Initialize AFLink
+    # model = PostLinker()
+    # model.load_state_dict(torch.load('./AFLink/AFLink_epoch20.pth'))
+    # aflink_dataset = LinkData('', '')
 
     # Logging & Set proper parameters
     print('Running %s %s with MambaKalmanFilter...' % (args.dataset, args.mode))
