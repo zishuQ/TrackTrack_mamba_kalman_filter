@@ -97,13 +97,14 @@ class MambaKalmanFilterWrapper(object):
             
             return mean, covariance
     
-    def predict(self, mean, covariance, track_id):
+    def predict(self, mean, covariance, measurement, track_id):
         """
         Predict next state using motion model.
         
         Args:
             mean: numpy array of shape (8,) in pixel coordinates
             covariance: numpy array of shape (8, 8)
+            measurement: numpy array of shape (4,) - current observation for computing innovation/DIoU
             track_id: unique identifier for the track
         
         Returns:
@@ -111,15 +112,20 @@ class MambaKalmanFilterWrapper(object):
             covariance: numpy array of shape (8, 8)
         """
         with torch.no_grad():
-            # Normalize mean before passing to model
+            # Normalize inputs before passing to model
+            norm_factor_4 = self._get_norm_factor_4()
             norm_factor_8 = self._get_norm_factor_8()
             mean_norm = mean / norm_factor_8
+            measurement_norm = measurement / norm_factor_4
             
             # Convert to torch and add batch dimension
             mean_torch = torch.from_numpy(mean_norm).float().unsqueeze(0).to(self.device)
             covariance_torch = torch.from_numpy(covariance).float().to(self.device)
+            measurement_torch = torch.from_numpy(measurement_norm).float().unsqueeze(0).to(self.device)
             
-            mean_torch, covariance_torch = self.filter.predict(mean_torch, covariance_torch, track_id)
+            mean_torch, covariance_torch = self.filter.predict(
+                mean_torch, covariance_torch, measurement_torch, track_id
+            )
             
             # Convert back to numpy
             mean = mean_torch.squeeze(0).cpu().numpy()
@@ -130,13 +136,14 @@ class MambaKalmanFilterWrapper(object):
             
             return mean, covariance
     
-    def project(self, mean, covariance, track_id):
+    def project(self, mean, covariance, measurement, track_id):
         """
         Project state to measurement space.
         
         Args:
             mean: numpy array of shape (8,) in pixel coordinates
             covariance: numpy array of shape (8, 8)
+            measurement: numpy array of shape (4,) - current observation for computing innovation/DIoU
             track_id: unique identifier for the track
         
         Returns:
@@ -144,22 +151,26 @@ class MambaKalmanFilterWrapper(object):
             covariance: numpy array of shape (4, 4)
         """
         with torch.no_grad():
-            # Normalize mean before passing to model
+            # Normalize inputs before passing to model
+            norm_factor_4 = self._get_norm_factor_4()
             norm_factor_8 = self._get_norm_factor_8()
             mean_norm = mean / norm_factor_8
+            measurement_norm = measurement / norm_factor_4
             
             # Convert to torch and add batch dimension
             mean_torch = torch.from_numpy(mean_norm).float().unsqueeze(0).to(self.device)
             covariance_torch = torch.from_numpy(covariance).float().to(self.device)
+            measurement_torch = torch.from_numpy(measurement_norm).float().unsqueeze(0).to(self.device)
             
-            mean_torch, covariance_torch = self.filter.project(mean_torch, covariance_torch, track_id)
+            mean_torch, covariance_torch = self.filter.project(
+                mean_torch, covariance_torch, measurement_torch, track_id
+            )
             
             # Convert back to numpy
             mean = mean_torch.squeeze(0).cpu().numpy()
             covariance = covariance_torch.cpu().numpy()
             
             # Denormalize mean back to pixel coordinates
-            norm_factor_4 = self._get_norm_factor_4()
             mean = mean * norm_factor_4
             
             return mean, covariance

@@ -59,6 +59,7 @@ class TrackMamba(BaseTrack):
         self.kalman_filter = None
         self.mean, self.covariance = None, None
         self.velocity = np.zeros((4, 2))
+        self.last_observation = None  # Store last measurement for predict()
 
         # Initialize 3
         self.alpha = 0.95
@@ -77,7 +78,9 @@ class TrackMamba(BaseTrack):
         # Use shared MambaKalmanFilter instance
         self.kalman_filter = shared_kalman_filter
         
-        self.mean, self.covariance = self.kalman_filter.initiate(self.cxcywh.copy())
+        observation = self.cxcywh.copy()
+        self.mean, self.covariance = self.kalman_filter.initiate(observation)
+        self.last_observation = observation  # Save for predict()
 
         # Initiate history
         self.history[frame_id] = [self.box.copy(), self.score.copy(), self.mean.copy(),
@@ -93,13 +96,20 @@ class TrackMamba(BaseTrack):
             self.mean[6] = 0
             self.mean[7] = 0
 
-        # Predict with MambaKalmanFilter
-        self.mean, self.covariance = self.kalman_filter.predict(self.mean, self.covariance, self.track_id)
+        # Use last observation or current mean[:4] as measurement for innovation/DIoU
+        measurement = self.last_observation if self.last_observation is not None else self.mean[:4].copy()
+        
+        # Predict with MambaKalmanFilter (now requires measurement)
+        self.mean, self.covariance = self.kalman_filter.predict(
+            self.mean, self.covariance, measurement, self.track_id
+        )
 
     def update(self, frame_id, detection):
         # Update Kalman filter & Feature with MambaKalmanFilter
+        observation = detection.cxcywh.copy()
         self.mean, self.covariance = self.kalman_filter.update(self.mean, self.covariance,
-                                                               detection.cxcywh.copy(), self.track_id)
+                                                               observation, self.track_id)
+        self.last_observation = observation  # Save for next predict()
         self.update_features(detection.feat.copy(), detection.score)
 
         # Update history
