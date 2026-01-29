@@ -21,6 +21,7 @@ def make_parser():
     parser.add_argument("--dataset", type=str, default="MOT17")
     parser.add_argument("--mode", type=str, default="val")
     parser.add_argument("--seed", type=int, default=10000)
+    parser.add_argument("--use_post", action="store_true", help="Use post-processing and evaluate post-processed results")
 
     # For trackers
     parser.add_argument("--min_len", type=int, default=3)
@@ -92,11 +93,6 @@ def track(detections, detections_95, data_path, result_folder, mode):
 
 
 def run():
-    # Initialize AFLink
-    model = PostLinker()
-    model.load_state_dict(torch.load('./AFLink/AFLink_epoch20.pth'))
-    aflink_dataset = LinkData('', '')
-
     # Logging & Set proper parameters
     print('Running %s %s...' % (args.dataset, args.mode))
     set_parameters(args, args.dataset, args.mode)
@@ -116,27 +112,34 @@ def run():
     # Track
     total_time, total_count = track(detections, detections_95, args.data_path, result_folder, args.mode)
 
-    # Post-processing (DISABLED for baseline evaluation)
-    # print('Running post-processing...')
-    # for result_file in os.listdir(result_folder):
-    #     # Set Path
-    #     path_in = result_folder + '/' + str(result_file)
-    #     path_out = result_folder + '_post/' + str(result_file)
-    #
-    #     # Link
-    #     if 'Dance' in args.dataset:
-    #         linker = AFLink(path_in=path_in, path_out=path_out, model=model, dataset=aflink_dataset,
-    #                         thrT=(0, 20), thrS=100, thrP=0.05)
-    #         linker.link()
-    #
-    #     # Gaussian Interpolation
-    #     if 'MOT' in args.dataset:
-    #         gb_interpolation(path_in, path_out, interval=30, tau=12)
+    # Post-processing
+    if args.use_post:
+        print('Running post-processing...')
+        for result_file in os.listdir(result_folder):
+            # Set Path
+            path_in = result_folder + '/' + str(result_file)
+            path_out = result_folder + '_post/' + str(result_file)
+        
+            # Link for DanceTrack
+            if 'Dance' in args.dataset:
+                # Initialize AFLink only when needed
+                model = PostLinker()
+                model.load_state_dict(torch.load('./AFLink/AFLink_epoch20.pth'))
+                aflink_dataset = LinkData('', '')
+                
+                linker = AFLink(path_in=path_in, path_out=path_out, model=model, dataset=aflink_dataset,
+                                thrT=(0, 20), thrS=100, thrP=0.05)
+                linker.link()
+        
+            # Gaussian Interpolation for MOT
+            if 'MOT' in args.dataset:
+                gb_interpolation(path_in, path_out, interval=30, tau=12)
 
     # Evaluation
     if 'val' in args.mode or 'train' in args.mode:
         print('Evaluating...')
-        evaluate(args, trackers_to_eval, args.dataset)  # Changed from '_post' to evaluate baseline
+        eval_tracker = trackers_to_eval + '_post' if args.use_post else trackers_to_eval
+        evaluate(args, eval_tracker, args.dataset)
 
     # Logging
     print(total_count / total_time, flush=True)
