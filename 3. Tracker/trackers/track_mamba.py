@@ -128,6 +128,44 @@ class TrackMamba(BaseTrack):
         self.end_frame_id = frame_id
         self.state = TrackState.Tracked if len(self.history.keys()) >= self.args.min_len else TrackState.New
 
+    def update_after_kf(self, frame_id, detection):
+        """
+        Update track attributes after KF update has been done by batch operation.
+        
+        This method should be called after batch_update() has already updated
+        self.mean and self.covariance. It handles all non-KF updates:
+        - last_observation
+        - features
+        - history
+        - velocity
+        - box, score, end_frame_id, state
+        
+        Args:
+            frame_id: Current frame ID
+            detection: Detection object with cxcywh, feat, box, score, x1y1x2y2
+        """
+        # Update last observation (for next predict)
+        self.last_observation = detection.cxcywh.copy()
+        
+        # Update features
+        self.update_features(detection.feat.copy(), detection.score)
+
+        # Update history
+        self.history[frame_id] = [detection.box.copy(), detection.score, self.mean.copy(),
+                                  self.covariance.copy(), self.feat.copy()]
+
+        # Update velocity
+        self.velocity = np.zeros((4, 2))
+        for d_t in range(1, self.delta_t + 1):
+            prev_box = get_prev_box(self.history, frame_id, d_t).copy()
+            self.velocity += get_vel(prev_box, detection.x1y1x2y2)
+
+        # Update parameters
+        self.box = detection.box.copy()
+        self.score = detection.score
+        self.end_frame_id = frame_id
+        self.state = TrackState.Tracked if len(self.history.keys()) >= self.args.min_len else TrackState.New
+
     @property
     def cxcywh(self):
         # Get current position in bounding box format `(center x, center y, width, height)`.

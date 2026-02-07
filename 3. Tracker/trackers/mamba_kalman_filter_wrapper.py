@@ -35,6 +35,10 @@ class MambaKalmanFilterWrapper(object):
         self.img_width = None
         self.img_height = None
         
+        # Pre-computed normalization factors on GPU (for batch operations)
+        self._norm_factor_4_gpu = None
+        self._norm_factor_8_gpu = None
+        
         # Load pretrained weights if provided
         if model_path is not None and os.path.exists(model_path):
             checkpoint = torch.load(model_path, map_location=self.device)
@@ -57,6 +61,17 @@ class MambaKalmanFilterWrapper(object):
         """
         self.img_width = img_width
         self.img_height = img_height
+        
+        # Pre-compute normalization factors on GPU (avoid repeated creation)
+        self._norm_factor_4_gpu = torch.tensor(
+            [img_width, img_height, img_width, img_height],
+            dtype=torch.float32, device=self.device
+        )
+        self._norm_factor_8_gpu = torch.tensor(
+            [img_width, img_height, img_width, img_height,
+             img_width, img_height, img_width, img_height],
+            dtype=torch.float32, device=self.device
+        )
     
     def _get_norm_factor_4(self):
         """Get normalization factor for measurement (4,): [W, H, W, H]"""
@@ -220,3 +235,136 @@ class MambaKalmanFilterWrapper(object):
             track_id: unique identifier for the track to delete
         """
         self.filter.delete_track(track_id)
+    
+    # ========== Batch Operations (Optimized for reduced CPU-GPU transfers) ==========
+    
+    def batch_predict(self, means, covariances, measurements, track_ids):
+        """
+        Batch predict all tracks' next states (single GPU transfer).
+        
+        This reduces CPU-GPU transfers from O(N) to O(1) per frame.
+        
+        Args:
+            means: numpy array (N, 8) - all tracks' current states in pixel coordinates
+            covariances: numpy array (N, 8, 8) - all tracks' covariances
+            measurements: numpy array (N, 4) - all tracks' current observations for innovation/DIoU
+            track_ids: list[int] - track ID list for managing Mamba hidden states
+        
+        Returns:
+            means: numpy array (N, 8) in pixel coordinates
+            covariances: numpy array (N, 8, 8)
+        """
+        if len(track_ids) == 0:
+            return means, covariances
+        
+        with torch.no_grad():
+            # Single transfer: numpy -> GPU (only 1 transfer for all tracks!)
+            means_gpu = torch.from_numpy(means).float().to(self.device)
+            covariances_gpu = torch.from_numpy(covariances).float().to(self.device)
+            measurements_gpu = torch.from_numpy(measurements).float().to(self.device)
+            
+            # Normalize on GPU (no transfer)
+            means_norm = means_gpu / self._norm_factor_8_gpu
+            measurements_norm = measurements_gpu / self._norm_factor_4_gpu
+            
+            # Process each track (data already on GPU, no transfer overhead)
+            # Note: Still loop due to per-track Mamba hidden states
+            results_mean = []
+            results_cov = []
+            for i, track_id in enumerate(track_ids):
+                m, c = self.filter.predict(
+                    means_norm[i:i+1],        # (1, 8)
+                    covariances_gpu[i],        # (8, 8)
+                    measurements_norm[i:i+1],  # (1, 4)
+                    track_id=track_id
+                )
+                results_mean.append(m)
+                results_cov.append(c)
+            
+            # Stack results
+            means_out = torch.cat(results_mean, dim=0)      # (N, 8)
+            covariances_out = torch.stack(results_cov, dim=0)  # (N, 8, 8)
+            
+            # Denormalize on GPU
+            means_out = means_out * self._norm_factor_8_gpu
+            
+            # Single transfer: GPU -> numpy (only 1 transfer for all tracks!)
+            return means_out.cpu().numpy(), covariances_out.cpu().numpy()
+    
+    def batch_update(self, means, covariances, measurements, track_ids):
+        """
+        Batch update all matched tracks (single GPU transfer).
+        
+        Args:
+            means: numpy array (N, 8) in pixel coordinates
+            covariances: numpy array (N, 8, 8)
+            measurements: numpy array (N, 4) - new observations in pixel coordinates
+            track_ids: list[int]
+        
+        Returns:
+            means: numpy array (N, 8) in pixel coordinates
+            covariances: numpy array (N, 8, 8)
+        """
+        if len(track_ids) == 0:
+            return means, covariances
+        
+        with torch.no_grad():
+            # Single transfer to GPU
+            means_gpu = torch.from_numpy(means).float().to(self.device)
+            covariances_gpu = torch.from_numpy(covariances).float().to(self.device)
+            measurements_gpu = torch.from_numpy(measurements).float().to(self.device)
+            
+            # Normalize on GPU
+            means_norm = means_gpu / self._norm_factor_8_gpu
+            measurements_norm = measurements_gpu / self._norm_factor_4_gpu
+            
+            # Process each track (data already on GPU)
+            results_mean = []
+            results_cov = []
+            for i, track_id in enumerate(track_ids):
+                m, c = self.filter.update(
+                    means_norm[i:i+1],
+                    covariances_gpu[i],
+                    measurements_norm[i:i+1],
+                    track_id=track_id
+                )
+                results_mean.append(m)
+                results_cov.append(c)
+            
+            means_out = torch.cat(results_mean, dim=0)
+            covariances_out = torch.stack(results_cov, dim=0)
+            
+            # Denormalize
+            means_out = means_out * self._norm_factor_8_gpu
+            
+            # Single transfer back to CPU
+            return means_out.cpu().numpy(), covariances_out.cpu().numpy()
+    
+    def batch_initiate(self, measurements):
+        """
+        Batch initialize new tracks (single GPU transfer).
+        
+        Args:
+            measurements: numpy array (N, 4) in pixel coordinates
+        
+        Returns:
+            means: numpy array (N, 8) in pixel coordinates
+            covariances: numpy array (N, 8, 8)
+        """
+        if len(measurements) == 0:
+            return np.array([]).reshape(0, 8), np.array([]).reshape(0, 8, 8)
+        
+        with torch.no_grad():
+            measurements_gpu = torch.from_numpy(measurements).float().to(self.device)
+            measurements_norm = measurements_gpu / self._norm_factor_4_gpu
+            
+            means_out, covariances_out = self.filter.initiate(measurements_norm)
+            
+            # initiate may return (8, 8) for single track, ensure (N, 8, 8)
+            if covariances_out.dim() == 2:
+                covariances_out = covariances_out.unsqueeze(0)
+            
+            means_out = means_out * self._norm_factor_8_gpu
+            
+            return means_out.cpu().numpy(), covariances_out.cpu().numpy()
+
