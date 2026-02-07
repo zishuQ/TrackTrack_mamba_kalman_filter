@@ -8,7 +8,7 @@ from AFLink.AppFreeLink import *
 from AFLink.model import PostLinker
 from AFLink.dataset import LinkData
 from trackers.tracker import Tracker
-from utils.gbi import gb_interpolation
+from utils.gbi import gb_interpolation, linear_interpolation_only
 
 
 def make_parser():
@@ -120,7 +120,7 @@ def run():
             path_in = result_folder + '/' + str(result_file)
             path_out = result_folder + '_post/' + str(result_file)
         
-            # Link for DanceTrack
+            # Link for DanceTrack (AFLink for non-linear dance motion)
             if 'Dance' in args.dataset:
                 # Initialize AFLink only when needed
                 model = PostLinker()
@@ -130,9 +130,14 @@ def run():
                 linker = AFLink(path_in=path_in, path_out=path_out, model=model, dataset=aflink_dataset,
                                 thrT=(0, 20), thrS=100, thrP=0.05)
                 linker.link()
+            
+            # Linear Interpolation for SportsMOT (based on MixSort, ICCV 2023)
+            # Sports motion is fast but physically constrained, short-term predictable
+            elif 'Sports' in args.dataset or 'sports' in args.dataset:
+                linear_interpolation_only(path_in, path_out, n_min=5, n_dti=20)
         
-            # Gaussian Interpolation for MOT
-            if 'MOT' in args.dataset:
+            # Gaussian Interpolation for MOT (pedestrian scenes)
+            elif 'MOT' in args.dataset:
                 gb_interpolation(path_in, path_out, interval=30, tau=12)
 
     # Evaluation

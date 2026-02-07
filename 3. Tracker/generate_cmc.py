@@ -13,8 +13,9 @@ from tqdm import tqdm
 
 def make_parser():
     parser = argparse.ArgumentParser("Generate GMC files (BoT-SORT method)")
-    parser.add_argument("--dataset", type=str, default="MOT17", choices=["MOT17", "MOT20"])
+    parser.add_argument("--dataset", type=str, default="MOT17", choices=["MOT17", "MOT20", "DanceTrack", "SportsMOT"])
     parser.add_argument("--data_dir", type=str, default="/home/shang/datasets/")
+    parser.add_argument("--split", type=str, default="train", choices=["train", "val", "test"], help="数据集分割")
     parser.add_argument("--sequences", nargs='+', help="指定序列，例如: MOT17-02-FRCNN MOT17-13-FRCNN。不指定则处理所有序列")
     parser.add_argument("--output_dir", type=str, default="./trackers/cmc/")
     parser.add_argument("--downscale", type=int, default=2, help="图像下采样倍数 (加速计算)")
@@ -211,8 +212,14 @@ def main():
     # 创建输出目录
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # 确定要处理的序列
-    dataset_path = os.path.join(args.data_dir, args.dataset, 'train')
+    # 确定数据集路径
+    if args.dataset == 'SportsMOT':
+        dataset_path = os.path.join(args.data_dir, 'SportsMOT', 'dataset', args.split)
+    elif args.dataset == 'DanceTrack':
+        dataset_path = os.path.join(args.data_dir, 'DanceTrack', args.split)
+    else:
+        # MOT17, MOT20
+        dataset_path = os.path.join(args.data_dir, args.dataset, 'train')
     
     if args.sequences:
         sequences = args.sequences
@@ -226,6 +233,7 @@ def main():
     print(f"生成GMC文件 (BoT-SORT Sparse Optical Flow方法)")
     print(f"{'='*60}")
     print(f"数据集: {args.dataset}")
+    print(f"分割: {args.split}")
     print(f"下采样: {args.downscale}x")
     print(f"序列数: {len(sequences)}")
     
@@ -242,6 +250,10 @@ def main():
             output_name = f"GMC-{seq_name.split('-FRCNN')[0]}.txt"
         elif 'MOT20' in seq_name:
             output_name = f"GMC-{seq_name}.txt"
+        elif args.dataset == 'SportsMOT':
+            output_name = f"GMC-sportsmot-{seq_name}.txt"
+        elif args.dataset == 'DanceTrack':
+            output_name = f"GMC-dancetrack-{seq_name}.txt"
         else:
             output_name = f"GMC-{seq_name}.txt"
         

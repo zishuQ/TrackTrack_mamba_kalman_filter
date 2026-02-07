@@ -14,7 +14,7 @@ from AFLink.model import PostLinker
 from AFLink.dataset import LinkData
 from trackers.tracker_mamba import TrackerMamba
 from trackers.mamba_kalman_filter_wrapper import MambaKalmanFilterWrapper
-from utils.gbi import gb_interpolation
+from utils.gbi import gb_interpolation, linear_interpolation_only
 
 
 def make_parser():
@@ -71,11 +71,13 @@ def track(detections, detections_95, data_path, result_folder, mode):
         if model_path is None:
             # Auto-detect model path based on dataset
             if 'MOT20' in args.dataset:
-                model_path = '../mamba_kalman_filter/checkpoints/MOT20_best_model.pth.exp15_1'
+                model_path = '../mamba_kalman_filter/checkpoints/MOT20_checkpoint_epoch_50.pth.exp15_1'
             elif 'MOT17' in args.dataset:
-                model_path = '../mamba_kalman_filter/checkpoints/MOT17_best_model.pth.exp11_3'
+                model_path = '../mamba_kalman_filter/checkpoints/MOT20_best_model.pth.exp15_2'
             elif 'Dance' in args.dataset or 'dancetrack' in args.dataset.lower():
                 model_path = '../mamba_kalman_filter/checkpoints/DANCETRACK_best_model.pth.exp1_1'
+            elif 'Sports' in args.dataset or 'sports' in args.dataset.lower():
+                model_path = '../mamba_kalman_filter/checkpoints/SPORTSMOT_best_model.pth.exp7_1'
         
         tracker.shared_kalman_filter = MambaKalmanFilterWrapper.get_shared_instance(
             model_path=model_path, device='cuda'
@@ -156,7 +158,7 @@ def run():
             path_in = result_folder + '/' + str(result_file)
             path_out = result_folder + '_post/' + str(result_file)
         
-            # Link for DanceTrack
+            # Link for DanceTrack (AFLink for non-linear dance motion)
             if 'Dance' in args.dataset:
                 # Initialize AFLink only when needed
                 model = PostLinker()
@@ -166,9 +168,14 @@ def run():
                 linker = AFLink(path_in=path_in, path_out=path_out, model=model, dataset=aflink_dataset,
                                 thrT=(0, 20), thrS=100, thrP=0.05)
                 linker.link()
+            
+            # Linear Interpolation for SportsMOT (based on MixSort, ICCV 2023)
+            # Sports motion is fast but physically constrained, short-term predictable
+            elif 'Sports' in args.dataset or 'sports' in args.dataset:
+                linear_interpolation_only(path_in, path_out, n_min=5, n_dti=20)
         
-            # Gaussian Interpolation for MOT
-            if 'MOT' in args.dataset:
+            # Gaussian Interpolation for MOT (pedestrian scenes)
+            elif 'MOT' in args.dataset:
                 gb_interpolation(path_in, path_out, interval=30, tau=12)
 
     # Evaluation

@@ -8,8 +8,10 @@ class CMC:
 
         if 'MOT17' in vid_name:
             vid_name = vid_name.split('-FRCNN')[0]
-        elif 'dance' in vid_name:
+        elif 'dance' in vid_name.lower():
             vid_name = 'dancetrack-' + vid_name.split('dancetrack')[1]
+        elif 'v_' in vid_name:  # SportsMOT videos start with v_
+            vid_name = 'sportsmot-' + vid_name
 
         self.gmcFile = open('./trackers/cmc/' + 'GMC-' + vid_name + ".txt", 'r')
 

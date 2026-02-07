@@ -61,8 +61,16 @@ python detect.py -f "exps/yolox_x_dance_val.py" -c "weights/dance.pth.tar" --nms
 python detect.py -f "exps/yolox_x_dance_val.py" -c "weights/dance.pth.tar" --nms 0.95 -n "../outputs/1. det/dance_val_0.95.pickle" -b 1 -d 1 --fp16 --fuse
 
 # For DanceTrack test
-python detect.py -f "exps/yolox_x_dance_test.py" -c "weights/dance.pth.tar" --nms 0.80 -n "../outputs/1. det/dance_test_0.80.pickle" -b 1 -d 1 --fp16 --fuse
-python detect.py -f "exps/yolox_x_dance_test.py" -c "weights/dance.pth.tar" --nms 0.95 -n "../outputs/1. det/dance_test_0.95.pickle" -b 1 -d 1 --fp16 --fuse
+python detect.py -f "exps/yolox_x_dancetrack_test.py" -c "weights/dancetrack.pth.tar" --nms 0.80 -n "../outputs/1. det/dance_test_0.80.pickle" -b 1 -d 1 --fp16 --fuse
+python detect.py -f "exps/yolox_x_dancetrack_test.py" -c "weights/dancetrack.pth.tar" --nms 0.95 -n "../outputs/1. det/dance_test_0.95.pickle" -b 1 -d 1 --fp16 --fuse
+
+# For SportsMOT val
+python detect.py -f "exps/yolox_x_sportsmot_val.py" -c "weights/SportsMOT_yolox_x_mix.tar" --nms 0.80 -n "../outputs/1. det/sportsmot_val_0.80.pickle" -b 1 -d 1 --fp16 --fuse
+python detect.py -f "exps/yolox_x_sportsmot_val.py" -c "weights/SportsMOT_yolox_x_mix.tar" --nms 0.95 -n "../outputs/1. det/sportsmot_val_0.95.pickle" -b 1 -d 1 --fp16 --fuse
+
+# For SportsMOT test
+python detect.py -f "exps/yolox_x_sportsmot_test.py" -c "weights/SportsMOT_yolox_x_mix.tar" --nms 0.80 -n "../outputs/1. det/sportsmot_test_0.80.pickle" -b 1 -d 1 --fp16 --fuse
+python detect.py -f "exps/yolox_x_sportsmot_test.py" -c "weights/SportsMOT_yolox_x_mix.tar" --nms 0.95 -n "../outputs/1. det/sportsmot_test_0.95.pickle" -b 1 -d 1 --fp16 --fuse
 
 ```
 

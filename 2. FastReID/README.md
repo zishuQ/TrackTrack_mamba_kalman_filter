@@ -64,6 +64,14 @@ python ext_feats.py --data_path '/home/shang/datasets/DanceTrack/val/' --pickle_
 python ext_feats.py --data_path '/home/shang/datasets/DanceTrack/test/' --pickle_path '../outputs/1. det/dance_test_0.80.pickle' --output_path '../outputs/2. det_feat/dance_test_0.80.pickle' --config_path 'configs/DanceTrack/sbs_S50.yml' --weight_path 'weights/dance_sbs_S50.pth'
 python ext_feats.py --data_path '/home/shang/datasets/DanceTrack/test/' --pickle_path '../outputs/1. det/dance_test_0.95.pickle' --output_path '../outputs/2. det_feat/dance_test_0.95.pickle' --config_path 'configs/DanceTrack/sbs_S50.yml' --weight_path 'weights/dance_sbs_S50.pth'
 
+# For SportsMOT validation
+python ext_feats.py --data_path '/home/shang/datasets/SportsMOT/dataset/val/' --pickle_path '../outputs/1. det/sportsmot_val_0.80.pickle' --output_path '../outputs/2. det_feat/sportsmot_val_0.80.pickle' --config_path 'configs/SportsMOT/sbs_S50.yml' --weight_path 'weights/sports_sbs_S50.pth'
+python ext_feats.py --data_path '/home/shang/datasets/SportsMOT/dataset/val/' --pickle_path '../outputs/1. det/sportsmot_val_0.95.pickle' --output_path '../outputs/2. det_feat/sportsmot_val_0.95.pickle' --config_path 'configs/SportsMOT/sbs_S50.yml' --weight_path 'weights/sports_sbs_S50.pth'
+
+# For SportsMOT test
+python ext_feats.py --data_path '/home/shang/datasets/SportsMOT/dataset/test/' --pickle_path '../outputs/1. det/sportsmot_test_0.80.pickle' --output_path '../outputs/2. det_feat/sportsmot_test_0.80.pickle' --config_path 'configs/SportsMOT/sbs_S50.yml' --weight_path 'weights/sports_sbs_S50.pth'
+python ext_feats.py --data_path '/home/shang/datasets/SportsMOT/dataset/test/' --pickle_path '../outputs/1. det/sportsmot_test_0.95.pickle' --output_path '../outputs/2. det_feat/sportsmot_test_0.95.pickle' --config_path 'configs/SportsMOT/sbs_S50.yml' --weight_path 'weights/sports_sbs_S50.pth'
+
 ```
 
 

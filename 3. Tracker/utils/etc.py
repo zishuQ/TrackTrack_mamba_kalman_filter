@@ -63,7 +63,22 @@ def set_parameters(args, vid_name, mode):
             args.det_thr, args.init_thr = 0.40, 0.40
         args.match_thr = 0.55
 
-    else:
+    elif 'SportsMOT' in vid_name or 'sportsmot' in vid_name.lower():
+        if mode == 'val':
+            args.pickle_path = args.pickle_dir + 'sportsmot_val_0.80.pickle'
+            args.pickle_path_95 = args.pickle_dir + 'sportsmot_val_0.95.pickle'
+            args.data_path = args.data_dir + 'SportsMOT/dataset/val/'
+        else:
+            args.pickle_path = args.pickle_dir + 'sportsmot_test_0.80.pickle'
+            args.pickle_path_95 = args.pickle_dir + 'sportsmot_test_0.95.pickle'
+            args.data_path = args.data_dir + 'SportsMOT/dataset/test/'
+
+        # SportsMOT运动场景，需要较高的检测和匹配阈值
+        args.det_thr = 0.55
+        args.init_thr = 0.65
+        args.match_thr = 0.75
+
+    elif 'Dance' in vid_name or 'dancetrack' in vid_name.lower():
         if mode == 'val':
             args.pickle_path = args.pickle_dir + 'dance_val_0.80.pickle'
             args.pickle_path_95 = args.pickle_dir + 'dance_val_0.95.pickle'
@@ -107,9 +122,23 @@ def evaluate(args, trackers_to_eval, dataset):
     # Determine split name for seqmap
     split_name = args.mode if args.mode in ['val', 'val_custom', 'train_custom'] else 'val'
     
+    # Determine benchmark based on dataset
+    if 'DanceTrack' in dataset or 'dancetrack' in dataset.lower():
+        benchmark = 'MOT17'  # DanceTrack uses MOT17 format
+        seqmap_folder = 'dancetrack'
+    elif 'SportsMOT' in dataset or 'sportsmot' in dataset.lower():
+        benchmark = 'MOT17'  # SportsMOT uses MOT17 format
+        seqmap_folder = 'sportsmot'
+    elif 'MOT20' in dataset:
+        benchmark = 'MOT20'
+        seqmap_folder = 'mot20'
+    else:
+        benchmark = 'MOT17'
+        seqmap_folder = 'mot17'
+    
     # Set evaluation configurations
-    eval_config = {'USE_PARALLEL': True,
-                   'NUM_PARALLEL_CORES': 8,
+    eval_config = {'USE_PARALLEL': False,
+                   'NUM_PARALLEL_CORES': 1,
                    'BREAK_ON_ERROR': True,
                    'RETURN_ON_ERROR': False,
                    'LOG_ON_ERROR': '../outputs/error_log.txt',
@@ -130,7 +159,7 @@ def evaluate(args, trackers_to_eval, dataset):
                       'OUTPUT_FOLDER': None,
                       'TRACKERS_TO_EVAL': [trackers_to_eval],
                       'CLASSES_TO_EVAL': ['pedestrian'],
-                      'BENCHMARK': dataset if 'MOT' in dataset else 'MOT17',
+                      'BENCHMARK': benchmark,
                       'SPLIT_TO_EVAL': split_name,
                       'INPUT_AS_ZIP': False,
                       'PRINT_CONFIG': False,
@@ -139,7 +168,7 @@ def evaluate(args, trackers_to_eval, dataset):
                       'OUTPUT_SUB_FOLDER': '',
                       'TRACKER_DISPLAY_NAMES': None,
                       'SEQMAP_FOLDER': None,
-                      'SEQMAP_FILE': './trackeval/seqmap/%s/%s.txt' % (dataset.lower(), split_name),
+                      'SEQMAP_FILE': './trackeval/seqmap/%s/%s.txt' % (seqmap_folder, split_name),
                       'SEQ_INFO': None,
                       'GT_LOC_FORMAT': '{gt_folder}/{seq}/gt/gt.txt',
                       'SKIP_SPLIT_FOL': True}

@@ -33,7 +33,14 @@ class DetEvaluator:
         # Detect
         for images, _, infos, ids in tqdm(self.dataloader):
             # Get video name and frame index
-            video_name = infos[4][0].split('/')[2]
+            # Handle different path formats:
+            # MOT17: MOT17/train/MOT17-04-FRCNN/img1/... -> [2] = MOT17-04-FRCNN
+            # SportsMOT: SportsMOT/dataset/val/v_xxx/img1/... -> [3] = v_xxx
+            path_parts = infos[4][0].split('/')
+            if 'SportsMOT' in path_parts[0] or 'sportsmot' in path_parts[0].lower():
+                video_name = path_parts[3]  # SportsMOT has extra 'dataset' folder
+            else:
+                video_name = path_parts[2]
             frame_id = int(infos[2].item())
 
             # Initialize
