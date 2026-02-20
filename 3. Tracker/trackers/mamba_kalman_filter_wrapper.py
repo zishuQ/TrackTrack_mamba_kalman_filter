@@ -30,7 +30,6 @@ class MambaKalmanFilterWrapper(object):
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.filter = MambaKalmanFilter(Config()).to(self.device)
         self.filter.eval()  # Set to evaluation mode
-        
         # Image dimensions for normalization (will be set per video sequence)
         self.img_width = None
         self.img_height = None
@@ -240,9 +239,10 @@ class MambaKalmanFilterWrapper(object):
     
     def batch_predict(self, means, covariances, measurements, track_ids):
         """
-        Batch predict all tracks' next states (single GPU transfer).
+        Batch predict all tracks' next states (single GPU transfer + single Mamba forward).
         
-        This reduces CPU-GPU transfers from O(N) to O(1) per frame.
+        将所有 track 打包成一个 batch，单次 Mamba forward 完成全部 predict，
+        消除原本逐 track 的 Python 循环和多次 GPU kernel launch。
         
         Args:
             means: numpy array (N, 8) - all tracks' current states in pixel coordinates
@@ -258,42 +258,34 @@ class MambaKalmanFilterWrapper(object):
             return means, covariances
         
         with torch.no_grad():
-            # Single transfer: numpy -> GPU (only 1 transfer for all tracks!)
+            # Single transfer: numpy -> GPU
             means_gpu = torch.from_numpy(means).float().to(self.device)
             covariances_gpu = torch.from_numpy(covariances).float().to(self.device)
             measurements_gpu = torch.from_numpy(measurements).float().to(self.device)
             
-            # Normalize on GPU (no transfer)
+            # Normalize on GPU
             means_norm = means_gpu / self._norm_factor_8_gpu
             measurements_norm = measurements_gpu / self._norm_factor_4_gpu
             
-            # Process each track (data already on GPU, no transfer overhead)
-            # Note: Still loop due to per-track Mamba hidden states
-            results_mean = []
-            results_cov = []
-            for i, track_id in enumerate(track_ids):
-                m, c = self.filter.predict(
-                    means_norm[i:i+1],        # (1, 8)
-                    covariances_gpu[i],        # (8, 8)
-                    measurements_norm[i:i+1],  # (1, 4)
-                    track_id=track_id
-                )
-                results_mean.append(m)
-                results_cov.append(c)
-            
-            # Stack results
-            means_out = torch.cat(results_mean, dim=0)      # (N, 8)
-            covariances_out = torch.stack(results_cov, dim=0)  # (N, 8, 8)
+            # 单次批量 predict（替代 N 次循环调用）
+            means_out, covariances_out = self.filter.batch_predict(
+                means_norm,         # (N, 8)
+                covariances_gpu,    # (N, 8, 8)
+                measurements_norm,  # (N, 4)
+                track_ids,
+            )
             
             # Denormalize on GPU
             means_out = means_out * self._norm_factor_8_gpu
             
-            # Single transfer: GPU -> numpy (only 1 transfer for all tracks!)
+            # Single transfer: GPU -> numpy
             return means_out.cpu().numpy(), covariances_out.cpu().numpy()
     
     def batch_update(self, means, covariances, measurements, track_ids):
         """
-        Batch update all matched tracks (single GPU transfer).
+        Batch update all matched tracks (single GPU transfer + single Mamba forward).
+        
+        NIS gate 关闭时（默认），走批量路径；开启时回退到逐 track 循环。
         
         Args:
             means: numpy array (N, 8) in pixel coordinates
@@ -318,21 +310,13 @@ class MambaKalmanFilterWrapper(object):
             means_norm = means_gpu / self._norm_factor_8_gpu
             measurements_norm = measurements_gpu / self._norm_factor_4_gpu
             
-            # Process each track (data already on GPU)
-            results_mean = []
-            results_cov = []
-            for i, track_id in enumerate(track_ids):
-                m, c = self.filter.update(
-                    means_norm[i:i+1],
-                    covariances_gpu[i],
-                    measurements_norm[i:i+1],
-                    track_id=track_id
-                )
-                results_mean.append(m)
-                results_cov.append(c)
-            
-            means_out = torch.cat(results_mean, dim=0)
-            covariances_out = torch.stack(results_cov, dim=0)
+            # 快速路径：单次批量 update（替代 N 次循环调用）
+            means_out, covariances_out = self.filter.batch_update(
+                means_norm,         # (N, 8)
+                covariances_gpu,    # (N, 8, 8)
+                measurements_norm,  # (N, 4)
+                track_ids,
+            )
             
             # Denormalize
             means_out = means_out * self._norm_factor_8_gpu
