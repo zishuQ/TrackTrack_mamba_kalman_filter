@@ -1,3 +1,5 @@
+import torch
+import numpy as np
 from trackers.cmc import *
 from trackers.utils import *
 from trackers.track_mamba import *
@@ -19,17 +21,23 @@ class TrackerMamba(object):
         
         # Initialize shared Kalman filter (MambaKalmanFilter)
         self.shared_kalman_filter = None
+        
+        # GPU cache: predicted states from batch_predict, reused in batch_update
+        # to skip redundant CPU→GPU transfers for matched tracks
+        self._predicted_gpu_cache = None  # (means_gpu, covs_gpu, {track_id: idx})
 
     def _batch_predict(self, tracks):
         """
         Batch predict all tracks' next states (optimized: single GPU transfer).
         
-        Replaces the original loop: [t.predict() for t in tracks]
+        Caches GPU tensors internally so that subsequent _batch_update calls
+        can reuse them, avoiding a redundant CPU→GPU round-trip.
         
         Args:
             tracks: List of TrackMamba objects to predict
         """
         if len(tracks) == 0:
+            self._predicted_gpu_cache = None
             return
         
         # Handle DanceTrack special case: zero out velocity for non-tracked
@@ -51,19 +59,38 @@ class TrackerMamba(object):
         
         track_ids = [t.track_id for t in tracks]
         
-        # Batch predict (single GPU call!)
-        means_new, covariances_new = self.shared_kalman_filter.batch_predict(
-            means, covariances, measurements, track_ids
-        )
+        # Transfer to GPU once
+        device = self.shared_kalman_filter.device
+        means_gpu = torch.from_numpy(means).float().to(device)
+        covs_gpu = torch.from_numpy(covariances).float().to(device)
+        meas_gpu = torch.from_numpy(measurements).float().to(device)
         
-        # Update each track's state
+        # Predict on GPU (returns GPU tensors, no CPU transfer inside)
+        with torch.no_grad():
+            means_pred_gpu, covs_pred_gpu = self.shared_kalman_filter.batch_predict_gpu(
+                means_gpu, covs_gpu, meas_gpu, track_ids
+            )
+        
+        # Transfer results to CPU and update tracks
+        means_np = means_pred_gpu.cpu().numpy()
+        covs_np = covs_pred_gpu.cpu().numpy()
         for i, t in enumerate(tracks):
-            t.mean = means_new[i]
-            t.covariance = covariances_new[i]
+            t.mean = means_np[i]
+            t.covariance = covs_np[i]
+        
+        # Cache GPU tensors for subsequent _batch_update (skip CPU→GPU round-trip)
+        self._predicted_gpu_cache = (
+            means_pred_gpu,   # (N, 8) on GPU, pixel coords
+            covs_pred_gpu,    # (N, 8, 8) on GPU
+            {t.track_id: i for i, t in enumerate(tracks)},
+        )
 
     def _batch_update(self, track_det_pairs):
         """
-        Batch update all matched track-detection pairs (optimized: single GPU transfer).
+        Batch update all matched track-detection pairs (optimized: reuses GPU cache).
+        
+        If _batch_predict was called earlier in this frame, matched tracks' states
+        are indexed from the cached GPU tensors directly (no CPU→GPU transfer needed).
         
         Args:
             track_det_pairs: List of (track, detection) tuples
@@ -74,21 +101,44 @@ class TrackerMamba(object):
         tracks = [pair[0] for pair in track_det_pairs]
         detections = [pair[1] for pair in track_det_pairs]
         
-        # Collect states
-        means = np.stack([t.mean for t in tracks], axis=0)  # (N, 8)
-        covariances = np.stack([t.covariance for t in tracks], axis=0)  # (N, 8, 8)
-        measurements = np.stack([d.cxcywh for d in detections], axis=0)  # (N, 4)
         track_ids = [t.track_id for t in tracks]
+        measurements = np.stack([d.cxcywh for d in detections], axis=0)  # (N, 4)
         
-        # Batch update (single GPU call!)
-        means_new, covariances_new = self.shared_kalman_filter.batch_update(
-            means, covariances, measurements, track_ids
-        )
+        device = self.shared_kalman_filter.device
+        meas_gpu = torch.from_numpy(measurements).float().to(device)
         
-        # Update each track's KF state
+        # Try to reuse cached GPU tensors from _batch_predict (skip CPU→GPU)
+        cache = self._predicted_gpu_cache
+        use_cache = False
+        if cache is not None:
+            cached_means, cached_covs, tid_map = cache
+            try:
+                indices = [tid_map[t.track_id] for t in tracks]
+                means_gpu = cached_means[indices]  # GPU indexing, no CPU transfer
+                covs_gpu = cached_covs[indices]
+                use_cache = True
+            except KeyError:
+                pass
+        
+        if not use_cache:
+            # Fallback: transfer from CPU (e.g. if predict cache was invalidated)
+            means = np.stack([t.mean for t in tracks], axis=0)
+            covariances = np.stack([t.covariance for t in tracks], axis=0)
+            means_gpu = torch.from_numpy(means).float().to(device)
+            covs_gpu = torch.from_numpy(covariances).float().to(device)
+        
+        # Update on GPU (returns GPU tensors)
+        with torch.no_grad():
+            means_upd_gpu, covs_upd_gpu = self.shared_kalman_filter.batch_update_gpu(
+                means_gpu, covs_gpu, meas_gpu, track_ids
+            )
+        
+        # Transfer results to CPU
+        means_np = means_upd_gpu.cpu().numpy()
+        covs_np = covs_upd_gpu.cpu().numpy()
         for i, t in enumerate(tracks):
-            t.mean = means_new[i]
-            t.covariance = covariances_new[i]
+            t.mean = means_np[i]
+            t.covariance = covs_np[i]
 
     def init_tracks(self, dets):
         # Get alive tracks, iou_similarity, and scores
@@ -183,6 +233,9 @@ class TrackerMamba(object):
         # Init new tracks
         self.init_tracks([dets_high_left[udx] for udx in u_dets])
 
+        # Clear GPU cache (free memory, no longer needed this frame)
+        self._predicted_gpu_cache = None
+
         return [t for t in self.tracks if t.state == TrackState.Tracked]
 
     def update_without_detections(self):
@@ -210,5 +263,8 @@ class TrackerMamba(object):
             self.shared_kalman_filter.delete_track(track.track_id)
         
         self.tracks = [t for t in self.tracks if t.state != TrackState.Removed]
+
+        # Clear GPU cache
+        self._predicted_gpu_cache = None
 
         return [t for t in self.tracks if t.state == TrackState.Tracked]

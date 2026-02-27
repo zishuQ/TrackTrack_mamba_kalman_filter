@@ -324,6 +324,57 @@ class MambaKalmanFilterWrapper(object):
             # Single transfer back to CPU
             return means_out.cpu().numpy(), covariances_out.cpu().numpy()
     
+    def batch_predict_gpu(self, means_gpu, covariances_gpu, measurements_gpu, track_ids):
+        """
+        GPU-native batch predict. Accepts/returns GPU tensors (pixel coords).
+        
+        与 batch_predict 逻辑相同，但跳过 numpy↔torch 转换，
+        供 tracker 在 GPU 上缓存预测结果、减少 CPU↔GPU 传输次数。
+        
+        Args:
+            means_gpu: torch tensor (N, 8) on GPU, pixel coordinates
+            covariances_gpu: torch tensor (N, 8, 8) on GPU
+            measurements_gpu: torch tensor (N, 4) on GPU, pixel coordinates
+            track_ids: list[int]
+        
+        Returns:
+            means_out: torch tensor (N, 8) on GPU, pixel coordinates
+            covariances_out: torch tensor (N, 8, 8) on GPU
+        """
+        means_norm = means_gpu / self._norm_factor_8_gpu
+        measurements_norm = measurements_gpu / self._norm_factor_4_gpu
+        
+        means_out, covariances_out = self.filter.batch_predict(
+            means_norm, covariances_gpu, measurements_norm, track_ids,
+        )
+        
+        means_out = means_out * self._norm_factor_8_gpu
+        return means_out, covariances_out
+    
+    def batch_update_gpu(self, means_gpu, covariances_gpu, measurements_gpu, track_ids):
+        """
+        GPU-native batch update. Accepts/returns GPU tensors (pixel coords).
+        
+        Args:
+            means_gpu: torch tensor (N, 8) on GPU, pixel coordinates
+            covariances_gpu: torch tensor (N, 8, 8) on GPU
+            measurements_gpu: torch tensor (N, 4) on GPU, pixel coordinates
+            track_ids: list[int]
+        
+        Returns:
+            means_out: torch tensor (N, 8) on GPU, pixel coordinates
+            covariances_out: torch tensor (N, 8, 8) on GPU
+        """
+        means_norm = means_gpu / self._norm_factor_8_gpu
+        measurements_norm = measurements_gpu / self._norm_factor_4_gpu
+        
+        means_out, covariances_out = self.filter.batch_update(
+            means_norm, covariances_gpu, measurements_norm, track_ids,
+        )
+        
+        means_out = means_out * self._norm_factor_8_gpu
+        return means_out, covariances_out
+    
     def batch_initiate(self, measurements):
         """
         Batch initialize new tracks (single GPU transfer).
