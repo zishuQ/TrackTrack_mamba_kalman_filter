@@ -137,9 +137,14 @@ def run():
 
     # Make result folder
     trackers_to_eval = args.pickle_path.split('/')[-1].split('.pickle')[0] + '_mamba'
-    result_folder = os.path.join(args.output_dir, trackers_to_eval)
+    result_folder_base = os.path.join(args.output_dir, trackers_to_eval)
+    if 'dance' in args.dataset.lower() and args.mode == 'test':
+        result_folder = os.path.join(result_folder_base, 'tracker')
+    else:
+        result_folder = result_folder_base
+
     os.makedirs(result_folder, exist_ok=True)
-    os.makedirs(result_folder + '_post/', exist_ok=True)
+    os.makedirs(result_folder_base + '_post/', exist_ok=True)
 
     # Read detection result
     with open(args.pickle_path, 'rb') as f:
@@ -179,7 +184,7 @@ def run():
                 gb_interpolation(path_in, path_out, interval=30, tau=12)
 
     # Evaluation
-    if 'val' in args.mode or 'train' in args.mode:
+    if args.mode != 'test':
         print('Evaluating...')
         eval_tracker = trackers_to_eval + '_post' if args.use_post else trackers_to_eval
         evaluate(args, eval_tracker, args.dataset)

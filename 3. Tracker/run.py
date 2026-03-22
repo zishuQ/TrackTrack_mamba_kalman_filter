@@ -1,4 +1,5 @@
 import os
+import shutil
 import torch
 import pickle
 import argparse
@@ -99,9 +100,14 @@ def run():
 
     # Make result folder
     trackers_to_eval = args.pickle_path.split('/')[-1].split('.pickle')[0]
-    result_folder = os.path.join(args.output_dir, trackers_to_eval)
+    result_folder_base = os.path.join(args.output_dir, trackers_to_eval)
+    if 'dance' in args.dataset.lower() and args.mode == 'test':
+        result_folder = os.path.join(result_folder_base, 'tracker')
+    else:
+        result_folder = result_folder_base
+
     os.makedirs(result_folder, exist_ok=True)
-    os.makedirs(result_folder + '_post/', exist_ok=True)
+    os.makedirs(result_folder_base + '_post/', exist_ok=True)
 
     # Read detection result
     with open(args.pickle_path, 'rb') as f:
@@ -121,7 +127,7 @@ def run():
             path_out = result_folder + '_post/' + str(result_file)
         
             # Link for DanceTrack (AFLink for non-linear dance motion)
-            if 'Dance' in args.dataset:
+            if 'dance' in args.dataset.lower():
                 # Initialize AFLink only when needed
                 model = PostLinker()
                 model.load_state_dict(torch.load('./AFLink/AFLink_epoch20.pth'))
@@ -132,16 +138,18 @@ def run():
                 linker.link()
             
             # Linear Interpolation for SportsMOT (based on MixSort, ICCV 2023)
-            # Sports motion is fast but physically constrained, short-term predictable
-            elif 'Sports' in args.dataset or 'sports' in args.dataset:
+            elif 'sports' in args.dataset.lower():
                 linear_interpolation_only(path_in, path_out, n_min=5, n_dti=20)
         
             # Gaussian Interpolation for MOT (pedestrian scenes)
-            elif 'MOT' in args.dataset:
+            elif 'mot' in args.dataset.lower():
                 gb_interpolation(path_in, path_out, interval=30, tau=12)
+            else:
+                # If no filter hits, copy plain results to post folder to avoid missing files in evaluation.
+                shutil.copy(path_in, path_out)
 
     # Evaluation
-    if 'val' in args.mode or 'train' in args.mode:
+    if args.mode != "test":
         print('Evaluating...')
         eval_tracker = trackers_to_eval + '_post' if args.use_post else trackers_to_eval
         evaluate(args, eval_tracker, args.dataset)
