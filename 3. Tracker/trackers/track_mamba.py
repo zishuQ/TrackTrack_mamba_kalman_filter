@@ -90,44 +90,6 @@ class TrackMamba(BaseTrack):
         self.end_frame_id = frame_id
         self.state = TrackState.New
 
-    def predict(self):
-        # Zero out the velocity of w and h when track is lost or new.
-        if self.state != TrackState.Tracked and 'Dance' in self.args.data_path:
-            self.mean[6] = 0
-            self.mean[7] = 0
-
-        # Use last observation or current mean[:4] as measurement for innovation/DIoU
-        measurement = self.last_observation if self.last_observation is not None else self.mean[:4].copy()
-        
-        # Predict with MambaKalmanFilter (now requires measurement)
-        self.mean, self.covariance = self.kalman_filter.predict(
-            self.mean, self.covariance, measurement, self.track_id
-        )
-
-    def update(self, frame_id, detection):
-        # Update Kalman filter & Feature with MambaKalmanFilter
-        observation = detection.cxcywh.copy()
-        self.mean, self.covariance = self.kalman_filter.update(self.mean, self.covariance,
-                                                               observation, self.track_id)
-        self.last_observation = observation  # Save for next predict()
-        self.update_features(detection.feat.copy(), detection.score)
-
-        # Update history
-        self.history[frame_id] = [detection.box.copy(), detection.score, self.mean.copy(),
-                                  self.covariance.copy(), self.feat.copy()]
-
-        # Update velocity
-        self.velocity = np.zeros((4, 2))
-        for d_t in range(1, self.delta_t + 1):
-            prev_box = get_prev_box(self.history, frame_id, d_t).copy()
-            self.velocity += get_vel(prev_box, detection.x1y1x2y2)
-
-        # Update parameters
-        self.box = detection.box.copy()
-        self.score = detection.score
-        self.end_frame_id = frame_id
-        self.state = TrackState.Tracked if len(self.history.keys()) >= self.args.min_len else TrackState.New
-
     def update_after_kf(self, frame_id, detection):
         """
         Update track attributes after KF update has been done by batch operation.
