@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Track 比较器</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="header">
+        <div>
+          <p class="eyebrow">TRACK VIEWER</p>
+          <h1>结果对比浏览器</h1>
+        </div>
+        <div class="header-controls">
+          <label class="toggle">
+            <input id="syncToggle" type="checkbox" checked />
+            左右同步
+          </label>
+          <label class="toggle">
+            <input id="lockToggle" type="checkbox" />
+            锁定帧差
+          </label>
+          <label class="toggle">
+            <input id="followToggle" type="checkbox" checked />
+            序列跟随
+          </label>
+          <label class="toggle">
+            <input id="diffToggle" type="checkbox" />
+            仅看差异
+          </label>
+          <div class="badge" id="deltaBadge">Δ: 0</div>
+          <label class="toggle">
+            <input id="idToggle" type="checkbox" checked />
+            显示 ID
+          </label>
+          <label class="toggle">
+            <input id="cacheToggle" type="checkbox" />
+            缓存序列
+          </label>
+          <label class="threshold">
+            分数阈值
+            <input id="scoreThreshold" type="number" min="0" max="1" step="0.01" value="0" />
+          </label>
+          <div class="threshold-buttons">
+            <button class="mini" data-threshold="0.3">0.3</button>
+            <button class="mini" data-threshold="0.5">0.5</button>
+            <button class="mini" data-threshold="0.7">0.7</button>
+          </div>
+          <label class="threshold">
+            IoU 阈值
+            <input id="iouThreshold" type="number" min="0.1" max="0.9" step="0.05" value="0.5" />
+          </label>
+        </div>
+        <div class="stats-bar">
+          <span id="matchStats">匹配: -- | 左独有: -- | 右独有: --</span>
+          <div class="stats-actions">
+            <button class="mini" id="scanDiffBtn">扫描差异帧</button>
+            <button class="mini" id="prevDiffBtn">上一差异帧</button>
+            <button class="mini" id="nextDiffBtn">下一差异帧</button>
+          </div>
+          <span class="hint">快捷键: Left/Right 切帧, 点击面板切换焦点</span>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="panel" id="leftPanel">
+          <div class="panel-header">
+            <h2>左侧结果</h2>
+            <div class="selectors">
+              <label>
+                结果文件夹
+                <select class="folderSelect"></select>
+              </label>
+              <label>
+                序列
+                <select class="sequenceSelect"></select>
+              </label>
+            </div>
+          </div>
+
+          <div class="controls">
+            <button class="prevBtn">上一帧</button>
+            <button class="nextBtn">下一帧</button>
+            <label>
+              帧号
+              <input class="frameInput" type="number" min="1" />
+            </label>
+            <label>
+              步长 n
+              <input class="stepInput" type="number" min="1" value="1" />
+            </label>
+            <button class="goBtn">跳转</button>
+          </div>
+
+          <div class="meta">
+            <span class="rangeLabel">帧范围: --</span>
+            <span class="statusLabel"></span>
+            <span class="countLabel"></span>
+          </div>
+
+          <div class="canvas-shell">
+            <canvas class="viewerCanvas"></canvas>
+            <div class="emptyState">等待加载</div>
+          </div>
+        </section>
+
+        <section class="panel" id="rightPanel">
+          <div class="panel-header">
+            <h2>右侧结果</h2>
+            <div class="selectors">
+              <label>
+                结果文件夹
+                <select class="folderSelect"></select>
+              </label>
+              <label>
+                序列
+                <select class="sequenceSelect"></select>
+              </label>
+            </div>
+          </div>
+
+          <div class="controls">
+            <button class="prevBtn">上一帧</button>
+            <button class="nextBtn">下一帧</button>
+            <label>
+              帧号
+              <input class="frameInput" type="number" min="1" />
+            </label>
+            <label>
+              步长 n
+              <input class="stepInput" type="number" min="1" value="1" />
+            </label>
+            <button class="goBtn">跳转</button>
+          </div>
+
+          <div class="meta">
+            <span class="rangeLabel">帧范围: --</span>
+            <span class="statusLabel"></span>
+            <span class="countLabel"></span>
+          </div>
+
+          <div class="canvas-shell">
+            <canvas class="viewerCanvas"></canvas>
+            <div class="emptyState">等待加载</div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
