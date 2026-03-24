@@ -41,7 +41,6 @@ def make_parser():
     # Mamba Kalman Filter
     parser.add_argument("--mamba_model_path", type=str, default=None, 
                        help="Path to MambaKalmanFilter model weights. If None, auto-detect based on dataset.")
-
     return parser
 
 
