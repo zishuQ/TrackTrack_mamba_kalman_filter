@@ -22,6 +22,10 @@ def set_parameters(args, vid_name, mode):
             args.pickle_path = args.pickle_dir + 'mot17_train_custom_0.80.pickle'
             args.pickle_path_95 = args.pickle_dir + 'mot17_train_custom_0.95.pickle'
             args.data_path = args.data_dir + 'MOT17/train/'
+        elif mode == 'all':
+            args.pickle_path = args.pickle_dir + 'mot17_all_0.80.pickle'
+            args.pickle_path_95 = args.pickle_dir + 'mot17_all_0.95.pickle'
+            args.data_path = args.data_dir + 'MOT17/train/'
         else:
             args.pickle_path = args.pickle_dir + 'mot17_test_0.80.pickle'
             args.pickle_path_95 = args.pickle_dir + 'mot17_test_0.95.pickle'
@@ -49,6 +53,10 @@ def set_parameters(args, vid_name, mode):
         elif mode == 'train_custom':
             args.pickle_path = args.pickle_dir + 'mot20_train_custom_0.80.pickle'
             args.pickle_path_95 = args.pickle_dir + 'mot20_train_custom_0.95.pickle'
+            args.data_path = args.data_dir + 'MOT20/train/'
+        elif mode == 'all':
+            args.pickle_path = args.pickle_dir + 'mot20_all_0.80.pickle'
+            args.pickle_path_95 = args.pickle_dir + 'mot20_all_0.95.pickle'
             args.data_path = args.data_dir + 'MOT20/train/'
         else:
             args.pickle_path = args.pickle_dir + 'mot20_test_0.80.pickle'
@@ -120,7 +128,7 @@ def write_results(filename, results):
 
 def evaluate(args, trackers_to_eval, dataset):
     # Determine split name for seqmap
-    split_name = args.mode if args.mode in ['val', 'val_custom', 'train_custom'] else 'val'
+    split_name = args.mode if args.mode in ['val', 'val_custom', 'train_custom', 'all'] else 'val'
     
     # Determine benchmark based on dataset
     if 'DanceTrack' in dataset or 'dancetrack' in dataset.lower():
