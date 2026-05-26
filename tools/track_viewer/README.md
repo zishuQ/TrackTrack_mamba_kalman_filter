@@ -5,7 +5,9 @@
 - 每次前后跳 n 帧
 - 直接输入帧号跳转
 - 左右同步切帧
-- 叠加显示 track id
+- 叠加显示 track id / 置信度
+- 点击图片查看大图并保存当前可视化 PNG
+- 每栏按当前帧 ID 选择显示 / 隐藏哪些框（跨帧保留，切序列重置）
 
 ## 运行
 
@@ -35,3 +37,38 @@ http://127.0.0.1:5000
 - `TRACKVIEW_MOT17_ROOT`
 - `TRACKVIEW_MOT20_ROOT`
 - `TRACKVIEW_SPORTSMOT_ROOT`
+
+## 推荐工作流（SportsMOT val 对比）
+
+1. 先生成每序列 HOTA 差值排序：
+
+```fish
+cd /home/shang/workspace/TrackTrack
+./.venv/bin/python tools/repro_harness/trackeval_compare.py \
+  --dataset SportsMOT \
+  --mode val \
+  --improved-tracker sportsmot_val_0.80_mamba_post_83.92_ablation_baseline \
+  --baseline-tracker sportsmot_val_0.80_mamba
+```
+
+2. 打开浏览器后，左右文件夹分别选择：
+
+- 左侧：`sportsmot_val_0.80_mamba_post_83.92_ablation_baseline`
+- 右侧：`sportsmot_val_0.80_mamba`
+
+3. 按 `per_sequence_delta.csv` 里 `delta_hota` 从大到小，优先检查排名靠前的序列。
+
+4. 浏览时建议打开：
+
+- `左右同步`
+- `序列跟随`
+- `仅看差异`
+- `扫描差异帧`
+
+5. 如果需要导出当前可视化结果：
+
+- 先按当前帧 ID 过滤掉不想展示的框
+- 再直接点击对应栏里的图片放大
+- 在弹层里点 `保存 PNG`
+
+这样可以更快定位提升最明显的帧段。

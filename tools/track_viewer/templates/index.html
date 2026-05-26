@@ -9,49 +9,64 @@
   <body>
     <div class="page">
       <header class="header">
-        <div>
-          <p class="eyebrow">TRACK VIEWER</p>
-          <h1>结果对比浏览器</h1>
+        <div class="header-title">
+          <div>
+            <p class="eyebrow">TRACK VIEWER</p>
+            <h1>结果对比浏览器</h1>
+          </div>
         </div>
         <div class="header-controls">
-          <label class="toggle">
-            <input id="syncToggle" type="checkbox" checked />
-            左右同步
-          </label>
-          <label class="toggle">
-            <input id="lockToggle" type="checkbox" />
-            锁定帧差
-          </label>
-          <label class="toggle">
-            <input id="followToggle" type="checkbox" checked />
-            序列跟随
-          </label>
-          <label class="toggle">
-            <input id="diffToggle" type="checkbox" />
-            仅看差异
-          </label>
-          <div class="badge" id="deltaBadge">Δ: 0</div>
-          <label class="toggle">
-            <input id="idToggle" type="checkbox" checked />
-            显示 ID
-          </label>
-          <label class="toggle">
-            <input id="cacheToggle" type="checkbox" />
-            缓存序列
-          </label>
-          <label class="threshold">
-            分数阈值
-            <input id="scoreThreshold" type="number" min="0" max="1" step="0.01" value="0" />
-          </label>
-          <div class="threshold-buttons">
-            <button class="mini" data-threshold="0.3">0.3</button>
-            <button class="mini" data-threshold="0.5">0.5</button>
-            <button class="mini" data-threshold="0.7">0.7</button>
+          <div class="control-group">
+            <span class="control-group-label">同步</span>
+            <label class="toggle">
+              <input id="syncToggle" type="checkbox" checked />
+              左右同步
+            </label>
+            <label class="toggle">
+              <input id="lockToggle" type="checkbox" />
+              锁定帧差
+            </label>
+            <label class="toggle">
+              <input id="followToggle" type="checkbox" checked />
+              序列跟随
+            </label>
+            <div class="badge" id="deltaBadge">Δ: 0</div>
           </div>
-          <label class="threshold">
-            IoU 阈值
-            <input id="iouThreshold" type="number" min="0.1" max="0.9" step="0.05" value="0.5" />
-          </label>
+          <div class="control-group">
+            <span class="control-group-label">显示</span>
+            <label class="toggle">
+              <input id="idToggle" type="checkbox" checked />
+              ID
+            </label>
+            <label class="toggle">
+              <input id="scoreToggle" type="checkbox" checked />
+              置信度
+            </label>
+            <label class="toggle">
+              <input id="diffToggle" type="checkbox" />
+              仅差异
+            </label>
+            <label class="toggle">
+              <input id="cacheToggle" type="checkbox" />
+              缓存序列
+            </label>
+          </div>
+          <div class="control-group">
+            <span class="control-group-label">阈值</span>
+            <label class="threshold">
+              分数
+              <input id="scoreThreshold" type="number" min="0" max="1" step="0.01" value="0" />
+            </label>
+            <div class="threshold-buttons">
+              <button class="mini" data-threshold="0.3">0.3</button>
+              <button class="mini" data-threshold="0.5">0.5</button>
+              <button class="mini" data-threshold="0.7">0.7</button>
+            </div>
+            <label class="threshold">
+              IoU
+              <input id="iouThreshold" type="number" min="0.1" max="0.9" step="0.05" value="0.5" />
+            </label>
+          </div>
         </div>
         <div class="stats-bar">
           <span id="matchStats">匹配: -- | 左独有: -- | 右独有: --</span>
@@ -60,7 +75,7 @@
             <button class="mini" id="prevDiffBtn">上一差异帧</button>
             <button class="mini" id="nextDiffBtn">下一差异帧</button>
           </div>
-          <span class="hint">快捷键: Left/Right 切帧, 点击面板切换焦点</span>
+          <span class="hint">快捷键: ←/→ 切帧, 点击面板切换焦点</span>
         </div>
       </header>
 
@@ -98,6 +113,18 @@
             <span class="rangeLabel">帧范围: --</span>
             <span class="statusLabel"></span>
             <span class="countLabel"></span>
+          </div>
+
+          <div class="id-filter">
+            <div class="id-filter-bar">
+              <span class="idFilterSummary">当前帧 ID: --</span>
+              <div class="id-filter-actions">
+                <button class="idFilterAction idShowAllBtn" type="button">全显</button>
+                <button class="idFilterAction idHideAllBtn" type="button">全隐藏</button>
+              </div>
+            </div>
+            <div class="idFilterChips"></div>
+            <div class="idFilterEmpty">当前帧无可选 ID</div>
           </div>
 
           <div class="canvas-shell">
@@ -141,12 +168,42 @@
             <span class="countLabel"></span>
           </div>
 
+          <div class="id-filter">
+            <div class="id-filter-bar">
+              <span class="idFilterSummary">当前帧 ID: --</span>
+              <div class="id-filter-actions">
+                <button class="idFilterAction idShowAllBtn" type="button">全显</button>
+                <button class="idFilterAction idHideAllBtn" type="button">全隐藏</button>
+              </div>
+            </div>
+            <div class="idFilterChips"></div>
+            <div class="idFilterEmpty">当前帧无可选 ID</div>
+          </div>
+
           <div class="canvas-shell">
             <canvas class="viewerCanvas"></canvas>
             <div class="emptyState">等待加载</div>
           </div>
         </section>
       </main>
+    </div>
+
+    <div class="image-modal" id="imageModal" hidden>
+      <div class="image-modal-dialog" id="imageModalDialog" role="dialog" aria-modal="true" aria-labelledby="imageModalTitle">
+        <div class="image-modal-header">
+          <div>
+            <p class="eyebrow">IMAGE PREVIEW</p>
+            <h2 id="imageModalTitle">当前可视化预览</h2>
+          </div>
+          <div class="image-modal-actions">
+            <button class="modalAction" id="imageSaveBtn" type="button">保存 PNG</button>
+            <button class="modalAction modalActionGhost" id="imageCloseBtn" type="button">关闭</button>
+          </div>
+        </div>
+        <div class="image-modal-body">
+          <img id="imageModalPreview" alt="当前可视化大图" />
+        </div>
+      </div>
     </div>
 
     <script src="/static/app.js"></script>

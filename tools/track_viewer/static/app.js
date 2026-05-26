@@ -2,6 +2,7 @@ const state = {
   folders: [],
   sync: true,
   showIds: true,
+  showScore: true,
   lockEnabled: false,
   lockOffset: 0,
   cacheEnabled: false,
@@ -11,7 +12,12 @@ const state = {
   diffIou: 0.5,
   diffFrames: [],
   diffScanBusy: false,
+  previewOpen: false,
+  previewFilename: "",
+  previewCanvas: null,
 };
+
+let previewDom = null;
 
 function qs(selector, root = document) {
   return root.querySelector(selector);
@@ -31,6 +37,98 @@ async function fetchJson(url) {
   return res.json();
 }
 
+function sanitizeFilenamePart(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "track_viewer";
+}
+
+function cloneCanvas(sourceCanvas) {
+  const snapshot = document.createElement("canvas");
+  snapshot.width = sourceCanvas.width;
+  snapshot.height = sourceCanvas.height;
+  snapshot.getContext("2d").drawImage(sourceCanvas, 0, 0);
+  return snapshot;
+}
+
+function buildPreviewFilename(panel) {
+  const folder = sanitizeFilenamePart(panel.folderSelect.value);
+  const sequence = sanitizeFilenamePart(panel.sequenceSelect.value);
+  const frame = String(panel.frame).padStart(6, "0");
+  return `${folder}_${sequence}_${panel.side}_frame_${frame}.png`;
+}
+
+function openPreviewModal(panel) {
+  if (
+    !previewDom ||
+    panel.isLoading ||
+    !panel.lastImage ||
+    !panel.canvas.width ||
+    !panel.canvas.height
+  ) {
+    return;
+  }
+  const snapshot = cloneCanvas(panel.canvas);
+  state.previewCanvas = snapshot;
+  state.previewFilename = buildPreviewFilename(panel);
+  state.previewOpen = true;
+  previewDom.title.textContent = `${panel.side === "left" ? "左侧" : "右侧"} | ${
+    panel.sequenceSelect.value || "--"
+  } | 帧 ${panel.frame}`;
+  previewDom.image.src = snapshot.toDataURL("image/png");
+  previewDom.root.hidden = false;
+  document.body.classList.add("modal-open");
+}
+
+function closePreviewModal() {
+  if (!previewDom) {
+    return;
+  }
+  state.previewOpen = false;
+  state.previewFilename = "";
+  state.previewCanvas = null;
+  previewDom.root.hidden = true;
+  previewDom.image.removeAttribute("src");
+  document.body.classList.remove("modal-open");
+}
+
+function downloadPreviewFallback() {
+  if (!state.previewCanvas) {
+    return;
+  }
+  const link = document.createElement("a");
+  link.href = state.previewCanvas.toDataURL("image/png");
+  link.download = state.previewFilename || "track_viewer.png";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+function downloadPreview() {
+  if (!state.previewCanvas) {
+    return;
+  }
+  if (typeof state.previewCanvas.toBlob !== "function") {
+    downloadPreviewFallback();
+    return;
+  }
+  state.previewCanvas.toBlob((blob) => {
+    if (!blob) {
+      downloadPreviewFallback();
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = state.previewFilename || "track_viewer.png";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }, "image/png");
+}
+
 function buildPanel(panelEl) {
   const panel = {
     root: panelEl,
@@ -45,14 +143,25 @@ function buildPanel(panelEl) {
     rangeLabel: qs(".rangeLabel", panelEl),
     statusLabel: qs(".statusLabel", panelEl),
     countLabel: qs(".countLabel", panelEl),
+    canvasShell: qs(".canvas-shell", panelEl),
     canvas: qs(".viewerCanvas", panelEl),
     emptyState: qs(".emptyState", panelEl),
+    idFilterRoot: qs(".id-filter", panelEl),
+    idFilterSummary: qs(".idFilterSummary", panelEl),
+    idFilterChips: qs(".idFilterChips", panelEl),
+    idFilterEmpty: qs(".idFilterEmpty", panelEl),
+    idShowAllBtn: qs(".idShowAllBtn", panelEl),
+    idHideAllBtn: qs(".idHideAllBtn", panelEl),
     ctx: qs(".viewerCanvas", panelEl).getContext("2d"),
     minFrame: 1,
     maxFrame: 1,
     frame: 1,
     cacheFrames: null,
     lastBoxes: [],
+    lastImage: null,
+    availableIds: [],
+    hiddenIds: new Set(),
+    isLoading: false,
   };
 
   panel.prevBtn.addEventListener("click", () => stepFrame(panel, -1));
@@ -65,11 +174,13 @@ function buildPanel(panelEl) {
   });
 
   panel.folderSelect.addEventListener("change", () => {
+    resetPanelIdFilter(panel);
     loadSequences(panel);
     state.diffFrames = [];
   });
 
   panel.sequenceSelect.addEventListener("change", () => {
+    resetPanelIdFilter(panel);
     if (state.followSequence) {
       followSequence(panel);
     }
@@ -78,6 +189,23 @@ function buildPanel(panelEl) {
   });
 
   panel.root.addEventListener("click", () => setActivePanel(panel));
+
+  panel.canvasShell.addEventListener("click", () => {
+    if (document.activeElement && document.activeElement !== document.body) {
+      document.activeElement.blur();
+    }
+    openPreviewModal(panel);
+  });
+
+  panel.idShowAllBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    showAllIds(panel);
+  });
+
+  panel.idHideAllBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    hideAllIds(panel);
+  });
 
   return panel;
 }
@@ -224,7 +352,119 @@ function followSequence(sourcePanel) {
     return;
   }
   targetPanel.sequenceSelect.value = targetValue;
+  resetPanelIdFilter(targetPanel);
   loadFrameRange(targetPanel, true);
+}
+
+function resetPanelIdFilter(panel) {
+  panel.availableIds = [];
+  panel.hiddenIds.clear();
+  renderIdFilter(panel);
+}
+
+function getFilteredEntries(panel, boxes, options = {}) {
+  const { applyDiff = state.diffOnly, applyManual = true } = options;
+  let filtered = boxes
+    .filter((box) => Number(box.score ?? 1) >= state.scoreThreshold)
+    .map((box, thresholdIndex) => ({ box, thresholdIndex }));
+
+  if (applyDiff) {
+    const compareInfo = getCompareInfo();
+    const unmatched = getUnmatchedSet(panel, compareInfo);
+    if (unmatched) {
+      filtered = filtered.filter((entry) => unmatched.has(entry.thresholdIndex));
+    }
+  }
+
+  if (applyManual) {
+    filtered = filtered.filter((entry) => !panel.hiddenIds.has(String(entry.box.id)));
+  }
+
+  return filtered;
+}
+
+function renderIdFilter(panel) {
+  const ids = panel.availableIds || [];
+  const hiddenCount = ids.filter((id) => panel.hiddenIds.has(String(id))).length;
+  panel.idFilterSummary.textContent = ids.length
+    ? `当前帧 ID: ${ids.length} | 已隐藏: ${hiddenCount}`
+    : "当前帧 ID: 0";
+  panel.idFilterChips.innerHTML = "";
+  panel.idFilterEmpty.style.display = ids.length ? "none" : "block";
+
+  ids.forEach((id) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = `id-chip${panel.hiddenIds.has(String(id)) ? " is-hidden" : ""}`;
+    chip.textContent = `ID ${id}`;
+    chip.addEventListener("click", (event) => {
+      event.stopPropagation();
+      togglePanelId(panel, id);
+    });
+    panel.idFilterChips.appendChild(chip);
+  });
+}
+
+function updateAvailableIds(panel, boxes) {
+  const ids = getFilteredEntries(panel, boxes, { applyManual: false })
+    .map((entry) => entry.box.id)
+    .filter((id) => id !== undefined && id !== null);
+  panel.availableIds = Array.from(new Set(ids)).sort((left, right) => Number(left) - Number(right));
+  renderIdFilter(panel);
+}
+
+function paintPanel(panel) {
+  if (!panel.lastImage) {
+    panel.ctx.clearRect(0, 0, panel.canvas.width, panel.canvas.height);
+    panel.emptyState.style.display = "block";
+    panel.countLabel.textContent = `框 ${countVisibleBoxes(panel, panel.lastBoxes)}`;
+    return;
+  }
+  panel.canvas.width = panel.lastImage.naturalWidth;
+  panel.canvas.height = panel.lastImage.naturalHeight;
+  panel.ctx.clearRect(0, 0, panel.canvas.width, panel.canvas.height);
+  panel.ctx.drawImage(panel.lastImage, 0, 0);
+  drawBoxes(panel, panel.lastBoxes);
+  panel.emptyState.style.display = "none";
+  panel.statusLabel.textContent = `帧 ${panel.frame}`;
+  panel.countLabel.textContent = `框 ${countVisibleBoxes(panel, panel.lastBoxes)}`;
+}
+
+function refreshPanel(panel) {
+  updateAvailableIds(panel, panel.lastBoxes);
+  paintPanel(panel);
+}
+
+function refreshPanelsDisplay() {
+  const panels = window.viewerPanels || [];
+  panels.forEach((panel) => refreshPanel(panel));
+  updateCompareStats();
+}
+
+function togglePanelId(panel, id) {
+  const key = String(id);
+  if (panel.hiddenIds.has(key)) {
+    panel.hiddenIds.delete(key);
+  } else {
+    panel.hiddenIds.add(key);
+  }
+  refreshPanel(panel);
+}
+
+function showAllIds(panel) {
+  if (!panel.hiddenIds.size) {
+    return;
+  }
+  panel.hiddenIds.clear();
+  refreshPanel(panel);
+}
+
+function hideAllIds(panel) {
+  if (!panel.availableIds.length) {
+    return;
+  }
+  panel.availableIds.forEach((id) => panel.hiddenIds.add(String(id)));
+  refreshPanel(panel);
 }
 
 async function renderFrame(panel) {
@@ -235,6 +475,8 @@ async function renderFrame(panel) {
     return;
   }
 
+  panel.isLoading = true;
+  panel.lastImage = null;
   panel.statusLabel.textContent = "加载中...";
   let boxes = [];
   if (state.cacheEnabled && panel.cacheFrames) {
@@ -251,6 +493,7 @@ async function renderFrame(panel) {
     boxes = data.boxes || [];
   }
   panel.lastBoxes = boxes;
+  updateAvailableIds(panel, boxes);
 
   const imgUrl = `/api/image?folder=${encodeURIComponent(folder)}&sequence=${encodeURIComponent(
     sequence
@@ -258,20 +501,17 @@ async function renderFrame(panel) {
 
   const image = new Image();
   image.onload = () => {
-    panel.canvas.width = image.naturalWidth;
-    panel.canvas.height = image.naturalHeight;
-    panel.ctx.clearRect(0, 0, panel.canvas.width, panel.canvas.height);
-    panel.ctx.drawImage(image, 0, 0);
-    drawBoxes(panel, boxes);
-    panel.emptyState.style.display = "none";
-    panel.statusLabel.textContent = `帧 ${frame}`;
-    panel.countLabel.textContent = `框 ${countVisibleBoxes(panel, boxes)}`;
-    updateCompareStats();
+    panel.isLoading = false;
+    panel.lastImage = image;
+    refreshPanelsDisplay();
   };
   image.onerror = () => {
+    panel.isLoading = false;
+    panel.lastImage = null;
     panel.ctx.clearRect(0, 0, panel.canvas.width, panel.canvas.height);
     panel.emptyState.style.display = "block";
     panel.statusLabel.textContent = "找不到图片";
+    panel.countLabel.textContent = `框 ${countVisibleBoxes(panel, boxes)}`;
   };
   image.src = imgUrl;
 }
@@ -281,9 +521,8 @@ function drawBoxes(panel, boxes) {
     panel.countLabel.textContent = "框 0";
     return;
   }
-  const threshold = state.scoreThreshold;
-  const filtered = filterBoxes(panel, boxes, threshold);
-  if (!filtered.length) {
+  const filteredEntries = getFilteredEntries(panel, boxes);
+  if (!filteredEntries.length) {
     panel.countLabel.textContent = "框 0";
     return;
   }
@@ -293,10 +532,11 @@ function drawBoxes(panel, boxes) {
   panel.ctx.font = `${Math.max(12, panel.canvas.width / 80)}px Space Grotesk`;
   panel.ctx.textBaseline = "top";
 
-  filtered.forEach((box, index) => {
+  filteredEntries.forEach((entry) => {
+    const box = entry.box;
     const score = Number(box.score ?? 1);
     const color = colorForId(box.id || 0);
-    const isUnmatched = unmatched ? unmatched.has(index) : false;
+    const isUnmatched = unmatched ? unmatched.has(entry.thresholdIndex) : false;
     panel.ctx.strokeStyle = color;
     panel.ctx.fillStyle = color;
     panel.ctx.setLineDash(isUnmatched ? [6, 4] : []);
@@ -325,26 +565,18 @@ function buildLabel(box, score) {
   if (state.showIds) {
     parts.push(`ID ${box.id}`);
   }
-  parts.push(score.toFixed(2));
+  if (state.showScore) {
+    parts.push(score.toFixed(2));
+  }
   return parts.join(" ");
 }
 
 function countVisibleBoxes(panel, boxes) {
-  const threshold = state.scoreThreshold;
-  return filterBoxes(panel, boxes, threshold).length;
+  return getFilteredEntries(panel, boxes).length;
 }
 
-function filterBoxes(panel, boxes, threshold) {
-  let filtered = boxes.filter((box) => Number(box.score ?? 1) >= threshold);
-  if (!state.diffOnly) {
-    return filtered;
-  }
-  const compareInfo = getCompareInfo();
-  const unmatched = getUnmatchedSet(panel, compareInfo);
-  if (!unmatched) {
-    return filtered;
-  }
-  return filtered.filter((_, index) => unmatched.has(index));
+function filterBoxes(panel, boxes, options = {}) {
+  return getFilteredEntries(panel, boxes, options).map((entry) => entry.box);
 }
 
 function getOtherPanel(panel) {
@@ -612,6 +844,25 @@ function updateDeltaBadge() {
 function init() {
   const panels = [buildPanel(qs("#leftPanel")), buildPanel(qs("#rightPanel"))];
   window.viewerPanels = panels;
+  previewDom = {
+    root: qs("#imageModal"),
+    dialog: qs("#imageModalDialog"),
+    title: qs("#imageModalTitle"),
+    image: qs("#imageModalPreview"),
+    saveBtn: qs("#imageSaveBtn"),
+    closeBtn: qs("#imageCloseBtn"),
+  };
+
+  previewDom.root.addEventListener("click", () => closePreviewModal());
+  previewDom.dialog.addEventListener("click", (event) => event.stopPropagation());
+  previewDom.saveBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    downloadPreview();
+  });
+  previewDom.closeBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    closePreviewModal();
+  });
 
   qs("#syncToggle").addEventListener("change", (event) => {
     state.sync = event.target.checked;
@@ -629,7 +880,12 @@ function init() {
 
   qs("#idToggle").addEventListener("change", (event) => {
     state.showIds = event.target.checked;
-    panels.forEach((panel) => renderFrame(panel));
+    refreshPanelsDisplay();
+  });
+
+  qs("#scoreToggle").addEventListener("change", (event) => {
+    state.showScore = event.target.checked;
+    refreshPanelsDisplay();
   });
 
   qs("#cacheToggle").addEventListener("change", (event) => {
@@ -644,13 +900,13 @@ function init() {
       const value = Number(btn.dataset.threshold);
       btn.classList.toggle("active", value === state.scoreThreshold);
     });
-    panels.forEach((panel) => renderFrame(panel));
+    refreshPanelsDisplay();
     state.diffFrames = [];
   });
 
   qs("#iouThreshold").addEventListener("change", (event) => {
     state.diffIou = Number(event.target.value) || 0.5;
-    panels.forEach((panel) => renderFrame(panel));
+    refreshPanelsDisplay();
     state.diffFrames = [];
   });
 
@@ -660,8 +916,7 @@ function init() {
 
   qs("#diffToggle").addEventListener("change", (event) => {
     state.diffOnly = event.target.checked;
-    panels.forEach((panel) => renderFrame(panel));
-    updateCompareStats();
+    refreshPanelsDisplay();
     state.diffFrames = [];
   });
 
@@ -673,7 +928,7 @@ function init() {
       document.querySelectorAll(".threshold-buttons .mini").forEach((btn) => {
         btn.classList.toggle("active", btn === button);
       });
-      panels.forEach((panel) => renderFrame(panel));
+      refreshPanelsDisplay();
       state.diffFrames = [];
     });
   });
@@ -691,14 +946,27 @@ function init() {
   });
 
   document.addEventListener("keydown", (event) => {
-    if (["INPUT", "SELECT", "TEXTAREA"].includes(event.target.tagName)) {
+    if (state.previewOpen) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closePreviewModal();
+      }
       return;
+    }
+    if (["INPUT", "SELECT", "TEXTAREA"].includes(event.target.tagName)) {
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        event.target.blur();
+      } else {
+        return;
+      }
     }
     const activePanel = window.activePanel || panels[0];
     if (event.key === "ArrowLeft") {
+      event.preventDefault();
       stepFrame(activePanel, -1);
     }
     if (event.key === "ArrowRight") {
+      event.preventDefault();
       stepFrame(activePanel, 1);
     }
   });
