@@ -119,6 +119,10 @@ class Tracker(object):
         # Predict the current location with KF
         [t.predict() for t in self.tracks]
 
+        # Change every track as lost tracks
+        for t in self.tracks:
+            t.mark_lost()
+
         # Mark "remove" to lost tracks which are too old
         for track in self.tracks:
             if self.frame_id - track.end_frame_id > self.max_time_lost:
@@ -127,4 +131,4 @@ class Tracker(object):
         # Filter out the removed tracks
         self.tracks = [t for t in self.tracks if t.state != TrackState.Removed]
 
-        return [t for t in self.tracks if t.state == TrackState.Tracked]
+        return []

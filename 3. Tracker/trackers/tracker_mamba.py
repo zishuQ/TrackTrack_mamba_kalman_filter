@@ -252,6 +252,10 @@ class TrackerMamba(object):
         # Predict the current location with KF (OPTIMIZED: batch operation)
         self._batch_predict(self.tracks)
 
+        # Change every track as lost tracks
+        for t in self.tracks:
+            t.mark_lost()
+
         # Mark "remove" to lost tracks which are too old
         for track in self.tracks:
             if self.frame_id - track.end_frame_id > self.max_time_lost:
@@ -267,4 +271,4 @@ class TrackerMamba(object):
         # Clear GPU cache
         self._predicted_gpu_cache = None
 
-        return [t for t in self.tracks if t.state == TrackState.Tracked]
+        return []

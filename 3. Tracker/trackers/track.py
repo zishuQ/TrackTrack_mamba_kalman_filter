@@ -13,9 +13,9 @@ def get_vel(b_1, b_2):
 
     # Get velocities
     vel_lt = np.array([b_2[0] - b_1[0], b_2[1] - b_1[1]]) / norm_lt
-    vel_lb = np.array([b_2[0] - b_1[0], b_2[3] - b_1[1]]) / norm_lb
+    vel_lb = np.array([b_2[0] - b_1[0], b_2[3] - b_1[3]]) / norm_lb
     vel_rt = np.array([b_2[2] - b_1[2], b_2[1] - b_1[1]]) / norm_rt
-    vel_rb = np.array([b_2[2] - b_1[2], b_2[3] - b_1[1]]) / norm_rb
+    vel_rb = np.array([b_2[2] - b_1[2], b_2[3] - b_1[3]]) / norm_rb
 
     return np.stack([vel_lt, vel_lb, vel_rt, vel_rb], axis=0)
 
@@ -110,7 +110,8 @@ class Track(BaseTrack):
         self.velocity = np.zeros((4, 2))
         for d_t in range(1, self.delta_t + 1):
             prev_box = get_prev_box(self.history, frame_id, d_t).copy()
-            self.velocity += get_vel(prev_box, detection.x1y1x2y2)
+            self.velocity += get_vel(prev_box, detection.x1y1x2y2) / d_t
+        self.velocity /= self.delta_t
 
         # Update parameters
         self.box = detection.box.copy()
