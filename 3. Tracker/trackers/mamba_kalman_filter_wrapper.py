@@ -27,6 +27,9 @@ class MambaKalmanFilterWrapper(object):
     def __init__(self, model_path=None, device='cuda'):
         from mamba_kalman_filter.mamba_kalmanfilter import MambaKalmanFilter
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
+        checkpoint = None
+        if model_path is not None and os.path.exists(model_path):
+            checkpoint = torch.load(model_path, map_location='cpu')
         self.filter = MambaKalmanFilter(Config()).to(self.device)
         self.filter.eval()  # Set to evaluation mode
         # Image dimensions for normalization (will be set per video sequence)
@@ -36,8 +39,7 @@ class MambaKalmanFilterWrapper(object):
         self._norm_factor_4_gpu = None
         self._norm_factor_8_gpu = None
         # Load pretrained weights if provided
-        if model_path is not None and os.path.exists(model_path):
-            checkpoint = torch.load(model_path, map_location=self.device)
+        if checkpoint is not None:
             if 'model_state_dict' in checkpoint:
                 self.filter.load_state_dict(checkpoint['model_state_dict'])
             else:
@@ -114,7 +116,7 @@ class MambaKalmanFilterWrapper(object):
     
     # ========== Batch Operations (Optimized for reduced CPU-GPU transfers) ==========
     
-    def batch_predict(self, means, covariances, measurements, track_ids):
+    def batch_predict(self, means, covariances, measurements, track_ids, q_scale=None):
         """
         Batch predict all tracks' next states (single GPU transfer + single Mamba forward).
         
@@ -138,6 +140,9 @@ class MambaKalmanFilterWrapper(object):
             means_gpu = torch.from_numpy(means).float().to(self.device)
             covariances_gpu = torch.from_numpy(covariances).float().to(self.device)
             measurements_gpu = torch.from_numpy(measurements).float().to(self.device)
+            q_scale_gpu = None
+            if q_scale is not None:
+                q_scale_gpu = torch.from_numpy(q_scale).float().to(self.device)
             # Normalize on GPU
             means_norm = means_gpu / self._norm_factor_8_gpu
             measurements_norm = measurements_gpu / self._norm_factor_4_gpu
@@ -148,6 +153,7 @@ class MambaKalmanFilterWrapper(object):
                 covariances_gpu,    # (N, 8, 8)
                 measurements_norm,  # (N, 4)
                 track_ids,
+                q_scale=q_scale_gpu,
             )
             # Denormalize on GPU
             means_out = means_out * self._norm_factor_8_gpu
@@ -192,7 +198,7 @@ class MambaKalmanFilterWrapper(object):
             # Single transfer back to CPU
             return means_out.cpu().numpy(), covariances_out.cpu().numpy()
     
-    def batch_predict_gpu(self, means_gpu, covariances_gpu, measurements_gpu, track_ids):
+    def batch_predict_gpu(self, means_gpu, covariances_gpu, measurements_gpu, track_ids, q_scale_gpu=None):
         """
         GPU-native batch predict. Accepts/returns GPU tensors (pixel coords).
         
@@ -212,7 +218,7 @@ class MambaKalmanFilterWrapper(object):
         means_norm = means_gpu / self._norm_factor_8_gpu
         measurements_norm = measurements_gpu / self._norm_factor_4_gpu
         means_out, covariances_out = self.filter.batch_predict(
-            means_norm, covariances_gpu, measurements_norm, track_ids,
+            means_norm, covariances_gpu, measurements_norm, track_ids, q_scale=q_scale_gpu,
         )
         means_out = means_out * self._norm_factor_8_gpu
         return means_out, covariances_out

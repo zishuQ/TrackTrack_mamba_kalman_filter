@@ -7,7 +7,7 @@ from AFLink.model import PostLinker
 from AFLink.dataset import LinkData
 
 
-result_folder = '/home/shang/workspace/TrackTrack/outputs/3. track/sportsmot_test_0.80_mamba_exp14_3_76.49_post'
+result_folder = '/home/shang/workspace/TrackTrack/outputs/3. track/sportsmot_test_0.80_mamba_post'
 output_folder = result_folder + '_post'
 os.makedirs(output_folder, exist_ok=True)
 

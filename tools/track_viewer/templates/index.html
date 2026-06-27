@@ -39,6 +39,10 @@
               ID
             </label>
             <label class="toggle">
+              <input id="gtIdToggle" type="checkbox" />
+              GT ID
+            </label>
+            <label class="toggle">
               <input id="scoreToggle" type="checkbox" checked />
               置信度
             </label>
@@ -118,9 +122,15 @@
           <div class="id-filter">
             <div class="id-filter-bar">
               <span class="idFilterSummary">当前帧 ID: --</span>
-              <div class="id-filter-actions">
-                <button class="idFilterAction idShowAllBtn" type="button">全显</button>
-                <button class="idFilterAction idHideAllBtn" type="button">全隐藏</button>
+              <div class="id-filter-controls">
+                <div class="threshold-buttons panelFilterModes">
+                  <button class="mini active" type="button" data-filter-mode="track">Track ID</button>
+                  <button class="mini" type="button" data-filter-mode="gt">GT ID</button>
+                </div>
+                <div class="id-filter-actions">
+                  <button class="idFilterAction idShowAllBtn" type="button">全显</button>
+                  <button class="idFilterAction idHideAllBtn" type="button">全隐藏</button>
+                </div>
               </div>
             </div>
             <div class="idFilterChips"></div>
@@ -171,9 +181,15 @@
           <div class="id-filter">
             <div class="id-filter-bar">
               <span class="idFilterSummary">当前帧 ID: --</span>
-              <div class="id-filter-actions">
-                <button class="idFilterAction idShowAllBtn" type="button">全显</button>
-                <button class="idFilterAction idHideAllBtn" type="button">全隐藏</button>
+              <div class="id-filter-controls">
+                <div class="threshold-buttons panelFilterModes">
+                  <button class="mini active" type="button" data-filter-mode="track">Track ID</button>
+                  <button class="mini" type="button" data-filter-mode="gt">GT ID</button>
+                </div>
+                <div class="id-filter-actions">
+                  <button class="idFilterAction idShowAllBtn" type="button">全显</button>
+                  <button class="idFilterAction idHideAllBtn" type="button">全隐藏</button>
+                </div>
               </div>
             </div>
             <div class="idFilterChips"></div>

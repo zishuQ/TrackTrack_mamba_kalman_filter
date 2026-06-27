@@ -16,6 +16,7 @@ class Tracker(object):
 
         # Set global motion compensation model
         self.cmc = CMC(vid_name)
+        self.disable_gmc = getattr(args, 'disable_gmc', False)
 
     def init_tracks(self, dets):
         # Get alive tracks, iou_similarity, and scores
@@ -52,8 +53,9 @@ class Tracker(object):
 
         # Camera motion compensation
         warp_matrix = self.cmc.get_warp_matrix()
-        apply_cmc(tracked_lost, warp_matrix)
-        apply_cmc(new, warp_matrix)
+        if not self.disable_gmc:
+            apply_cmc(tracked_lost, warp_matrix)
+            apply_cmc(new, warp_matrix)
 
         # Predict the current location with KF
         [t.predict() for t in tracked_lost]
@@ -64,7 +66,8 @@ class Tracker(object):
         dets = dets_high + dets_low + dets_del_high
         matches, u_tracks, u_dets = iterative_assignment(tracked_lost, dets_high, dets_low, dets_del_high,
                                                          self.args.match_thr, self.args.penalty_p, self.args.penalty_q,
-                                                         self.args.reduce_step, self.frame_id)
+                                                         self.args.reduce_step, self.frame_id,
+                                                         no_reid=getattr(self.args, 'no_reid', False))
 
         # Update matched tracks
         for t, d in matches:
@@ -81,7 +84,8 @@ class Tracker(object):
         # Association between (new tracks) & (left high confidence detections)
         matches, u_tracks, u_dets = iterative_assignment(new, dets_high_left, [], [], self.args.match_thr,
                                                          self.args.penalty_p, self.args.penalty_q,
-                                                         self.args.reduce_step, self.frame_id)
+                                                         self.args.reduce_step, self.frame_id,
+                                                         no_reid=getattr(self.args, 'no_reid', False))
 
         # Update matched tracks
         for t, d in matches:
@@ -114,7 +118,8 @@ class Tracker(object):
 
         # Camera motion compensation
         warp_matrix = self.cmc.get_warp_matrix()
-        apply_cmc(self.tracks, warp_matrix)
+        if not self.disable_gmc:
+            apply_cmc(self.tracks, warp_matrix)
 
         # Predict the current location with KF
         [t.predict() for t in self.tracks]

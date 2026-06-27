@@ -1,6 +1,9 @@
+import os
 import random
-import trackeval
+import tempfile
+
 import numpy as np
+import trackeval
 
 # Randomly select bbox color for each object id
 color = [(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)) for i in range(5000)]
@@ -126,30 +129,54 @@ def write_results(filename, results):
     f.close()
 
 
-def evaluate(args, trackers_to_eval, dataset):
+def _default_trackeval_log_path():
+    return os.path.abspath(
+        os.path.join(os.path.dirname(__file__), '..', '..', 'outputs', 'error_log.txt')
+    )
+
+
+def _trackeval_seqmap_file(seqmap_folder, split_name):
+    return os.path.abspath(
+        os.path.join(os.path.dirname(__file__), '..', 'trackeval', 'seqmap', seqmap_folder, f'{split_name}.txt')
+    )
+
+
+def _get_trackeval_benchmark_and_seqmap(dataset):
+    lowered = dataset.lower()
+    if 'dancetrack' in lowered:
+        return 'MOT17', 'dancetrack'
+    if 'sportsmot' in lowered:
+        return 'MOT17', 'sportsmot'
+    if 'mot20' in lowered:
+        return 'MOT20', 'mot20'
+    return 'MOT17', 'mot17'
+
+
+def get_trackeval_configs(
+    args,
+    trackers_to_eval,
+    dataset,
+    output_folder=None,
+    output_summary=False,
+    output_detailed=False,
+    tracker_sub_folder='',
+    output_sub_folder='',
+):
     # Determine split name for seqmap
     split_name = args.mode if args.mode in ['val', 'val_custom', 'train_custom', 'all'] else 'val'
-    
-    # Determine benchmark based on dataset
-    if 'DanceTrack' in dataset or 'dancetrack' in dataset.lower():
-        benchmark = 'MOT17'  # DanceTrack uses MOT17 format
-        seqmap_folder = 'dancetrack'
-    elif 'SportsMOT' in dataset or 'sportsmot' in dataset.lower():
-        benchmark = 'MOT17'  # SportsMOT uses MOT17 format
-        seqmap_folder = 'sportsmot'
-    elif 'MOT20' in dataset:
-        benchmark = 'MOT20'
-        seqmap_folder = 'mot20'
+
+    benchmark, seqmap_folder = _get_trackeval_benchmark_and_seqmap(dataset)
+    if isinstance(trackers_to_eval, str):
+        trackers = [trackers_to_eval]
     else:
-        benchmark = 'MOT17'
-        seqmap_folder = 'mot17'
-    
+        trackers = list(trackers_to_eval)
+
     # Set evaluation configurations
     eval_config = {'USE_PARALLEL': False,
                    'NUM_PARALLEL_CORES': 1,
                    'BREAK_ON_ERROR': True,
                    'RETURN_ON_ERROR': False,
-                   'LOG_ON_ERROR': '../outputs/error_log.txt',
+                   'LOG_ON_ERROR': _default_trackeval_log_path(),
 
                    'PRINT_RESULTS': False,
                    'PRINT_ONLY_COMBINED': False,
@@ -157,29 +184,34 @@ def evaluate(args, trackers_to_eval, dataset):
                    'TIME_PROGRESS': False,
                    'DISPLAY_LESS_PROGRESS': True,
 
-                   'OUTPUT_SUMMARY': False,
-                   'OUTPUT_EMPTY_CLASSES': False,
-                   'OUTPUT_DETAILED': False,
+                   'OUTPUT_SUMMARY': output_summary,
+                   'OUTPUT_EMPTY_CLASSES': output_summary or output_detailed,
+                   'OUTPUT_DETAILED': output_detailed,
                    'PLOT_CURVES': False}
 
     dataset_config = {'GT_FOLDER': args.data_path,
                       'TRACKERS_FOLDER': args.output_dir,
-                      'OUTPUT_FOLDER': None,
-                      'TRACKERS_TO_EVAL': [trackers_to_eval],
+                      'OUTPUT_FOLDER': output_folder,
+                      'TRACKERS_TO_EVAL': trackers,
                       'CLASSES_TO_EVAL': ['pedestrian'],
                       'BENCHMARK': benchmark,
                       'SPLIT_TO_EVAL': split_name,
                       'INPUT_AS_ZIP': False,
                       'PRINT_CONFIG': False,
                       'DO_PREPROC': True,
-                      'TRACKER_SUB_FOLDER': '',
-                      'OUTPUT_SUB_FOLDER': '',
+                      'TRACKER_SUB_FOLDER': tracker_sub_folder,
+                      'OUTPUT_SUB_FOLDER': output_sub_folder,
                       'TRACKER_DISPLAY_NAMES': None,
                       'SEQMAP_FOLDER': None,
-                      'SEQMAP_FILE': './trackeval/seqmap/%s/%s.txt' % (seqmap_folder, split_name),
+                      'SEQMAP_FILE': _trackeval_seqmap_file(seqmap_folder, split_name),
                       'SEQ_INFO': None,
                       'GT_LOC_FORMAT': '{gt_folder}/{seq}/gt/gt.txt',
                       'SKIP_SPLIT_FOL': True}
+    return eval_config, dataset_config
+
+
+def evaluate(args, trackers_to_eval, dataset):
+    eval_config, dataset_config = get_trackeval_configs(args, trackers_to_eval, dataset)
 
     # Set configuration
     evaluator = trackeval.Evaluator(eval_config)
@@ -197,3 +229,63 @@ def evaluate(args, trackers_to_eval, dataset):
     # Print
     print(f'{"HOTA":<10}{"MOTA":<10}{"IDF1":<10}{"DetA":<10}{"AssA":<10}', flush=True)
     print(f'{hota:<10.6f}{mota:<10.6f}{idf1:<10.6f}{deta:<10.6f}{assa:<10.6f}', flush=True)
+    if getattr(args, 'print_per_sequence_metrics', False):
+        print_per_sequence_metrics(res, trackers_to_eval)
+
+
+def print_per_sequence_metrics(res, trackers_to_eval):
+    """Print per-sequence HOTA/CLEAR/Identity metrics without changing combined parsing."""
+    tracker_res = res['MotChallenge2DBox'][trackers_to_eval]
+    sequence_names = [seq for seq in tracker_res.keys() if seq != 'COMBINED_SEQ']
+    if not sequence_names:
+        return
+
+    print('Per-sequence metrics:', flush=True)
+    print(f'{"SEQ":<24}{"HOTA":<10}{"MOTA":<10}{"IDF1":<10}{"DetA":<10}{"AssA":<10}', flush=True)
+    for seq in sequence_names:
+        seq_res = tracker_res[seq]['pedestrian']
+        seq_hota = np.mean(seq_res['HOTA']['HOTA']).item()
+        seq_idf1 = seq_res['Identity']['IDF1']
+        seq_mota = seq_res['CLEAR']['MOTA']
+        seq_assa = np.mean(seq_res['HOTA']['AssA']).item()
+        seq_deta = np.mean(seq_res['HOTA']['DetA']).item()
+        print(
+            f'{seq:<24}{seq_hota:<10.6f}{seq_mota:<10.6f}'
+            f'{seq_idf1:<10.6f}{seq_deta:<10.6f}{seq_assa:<10.6f}',
+            flush=True,
+        )
+    print('', flush=True)
+
+
+def evaluate_sequences(args, trackers_to_eval, dataset, sequences):
+    """Evaluate an existing tracker folder on a custom subset of sequences."""
+    eval_config, dataset_config = get_trackeval_configs(args, trackers_to_eval, dataset)
+
+    seqmap_tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, prefix='seqmap_')
+    try:
+        seqmap_tmp.write('name\n')
+        for seq in sequences:
+            seqmap_tmp.write(seq + '\n')
+        seqmap_tmp.close()
+        dataset_config['SEQMAP_FILE'] = seqmap_tmp.name
+
+        evaluator = trackeval.Evaluator(eval_config)
+        dataset_list = [trackeval.datasets.MotChallenge2DBox(dataset_config)]
+        metrics_list = [trackeval.metrics.HOTA(), trackeval.metrics.CLEAR(), trackeval.metrics.Identity()]
+        res, _ = evaluator.evaluate(dataset_list, metrics_list)
+
+        hota = np.mean(res['MotChallenge2DBox'][trackers_to_eval]['COMBINED_SEQ']['pedestrian']['HOTA']['HOTA']).item()
+        idf1 = res['MotChallenge2DBox'][trackers_to_eval]['COMBINED_SEQ']['pedestrian']['Identity']['IDF1']
+        mota = res['MotChallenge2DBox'][trackers_to_eval]['COMBINED_SEQ']['pedestrian']['CLEAR']['MOTA']
+        assa = np.mean(res['MotChallenge2DBox'][trackers_to_eval]['COMBINED_SEQ']['pedestrian']['HOTA']['AssA']).item()
+        deta = np.mean(res['MotChallenge2DBox'][trackers_to_eval]['COMBINED_SEQ']['pedestrian']['HOTA']['DetA']).item()
+
+        print(f'{"HOTA":<10}{"MOTA":<10}{"IDF1":<10}{"DetA":<10}{"AssA":<10}', flush=True)
+        print(f'{hota:<10.6f}{mota:<10.6f}{idf1:<10.6f}{deta:<10.6f}{assa:<10.6f}', flush=True)
+        if getattr(args, 'print_per_sequence_metrics', False):
+            print_per_sequence_metrics(res, trackers_to_eval)
+    finally:
+        try:
+            os.unlink(seqmap_tmp.name)
+        except FileNotFoundError:
+            pass

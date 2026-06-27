@@ -191,18 +191,21 @@ def associate(cost, match_thr):
 
 
 def iterative_assignment(tracks, dets_high, dets_low, dets_del_high, match_thr, penalty_p, penalty_q,
-                        reduce_step, frame_id, d_t=3):
+                        reduce_step, frame_id, d_t=3, no_reid=False):
     # Initialization
     matches = []
     dets = dets_high + dets_low + dets_del_high
 
     # Calculate preliminaries
     iou_sim, iou_dist = iou_distance(tracks, dets)
-    cos_dist = cos_distance(tracks, dets)
 
     # Calculate cost
-    cost = 0.50 * iou_dist + 0.50 * cos_dist
-    cost += 0.10 * conf_distance(tracks, dets) + 0.05 * angle_distance(tracks, dets, frame_id, d_t)
+    if no_reid:
+        cost = iou_dist + 0.10 * conf_distance(tracks, dets) + 0.05 * angle_distance(tracks, dets, frame_id, d_t)
+    else:
+        cos_dist = cos_distance(tracks, dets)
+        cost = 0.50 * iou_dist + 0.50 * cos_dist
+        cost += 0.10 * conf_distance(tracks, dets) + 0.05 * angle_distance(tracks, dets, frame_id, d_t)
 
     # Give penalty
     cost[:, len(dets_high):len(dets_high + dets_low)] += penalty_p

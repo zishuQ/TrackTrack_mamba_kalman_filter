@@ -2,7 +2,7 @@ import os
 from utils.gbi import linear_interpolation_only
 
 # 输入和输出文件夹
-result_folder = "/home/shang/workspace/TrackTrack/outputs/3. track/sportsmot_test_0.80_mamba_exp14_3_76.49"
+result_folder = "/home/shang/workspace/TrackTrack/outputs/3. track/sportsmot_test_0.80_mamba"
 output_folder = result_folder + "_post"
 os.makedirs(output_folder, exist_ok=True)
 

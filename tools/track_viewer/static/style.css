@@ -296,6 +296,19 @@ button:hover {
   color: var(--ink);
 }
 
+.id-filter-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.panelFilterModes .mini {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
 .id-filter-actions {
   display: inline-flex;
   gap: 8px;

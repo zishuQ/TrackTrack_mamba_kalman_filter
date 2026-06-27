@@ -1,6 +1,6 @@
 import numpy as np
 from trackers.utils import get_prev_box
-from trackers.kalman_filter import KalmanFilter
+from trackers.kalman_filter import create_kalman_filter
 
 
 def get_vel(b_1, b_2):
@@ -76,7 +76,7 @@ class Track(BaseTrack):
         self.track_id = counter.get_track_id()
 
         # Initiate Kalman filter
-        self.kalman_filter = KalmanFilter()
+        self.kalman_filter = create_kalman_filter(getattr(self.args, 'kf_type', 'nsa'))
         self.mean, self.covariance = self.kalman_filter.initiate(self.cxcywh.copy())
 
         # Initiate history

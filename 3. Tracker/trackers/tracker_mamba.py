@@ -18,6 +18,7 @@ class TrackerMamba(object):
 
         # Set global motion compensation model
         self.cmc = CMC(vid_name)
+        self.disable_gmc = getattr(args, 'disable_gmc', False)
         
         # Initialize shared Kalman filter (MambaKalmanFilter)
         self.shared_kalman_filter = None
@@ -26,7 +27,7 @@ class TrackerMamba(object):
         # to skip redundant CPU→GPU transfers for matched tracks
         self._predicted_gpu_cache = None  # (means_gpu, covs_gpu, {track_id: idx})
 
-    def _batch_predict(self, tracks):
+    def _batch_predict(self, tracks, force_missing=False):
         """
         Batch predict all tracks' next states (optimized: single GPU transfer).
         
@@ -50,11 +51,11 @@ class TrackerMamba(object):
         means = np.stack([t.mean for t in tracks], axis=0)  # (N, 8)
         covariances = np.stack([t.covariance for t in tracks], axis=0)  # (N, 8, 8)
         
-        # Collect measurements (used for computing innovation and DIoU)
+        # Q-net uses the last real observation, matching the training-time predict input.
         measurements = []
         for t in tracks:
-            meas = t.last_observation if t.last_observation is not None else t.mean[:4].copy()
-            measurements.append(meas)
+            last_obs = t.last_observation if t.last_observation is not None else t.mean[:4].copy()
+            measurements.append(last_obs.copy())
         measurements = np.stack(measurements, axis=0)  # (N, 4)
         
         track_ids = [t.track_id for t in tracks]
@@ -175,18 +176,22 @@ class TrackerMamba(object):
 
         # Camera motion compensation
         warp_matrix = self.cmc.get_warp_matrix()
-        apply_cmc(tracked_lost, warp_matrix)
-        apply_cmc(new, warp_matrix)
+        if not self.disable_gmc:
+            apply_cmc(tracked_lost, warp_matrix)
+            apply_cmc(new, warp_matrix)
+
+        no_current_detections = len(dets_high) == 0 and len(dets_low) == 0 and len(dets_del_high) == 0
 
         # Predict the current location with KF (OPTIMIZED: batch operation)
-        self._batch_predict(tracked_lost + new)
+        self._batch_predict(tracked_lost + new, force_missing=no_current_detections)
 
         # ==============================================================================================================
         # Association between (tracked and lost tracks) & (high confidence detections)
         dets = dets_high + dets_low + dets_del_high
         matches, u_tracks, u_dets = iterative_assignment(tracked_lost, dets_high, dets_low, dets_del_high,
                                                          self.args.match_thr, self.args.penalty_p, self.args.penalty_q,
-                                                         self.args.reduce_step, self.frame_id)
+                                                         self.args.reduce_step, self.frame_id,
+                                                         no_reid=getattr(self.args, 'no_reid', False))
 
         # Update matched tracks (OPTIMIZED: batch KF update + individual attribute updates)
         matched_pairs = [(tracked_lost[t], dets[d]) for t, d in matches]
@@ -205,7 +210,8 @@ class TrackerMamba(object):
         # Association between (new tracks) & (left high confidence detections)
         matches, u_tracks, u_dets = iterative_assignment(new, dets_high_left, [], [], self.args.match_thr,
                                                          self.args.penalty_p, self.args.penalty_q,
-                                                         self.args.reduce_step, self.frame_id)
+                                                         self.args.reduce_step, self.frame_id,
+                                                         no_reid=getattr(self.args, 'no_reid', False))
 
         # Update matched tracks (OPTIMIZED: batch KF update + individual attribute updates)
         matched_pairs_new = [(new[t], dets_high_left[d]) for t, d in matches]
@@ -247,10 +253,11 @@ class TrackerMamba(object):
 
         # Camera motion compensation
         warp_matrix = self.cmc.get_warp_matrix()
-        apply_cmc(self.tracks, warp_matrix)
+        if not self.disable_gmc:
+            apply_cmc(self.tracks, warp_matrix)
 
         # Predict the current location with KF (OPTIMIZED: batch operation)
-        self._batch_predict(self.tracks)
+        self._batch_predict(self.tracks, force_missing=True)
 
         # Change every track as lost tracks
         for t in self.tracks:

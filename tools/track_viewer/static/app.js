@@ -2,6 +2,7 @@ const state = {
   folders: [],
   sync: true,
   showIds: true,
+  showGtIds: false,
   showScore: true,
   lockEnabled: false,
   lockOffset: 0,
@@ -18,6 +19,7 @@ const state = {
 };
 
 let previewDom = null;
+const GT_UNMATCHED_KEY = "__unmatched__";
 
 function qs(selector, root = document) {
   return root.querySelector(selector);
@@ -152,6 +154,7 @@ function buildPanel(panelEl) {
     idFilterEmpty: qs(".idFilterEmpty", panelEl),
     idShowAllBtn: qs(".idShowAllBtn", panelEl),
     idHideAllBtn: qs(".idHideAllBtn", panelEl),
+    filterModeButtons: Array.from(panelEl.querySelectorAll(".panelFilterModes [data-filter-mode]")),
     ctx: qs(".viewerCanvas", panelEl).getContext("2d"),
     minFrame: 1,
     maxFrame: 1,
@@ -159,8 +162,12 @@ function buildPanel(panelEl) {
     cacheFrames: null,
     lastBoxes: [],
     lastImage: null,
-    availableIds: [],
-    hiddenIds: new Set(),
+    hasGt: false,
+    filterMode: "track",
+    trackFilterItems: [],
+    gtFilterItems: [],
+    hiddenTrackIds: new Set(),
+    hiddenGtIds: new Set(),
     isLoading: false,
   };
 
@@ -207,6 +214,16 @@ function buildPanel(panelEl) {
     hideAllIds(panel);
   });
 
+  panel.filterModeButtons.forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      panel.filterMode = button.dataset.filterMode || "track";
+      syncPanelFilterModeButtons(panel);
+      refreshPanelsDisplay();
+    });
+  });
+
+  syncPanelFilterModeButtons(panel);
   return panel;
 }
 
@@ -259,6 +276,7 @@ async function loadFrameRange(panel, preserveFrame) {
     );
     panel.minFrame = data.min || 1;
     panel.maxFrame = data.max || panel.minFrame;
+    panel.hasGt = Boolean(data.has_gt);
     panel.frame = preserveFrame
       ? clamp(panel.frame, panel.minFrame, panel.maxFrame)
       : panel.minFrame;
@@ -279,6 +297,7 @@ async function loadSequenceCache(panel, preserveFrame) {
   panel.cacheFrames = data.frames || {};
   panel.minFrame = data.min || 1;
   panel.maxFrame = data.max || panel.minFrame;
+  panel.hasGt = Boolean(data.has_gt);
   panel.frame = preserveFrame
     ? clamp(panel.frame, panel.minFrame, panel.maxFrame)
     : panel.minFrame;
@@ -357,15 +376,70 @@ function followSequence(sourcePanel) {
 }
 
 function resetPanelIdFilter(panel) {
-  panel.availableIds = [];
-  panel.hiddenIds.clear();
+  panel.trackFilterItems = [];
+  panel.gtFilterItems = [];
+  panel.hiddenTrackIds.clear();
+  panel.hiddenGtIds.clear();
   renderIdFilter(panel);
+}
+
+function getEffectiveFilterMode(panel) {
+  return panel.filterMode === "gt" && panel.hasGt ? "gt" : "track";
+}
+
+function getActiveHiddenSet(panel) {
+  return getEffectiveFilterMode(panel) === "gt" ? panel.hiddenGtIds : panel.hiddenTrackIds;
+}
+
+function getActiveFilterItems(panel) {
+  return getEffectiveFilterMode(panel) === "gt" ? panel.gtFilterItems : panel.trackFilterItems;
+}
+
+function getFilterKeyForBox(mode, box) {
+  if (mode === "gt") {
+    return box.gt_id === undefined || box.gt_id === null
+      ? GT_UNMATCHED_KEY
+      : String(box.gt_id);
+  }
+  return String(box.id);
+}
+
+function buildTrackFilterItems(entries) {
+  const ids = entries
+    .map((entry) => entry.box.id)
+    .filter((id) => id !== undefined && id !== null);
+  return Array.from(new Set(ids))
+    .sort((left, right) => Number(left) - Number(right))
+    .map((id) => ({ key: String(id), label: `ID ${id}` }));
+}
+
+function buildGtFilterItems(entries) {
+  const gtIds = [];
+  let hasUnmatched = false;
+  entries.forEach((entry) => {
+    const gtId = entry.box.gt_id;
+    if (gtId === undefined || gtId === null) {
+      hasUnmatched = true;
+      return;
+    }
+    gtIds.push(gtId);
+  });
+  const items = Array.from(new Set(gtIds))
+    .sort((left, right) => Number(left) - Number(right))
+    .map((id) => ({ key: String(id), label: `GT ${id}` }));
+  if (hasUnmatched) {
+    items.push({ key: GT_UNMATCHED_KEY, label: "未匹配" });
+  }
+  return items;
 }
 
 function getFilteredEntries(panel, boxes, options = {}) {
   const { applyDiff = state.diffOnly, applyManual = true } = options;
+  const mode = getEffectiveFilterMode(panel);
   let filtered = boxes
     .filter((box) => Number(box.score ?? 1) >= state.scoreThreshold)
+    // Keep thresholdIndex aligned with getCompareInfo(), which applies the same
+    // score-only ordering before diff-mode looks up unmatched entries.
     .map((box, thresholdIndex) => ({ box, thresholdIndex }));
 
   if (applyDiff) {
@@ -377,39 +451,61 @@ function getFilteredEntries(panel, boxes, options = {}) {
   }
 
   if (applyManual) {
-    filtered = filtered.filter((entry) => !panel.hiddenIds.has(String(entry.box.id)));
+    const hiddenSet = mode === "gt" ? panel.hiddenGtIds : panel.hiddenTrackIds;
+    filtered = filtered.filter(
+      (entry) => !hiddenSet.has(getFilterKeyForBox(mode, entry.box))
+    );
   }
 
   return filtered;
 }
 
 function renderIdFilter(panel) {
-  const ids = panel.availableIds || [];
-  const hiddenCount = ids.filter((id) => panel.hiddenIds.has(String(id))).length;
-  panel.idFilterSummary.textContent = ids.length
-    ? `当前帧 ID: ${ids.length} | 已隐藏: ${hiddenCount}`
-    : "当前帧 ID: 0";
+  const requestedGtMode = panel.filterMode === "gt";
+  const effectiveMode = getEffectiveFilterMode(panel);
+  const items = getActiveFilterItems(panel);
+  const hiddenSet = getActiveHiddenSet(panel);
+  const hiddenCount = items.filter((item) => hiddenSet.has(item.key)).length;
+  if (requestedGtMode && !panel.hasGt) {
+    panel.idFilterSummary.textContent = "当前序列无 GT，按 Track ID 过滤";
+  } else if (effectiveMode === "gt") {
+    panel.idFilterSummary.textContent = items.length
+      ? `当前帧 GT: ${items.length} | 已隐藏: ${hiddenCount}`
+      : "当前帧 GT: 0";
+  } else {
+    panel.idFilterSummary.textContent = items.length
+      ? `当前帧 ID: ${items.length} | 已隐藏: ${hiddenCount}`
+      : "当前帧 ID: 0";
+  }
   panel.idFilterChips.innerHTML = "";
-  panel.idFilterEmpty.style.display = ids.length ? "none" : "block";
+  panel.idFilterEmpty.textContent =
+    effectiveMode === "gt" ? "当前帧无可选 GT ID" : "当前帧无可选 ID";
+  panel.idFilterEmpty.style.display = items.length ? "none" : "block";
 
-  ids.forEach((id) => {
+  items.forEach((item) => {
     const chip = document.createElement("button");
     chip.type = "button";
-    chip.className = `id-chip${panel.hiddenIds.has(String(id)) ? " is-hidden" : ""}`;
-    chip.textContent = `ID ${id}`;
+    chip.className = `id-chip${hiddenSet.has(item.key) ? " is-hidden" : ""}`;
+    chip.textContent = item.label;
     chip.addEventListener("click", (event) => {
       event.stopPropagation();
-      togglePanelId(panel, id);
+      togglePanelId(panel, item.key);
     });
     panel.idFilterChips.appendChild(chip);
   });
 }
 
+function syncPanelFilterModeButtons(panel) {
+  panel.filterModeButtons.forEach((button) => {
+    const mode = button.dataset.filterMode || "track";
+    button.classList.toggle("active", mode === panel.filterMode);
+  });
+}
+
 function updateAvailableIds(panel, boxes) {
-  const ids = getFilteredEntries(panel, boxes, { applyManual: false })
-    .map((entry) => entry.box.id)
-    .filter((id) => id !== undefined && id !== null);
-  panel.availableIds = Array.from(new Set(ids)).sort((left, right) => Number(left) - Number(right));
+  const entries = getFilteredEntries(panel, boxes, { applyManual: false });
+  panel.trackFilterItems = buildTrackFilterItems(entries);
+  panel.gtFilterItems = panel.hasGt ? buildGtFilterItems(entries) : [];
   renderIdFilter(panel);
 }
 
@@ -443,27 +539,31 @@ function refreshPanelsDisplay() {
 
 function togglePanelId(panel, id) {
   const key = String(id);
-  if (panel.hiddenIds.has(key)) {
-    panel.hiddenIds.delete(key);
+  const hiddenSet = getActiveHiddenSet(panel);
+  if (hiddenSet.has(key)) {
+    hiddenSet.delete(key);
   } else {
-    panel.hiddenIds.add(key);
+    hiddenSet.add(key);
   }
   refreshPanel(panel);
 }
 
 function showAllIds(panel) {
-  if (!panel.hiddenIds.size) {
+  const hiddenSet = getActiveHiddenSet(panel);
+  if (!hiddenSet.size) {
     return;
   }
-  panel.hiddenIds.clear();
+  hiddenSet.clear();
   refreshPanel(panel);
 }
 
 function hideAllIds(panel) {
-  if (!panel.availableIds.length) {
+  const items = getActiveFilterItems(panel);
+  const hiddenSet = getActiveHiddenSet(panel);
+  if (!items.length) {
     return;
   }
-  panel.availableIds.forEach((id) => panel.hiddenIds.add(String(id)));
+  items.forEach((item) => hiddenSet.add(item.key));
   refreshPanel(panel);
 }
 
@@ -489,6 +589,7 @@ async function renderFrame(panel) {
     );
     panel.minFrame = data.min || panel.minFrame;
     panel.maxFrame = data.max || panel.maxFrame;
+    panel.hasGt = Boolean(data.has_gt);
     panel.rangeLabel.textContent = `帧范围: ${panel.minFrame} - ${panel.maxFrame}`;
     boxes = data.boxes || [];
   }
@@ -564,6 +665,9 @@ function buildLabel(box, score) {
   const parts = [];
   if (state.showIds) {
     parts.push(`ID ${box.id}`);
+  }
+  if (state.showGtIds && box.gt_id !== undefined && box.gt_id !== null) {
+    parts.push(`GT ${box.gt_id}`);
   }
   if (state.showScore) {
     parts.push(score.toFixed(2));
@@ -692,6 +796,7 @@ async function getFrameMap(panel) {
   panel.cacheFrames = data.frames || {};
   panel.minFrame = data.min || panel.minFrame;
   panel.maxFrame = data.max || panel.maxFrame;
+  panel.hasGt = Boolean(data.has_gt);
   panel.rangeLabel.textContent = `帧范围: ${panel.minFrame} - ${panel.maxFrame}`;
   return panel.cacheFrames;
 }
@@ -883,6 +988,11 @@ function init() {
     refreshPanelsDisplay();
   });
 
+  qs("#gtIdToggle").addEventListener("change", (event) => {
+    state.showGtIds = event.target.checked;
+    refreshPanelsDisplay();
+  });
+
   qs("#scoreToggle").addEventListener("change", (event) => {
     state.showScore = event.target.checked;
     refreshPanelsDisplay();
@@ -896,7 +1006,7 @@ function init() {
 
   qs("#scoreThreshold").addEventListener("change", (event) => {
     state.scoreThreshold = Number(event.target.value) || 0;
-    document.querySelectorAll(".threshold-buttons .mini").forEach((btn) => {
+    document.querySelectorAll(".threshold-buttons [data-threshold]").forEach((btn) => {
       const value = Number(btn.dataset.threshold);
       btn.classList.toggle("active", value === state.scoreThreshold);
     });
@@ -920,12 +1030,12 @@ function init() {
     state.diffFrames = [];
   });
 
-  document.querySelectorAll(".threshold-buttons .mini").forEach((button) => {
+  document.querySelectorAll(".threshold-buttons [data-threshold]").forEach((button) => {
     button.addEventListener("click", () => {
       const value = Number(button.dataset.threshold);
       qs("#scoreThreshold").value = value.toFixed(2);
       state.scoreThreshold = value;
-      document.querySelectorAll(".threshold-buttons .mini").forEach((btn) => {
+      document.querySelectorAll(".threshold-buttons [data-threshold]").forEach((btn) => {
         btn.classList.toggle("active", btn === button);
       });
       refreshPanelsDisplay();

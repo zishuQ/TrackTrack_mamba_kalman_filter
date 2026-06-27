@@ -68,6 +68,10 @@ python detect.py -f "exps/yolox_x_dancetrack_test.py" -c "weights/dancetrack.pth
 python detect.py -f "exps/yolox_x_sportsmot_val.py" -c "weights/SportsMOT_yolox_x_mix.tar" --nms 0.80 -n "../outputs/1. det/sportsmot_val_0.80.pickle" -b 1 -d 1 --fp16 --fuse
 python detect.py -f "exps/yolox_x_sportsmot_val.py" -c "weights/SportsMOT_yolox_x_mix.tar" --nms 0.95 -n "../outputs/1. det/sportsmot_val_0.95.pickle" -b 1 -d 1 --fp16 --fuse
 
+# For SportsMOT train
+/home/shang/workspace/TrackTrack/.venv/bin/python detect.py -f "exps/yolox_x_sportsmot_train.py" -c "weights/SportsMOT_yolox_x_mix.tar" --nms 0.80 -n "../outputs/1. det/sportsmot_train_0.80.pickle" -b 1 -d 1 --fp16 --fuse
+/home/shang/workspace/TrackTrack/.venv/bin/python detect.py -f "exps/yolox_x_sportsmot_train.py" -c "weights/SportsMOT_yolox_x_mix.tar" --nms 0.95 -n "../outputs/1. det/sportsmot_train_0.95.pickle" -b 1 -d 1 --fp16 --fuse
+
 # For SportsMOT test
 python detect.py -f "exps/yolox_x_sportsmot_test.py" -c "weights/SportsMOT_yolox_x_mix.tar" --nms 0.80 -n "../outputs/1. det/sportsmot_test_0.80.pickle" -b 1 -d 1 --fp16 --fuse
 python detect.py -f "exps/yolox_x_sportsmot_test.py" -c "weights/SportsMOT_yolox_x_mix.tar" --nms 0.95 -n "../outputs/1. det/sportsmot_test_0.95.pickle" -b 1 -d 1 --fp16 --fuse
