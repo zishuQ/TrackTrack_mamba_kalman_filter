@@ -22,7 +22,6 @@ class TrackAPU(BaseTrack):
 
         self.apu_local_queue = None
         self.apu_history_mask = None
-        self.apu_identity_token = None
         self.apu_pred_feat = None
 
     def update_features(self, feat, score):
@@ -33,7 +32,7 @@ class TrackAPU(BaseTrack):
         self.track_id = counter.get_track_id()
         self.kalman_filter = create_kalman_filter(getattr(self.args, "kf_type", "nsa"))
         self.mean, self.covariance = self.kalman_filter.initiate(self.cxcywh.copy())
-        self.apu_local_queue, self.apu_history_mask, self.apu_identity_token = apu_adapter.init_track_state(
+        self.apu_local_queue, self.apu_history_mask = apu_adapter.init_track_state(
             self.raw_feat.squeeze(0)
         )
         self.history[frame_id] = [self.box.copy(), self.score.copy(), self.mean.copy(), self.covariance.copy(), self.feat.copy()]

@@ -77,7 +77,6 @@ def make_parser():
     parser.add_argument("--apu-model-path", type=str, default="/home/shang/workspace/diffusion_appearance/checkpoints/apu_diff_full.pth")
     parser.add_argument("--apu-repo-dir", type=str, default="/home/shang/workspace/diffusion_appearance")
     parser.add_argument("--apu-device", type=str, default="cuda")
-    parser.add_argument("--apu-cost-mode", type=str, default="pred", choices=["pred", "identity", "avg", "min"])
     parser.add_argument("--apu-sample-steps", type=int, default=1, help="APUDiff sampling steps. Default keeps one-step DiffMOT-style inference.")
     parser.add_argument("--apu-stochastic", action="store_true", help="Use stochastic APUDiff sampling for ablation. Default is deterministic.")
     parser.add_argument(
@@ -109,7 +108,6 @@ def track(args, detections, detections_95, data_path, result_folder, mode):
         model_path=args.apu_model_path,
         repo_dir=args.apu_repo_dir,
         device=args.apu_device,
-        cost_mode=args.apu_cost_mode,
         sample_steps=args.apu_sample_steps,
         stochastic=args.apu_stochastic,
         history_update_mode=args.apu_history_update_mode,
@@ -185,7 +183,6 @@ def run(args):
         model_path=args.apu_model_path,
         repo_dir=args.apu_repo_dir,
         device=args.apu_device,
-        cost_mode=args.apu_cost_mode,
         sample_steps=args.apu_sample_steps,
         stochastic=args.apu_stochastic,
         history_update_mode=args.apu_history_update_mode,
