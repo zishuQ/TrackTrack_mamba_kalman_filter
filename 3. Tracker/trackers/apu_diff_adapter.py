@@ -131,18 +131,26 @@ class APUDiffAdapter:
         local_queue = np.repeat(z[None, :], self.history_len, axis=0).astype(np.float32)
         history_mask = np.zeros((self.history_len,), dtype=np.float32)
         history_mask[-1] = 1.0
-        return local_queue, history_mask
+        with torch.no_grad():
+            identity = self.model.init_identity(torch.from_numpy(z).float().to(self.device)).cpu().numpy()
+        return local_queue, history_mask, identity.astype(np.float32)
 
     def predict_tracks(self, tracks):
-        ready = [t for t in tracks if getattr(t, "apu_local_queue", None) is not None]
+        ready = [
+            t for t in tracks
+            if getattr(t, "apu_local_queue", None) is not None
+            and getattr(t, "apu_identity_state", None) is not None
+        ]
         if not ready:
             return
         local_queue = np.stack([t.apu_local_queue for t in ready], axis=0).astype(np.float32)
         history_mask = np.stack([t.apu_history_mask for t in ready], axis=0).astype(np.float32)
+        identity_state = np.stack([t.apu_identity_state for t in ready], axis=0).astype(np.float32)
         with torch.no_grad():
             pred = self.model.predict(
                 torch.from_numpy(local_queue).to(self.device),
                 torch.from_numpy(history_mask).to(self.device),
+                identity_state=torch.from_numpy(identity_state).to(self.device),
                 deterministic=not self.stochastic,
                 sample_steps=self.sample_steps,
             ).cpu().numpy()
@@ -204,6 +212,13 @@ class APUDiffAdapter:
         if norm > 0:
             next_feat = next_feat / norm
 
+        with torch.no_grad():
+            identity = self.model.update_identity(
+                torch.from_numpy(track.apu_identity_state).float().to(self.device),
+                torch.from_numpy(np.asarray(det_z, dtype=np.float32)).float().to(self.device),
+            ).cpu().numpy()
+
         track.apu_local_queue = np.concatenate([track.apu_local_queue[1:], next_feat[None, :]], axis=0)
         track.apu_history_mask = np.concatenate([track.apu_history_mask[1:], np.ones((1,), dtype=np.float32)], axis=0)
+        track.apu_identity_state = identity.astype(np.float32)
         track.apu_pred_feat = None
