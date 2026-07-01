@@ -38,40 +38,41 @@ python train_net.py --num-gpus 1 --config-file 'configs/DanceTrack/sbs_S50.yml'
 
 
 ## Feature Extraction
-Detection + feature extraction results will be created under "../outputs/2. det_feat/" as pickle files
+Detection + feature extraction results will be created under "../outputs/2. det_feat/" as pickle files.
+Only extract features for the `0.95` detection cache; the tracker reconstructs the
+logical `0.80` view from this cache plus an idx file.
 ```
 # For MOT17 validation
-python ext_feats.py --data_path '/home/shang/datasets/MOT17/train/' --pickle_path '../outputs/1. det/mot17_val_0.80.pickle' --output_path '../outputs/2. det_feat/mot17_val_0.80.pickle' --config_path 'configs/MOT17_half/sbs_S50.yml' --weight_path 'weights/mot17_half_sbs_S50.pth'
 python ext_feats.py --data_path '/home/shang/datasets/MOT17/train/' --pickle_path '../outputs/1. det/mot17_val_0.95.pickle' --output_path '../outputs/2. det_feat/mot17_val_0.95.pickle' --config_path 'configs/MOT17_half/sbs_S50.yml' --weight_path 'weights/mot17_half_sbs_S50.pth'
 
 # For MOT17 test
-python ext_feats.py --data_path '/home/shang/datasets/MOT17/test/' --pickle_path '../outputs/1. det/mot17_test_0.80.pickle' --output_path '../outputs/2. det_feat/mot17_test_0.80.pickle' --config_path 'configs/MOT17/sbs_S50.yml' --weight_path 'weights/mot17_sbs_S50.pth'
 python ext_feats.py --data_path '/home/shang/datasets/MOT17/test/' --pickle_path '../outputs/1. det/mot17_test_0.95.pickle' --output_path '../outputs/2. det_feat/mot17_test_0.95.pickle' --config_path 'configs/MOT17/sbs_S50.yml' --weight_path 'weights/mot17_sbs_S50.pth'
 
 # For MOT20 validation
-python ext_feats.py --data_path '/home/shang/datasets/MOT20/train/' --pickle_path '../outputs/1. det/mot20_val_0.80.pickle' --output_path '../outputs/2. det_feat/mot20_val_0.80.pickle' --config_path 'configs/MOT20_half/sbs_S50.yml' --weight_path 'weights/mot20_half_sbs_S50.pth'
 python ext_feats.py --data_path '/home/shang/datasets/MOT20/train/' --pickle_path '../outputs/1. det/mot20_val_0.95.pickle' --output_path '../outputs/2. det_feat/mot20_val_0.95.pickle' --config_path 'configs/MOT20_half/sbs_S50.yml' --weight_path 'weights/mot20_half_sbs_S50.pth'
 
 # For MOT20 test
-python ext_feats.py --data_path '/home/shang/datasets/MOT20/test/' --pickle_path '../outputs/1. det/mot20_test_0.80.pickle' --output_path '../outputs/2. det_feat/mot20_test_0.80.pickle' --config_path 'configs/MOT20/sbs_S50.yml' --weight_path 'weights/mot20_sbs_S50.pth'
 python ext_feats.py --data_path '/home/shang/datasets/MOT20/test/' --pickle_path '../outputs/1. det/mot20_test_0.95.pickle' --output_path '../outputs/2. det_feat/mot20_test_0.95.pickle' --config_path 'configs/MOT20/sbs_S50.yml' --weight_path 'weights/mot20_sbs_S50.pth'
 
 # For DanceTrack validation
-python ext_feats.py --data_path '/home/shang/datasets/DanceTrack/val/' --pickle_path '../outputs/1. det/dance_val_0.80.pickle' --output_path '../outputs/2. det_feat/dance_val_0.80.pickle' --config_path 'configs/DanceTrack/sbs_S50.yml' --weight_path 'weights/dance_sbs_S50.pth'
 python ext_feats.py --data_path '/home/shang/datasets/DanceTrack/val/' --pickle_path '../outputs/1. det/dance_val_0.95.pickle' --output_path '../outputs/2. det_feat/dance_val_0.95.pickle' --config_path 'configs/DanceTrack/sbs_S50.yml' --weight_path 'weights/dance_sbs_S50.pth'
 
 # For DanceTrack test
-python ext_feats.py --data_path '/home/shang/datasets/DanceTrack/test/' --pickle_path '../outputs/1. det/dance_test_0.80.pickle' --output_path '../outputs/2. det_feat/dance_test_0.80.pickle' --config_path 'configs/DanceTrack/sbs_S50.yml' --weight_path 'weights/dance_sbs_S50.pth'
 python ext_feats.py --data_path '/home/shang/datasets/DanceTrack/test/' --pickle_path '../outputs/1. det/dance_test_0.95.pickle' --output_path '../outputs/2. det_feat/dance_test_0.95.pickle' --config_path 'configs/DanceTrack/sbs_S50.yml' --weight_path 'weights/dance_sbs_S50.pth'
 
 # For SportsMOT validation
-python ext_feats.py --data_path '/home/shang/datasets/SportsMOT/dataset/val/' --pickle_path '../outputs/1. det/sportsmot_val_0.80.pickle' --output_path '../outputs/2. det_feat/sportsmot_val_0.80.pickle' --config_path 'configs/SportsMOT/sbs_S50.yml' --weight_path 'weights/sports_sbs_S50.pth'
 python ext_feats.py --data_path '/home/shang/datasets/SportsMOT/dataset/val/' --pickle_path '../outputs/1. det/sportsmot_val_0.95.pickle' --output_path '../outputs/2. det_feat/sportsmot_val_0.95.pickle' --config_path 'configs/SportsMOT/sbs_S50.yml' --weight_path 'weights/sports_sbs_S50.pth'
 
 # For SportsMOT test
-python ext_feats.py --data_path '/home/shang/datasets/SportsMOT/dataset/test/' --pickle_path '../outputs/1. det/sportsmot_test_0.80.pickle' --output_path '../outputs/2. det_feat/sportsmot_test_0.80.pickle' --config_path 'configs/SportsMOT/sbs_S50.yml' --weight_path 'weights/sports_sbs_S50.pth'
 python ext_feats.py --data_path '/home/shang/datasets/SportsMOT/dataset/test/' --pickle_path '../outputs/1. det/sportsmot_test_0.95.pickle' --output_path '../outputs/2. det_feat/sportsmot_test_0.95.pickle' --config_path 'configs/SportsMOT/sbs_S50.yml' --weight_path 'weights/sports_sbs_S50.pth'
 
+```
+
+After extracting `0.95` features, build the compact idx files from the repository root:
+
+```bash
+cd ..
+python scripts/build_nms_idx_from_95.py --overwrite
 ```
 
 

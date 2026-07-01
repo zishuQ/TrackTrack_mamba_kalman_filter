@@ -9,29 +9,31 @@ import trackeval
 color = [(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)) for i in range(5000)]
 
 
+def _set_detection_cache_paths(args, prefix):
+    args.det_feat_prefix = prefix
+    args.target_pickle_path = os.path.join(args.pickle_dir, f'{prefix}_0.80.pickle')
+    args.pickle_path_95 = os.path.join(args.pickle_dir, f'{prefix}_0.95.pickle')
+    args.pickle_path = args.pickle_path_95
+
+
 def set_parameters(args, vid_name, mode):
     # Set properly for each dataset
     if 'MOT17' in vid_name:
         # Path
         if mode == 'val':
-            args.pickle_path = args.pickle_dir + 'mot17_val_0.80.pickle'
-            args.pickle_path_95 = args.pickle_dir + 'mot17_val_0.95.pickle'
+            _set_detection_cache_paths(args, 'mot17_val')
             args.data_path = args.data_dir + 'MOT17/train/'
         elif mode == 'val_custom':
-            args.pickle_path = args.pickle_dir + 'mot17_val_custom_0.80.pickle'
-            args.pickle_path_95 = args.pickle_dir + 'mot17_val_custom_0.95.pickle'
+            _set_detection_cache_paths(args, 'mot17_val_custom')
             args.data_path = args.data_dir + 'MOT17/train/'
         elif mode == 'train_custom':
-            args.pickle_path = args.pickle_dir + 'mot17_train_custom_0.80.pickle'
-            args.pickle_path_95 = args.pickle_dir + 'mot17_train_custom_0.95.pickle'
+            _set_detection_cache_paths(args, 'mot17_train_custom')
             args.data_path = args.data_dir + 'MOT17/train/'
         elif mode == 'all':
-            args.pickle_path = args.pickle_dir + 'mot17_all_0.80.pickle'
-            args.pickle_path_95 = args.pickle_dir + 'mot17_all_0.95.pickle'
+            _set_detection_cache_paths(args, 'mot17_all')
             args.data_path = args.data_dir + 'MOT17/train/'
         else:
-            args.pickle_path = args.pickle_dir + 'mot17_test_0.80.pickle'
-            args.pickle_path_95 = args.pickle_dir + 'mot17_test_0.95.pickle'
+            _set_detection_cache_paths(args, 'mot17_test')
             args.data_path = args.data_dir + 'MOT17/test/'
 
         if '01' in vid_name or '03' in vid_name or '12' in vid_name:
@@ -46,24 +48,19 @@ def set_parameters(args, vid_name, mode):
 
     elif 'MOT20' in vid_name:
         if mode == 'val':
-            args.pickle_path = args.pickle_dir + 'mot20_val_0.80.pickle'
-            args.pickle_path_95 = args.pickle_dir + 'mot20_val_0.95.pickle'
+            _set_detection_cache_paths(args, 'mot20_val')
             args.data_path = args.data_dir + 'MOT20/train/'
         elif mode == 'val_custom':
-            args.pickle_path = args.pickle_dir + 'mot20_val_custom_0.80.pickle'
-            args.pickle_path_95 = args.pickle_dir + 'mot20_val_custom_0.95.pickle'
+            _set_detection_cache_paths(args, 'mot20_val_custom')
             args.data_path = args.data_dir + 'MOT20/train/'
         elif mode == 'train_custom':
-            args.pickle_path = args.pickle_dir + 'mot20_train_custom_0.80.pickle'
-            args.pickle_path_95 = args.pickle_dir + 'mot20_train_custom_0.95.pickle'
+            _set_detection_cache_paths(args, 'mot20_train_custom')
             args.data_path = args.data_dir + 'MOT20/train/'
         elif mode == 'all':
-            args.pickle_path = args.pickle_dir + 'mot20_all_0.80.pickle'
-            args.pickle_path_95 = args.pickle_dir + 'mot20_all_0.95.pickle'
+            _set_detection_cache_paths(args, 'mot20_all')
             args.data_path = args.data_dir + 'MOT20/train/'
         else:
-            args.pickle_path = args.pickle_dir + 'mot20_test_0.80.pickle'
-            args.pickle_path_95 = args.pickle_dir + 'mot20_test_0.95.pickle'
+            _set_detection_cache_paths(args, 'mot20_test')
             args.data_path = args.data_dir + 'MOT20/test/'
 
         if '08' in vid_name:
@@ -76,12 +73,10 @@ def set_parameters(args, vid_name, mode):
 
     elif 'SportsMOT' in vid_name or 'sportsmot' in vid_name.lower():
         if mode == 'val':
-            args.pickle_path = args.pickle_dir + 'sportsmot_val_0.80.pickle'
-            args.pickle_path_95 = args.pickle_dir + 'sportsmot_val_0.95.pickle'
+            _set_detection_cache_paths(args, 'sportsmot_val')
             args.data_path = args.data_dir + 'SportsMOT/dataset/val/'
         else:
-            args.pickle_path = args.pickle_dir + 'sportsmot_test_0.80.pickle'
-            args.pickle_path_95 = args.pickle_dir + 'sportsmot_test_0.95.pickle'
+            _set_detection_cache_paths(args, 'sportsmot_test')
             args.data_path = args.data_dir + 'SportsMOT/dataset/test/'
 
         # SportsMOT运动场景，需要较高的检测和匹配阈值
@@ -91,12 +86,10 @@ def set_parameters(args, vid_name, mode):
 
     elif 'Dance' in vid_name or 'dancetrack' in vid_name.lower():
         if mode == 'val':
-            args.pickle_path = args.pickle_dir + 'dance_val_0.80.pickle'
-            args.pickle_path_95 = args.pickle_dir + 'dance_val_0.95.pickle'
+            _set_detection_cache_paths(args, 'dance_val')
             args.data_path = args.data_dir + 'DanceTrack/val/'
         else:
-            args.pickle_path = args.pickle_dir + 'dance_test_0.80.pickle'
-            args.pickle_path_95 = args.pickle_dir + 'dance_test_0.95.pickle'
+            _set_detection_cache_paths(args, 'dance_test')
             args.data_path = args.data_dir + 'DanceTrack/test/'
 
         # Baseline Setting

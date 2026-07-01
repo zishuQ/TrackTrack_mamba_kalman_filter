@@ -40,6 +40,40 @@ run 2. FastReID
 run 3. Tracker
 ```
 
+### Compact detection-feature storage
+
+Tracker inputs now use the compact cache layout below:
+
+```
+outputs/2. det_feat/<prefix>_0.95.pickle
+outputs/2. det_feat/<prefix>_0.80.from_<prefix>_0.95.idx.pickle
+```
+
+The tracker only loads the `0.95.pickle` cache and reconstructs the logical
+`0.80` detection view by indexing rows with the `.idx.pickle` file. A physical
+`<prefix>_0.80.pickle` file is not required.
+
+Build or refresh the idx files from existing `0.95.pickle` caches:
+
+```bash
+python scripts/build_nms_idx_from_95.py --overwrite
+```
+
+Or process a single prefix:
+
+```bash
+python scripts/build_nms_idx_from_95.py --prefix mot17_val --overwrite
+```
+
+Run trackers as usual from `3. Tracker`; the output folder keeps the logical
+`0.80` name, but the loaded cache is `0.95 + idx`:
+
+```bash
+cd "3. Tracker"
+../.venv/bin/python run.py --dataset MOT17 --mode val
+../.venv/bin/python run_mamba.py --dataset MOT17 --mode test --mamba_model_path /path/to/model.pth
+```
+
 ## Results
 <img src="https://github.com/user-attachments/assets/35063890-6684-4909-8215-e277cf20a1ac" width="550" height="550" />
 <img src="https://github.com/user-attachments/assets/f3467ebe-5d6c-4179-9885-232ac2dfa07a" width="550" height="550" />

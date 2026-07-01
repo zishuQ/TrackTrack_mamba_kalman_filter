@@ -11,6 +11,7 @@ from AFLink.AppFreeLink import *
 from AFLink.model import PostLinker
 from AFLink.dataset import LinkData
 from trackers.tracker import Tracker
+from utils.det_feat_storage import load_detection_pair
 from utils.gbi import gb_interpolation, linear_interpolation_only
 
 
@@ -65,7 +66,12 @@ def make_parser():
     parser = argparse.ArgumentParser("Tracker")
 
     # Basic
-    parser.add_argument("--pickle_dir", type=str, default="../outputs/2. det_feat/")
+    parser.add_argument(
+        "--pickle_dir",
+        type=str,
+        default="../outputs/2. det_feat/",
+        help="Directory containing *_0.95.pickle and compact *_0.80.from_*_0.95.idx.pickle files.",
+    )
     parser.add_argument("--output_dir", type=str, default="../outputs/3. track/")
     parser.add_argument("--data_dir", type=str, default="/home/shang/datasets/")
     parser.add_argument("--dataset", type=str, default="MOT17")
@@ -182,7 +188,8 @@ def run():
     set_parameters(args, args.dataset, args.mode)
 
     # Make result folder
-    trackers_to_eval = args.pickle_path.split('/')[-1].split('.pickle')[0]
+    tracker_base_path = getattr(args, 'target_pickle_path', args.pickle_path)
+    trackers_to_eval = os.path.basename(tracker_base_path).split('.pickle')[0]
     if args.kf_type != 'nsa':
         trackers_to_eval += '_' + args.kf_type
     if hasattr(args, 'tracker_suffix') and args.tracker_suffix:
@@ -197,10 +204,7 @@ def run():
     os.makedirs(result_folder_base + '_post/', exist_ok=True)
 
     # Read detection result
-    with open(args.pickle_path, 'rb') as f:
-        detections = pickle.load(f)
-    with open(args.pickle_path_95, 'rb') as f:
-        detections_95 = pickle.load(f)
+    detections, detections_95 = load_detection_pair(args.target_pickle_path, args.pickle_path_95)
 
     # Filter sequences if specified
     if args.sequences:
