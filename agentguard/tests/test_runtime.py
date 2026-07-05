@@ -334,10 +334,11 @@ def test_runtime_cleanup_track():
 
 
 def test_runtime_iwg_inference_no_model():
-    """run_iwg_inference should return fallback gates when model is None."""
-    config = {"mode": "full"}
+    """run_iwg_inference should return fallback gates when model is None in off mode."""
+    config = {"mode": "off"}
     runtime = AgentGuardRuntime(config)
-    # No feature_builder set → fallback
+    runtime.init_feature_builder(reid_dim=128)
+    # No iwg model set → fallback (allowed only in off mode)
     result = runtime.run_iwg_inference([_make_event("f0")])
     assert result["gate"][0] == 1.0
     assert result["gate"][1] == 1.0
@@ -427,11 +428,12 @@ def test_runtime_finalize_first_stage_full_window():
 
     plans = runtime.finalize_first_stage([], [])
 
-    # After finalize: oldest event popped from window, checkpoint removed
-    assert len(runtime.window_buffers[2].events) == 3
-    assert runtime.checkpoints.get_checkpoint(2, "w0") is None
-    # New checkpoint for w1 should exist
-    assert runtime.checkpoints.get_checkpoint(2, "w1") is not None
+    # Runtime only builds plans. Checkpoint roll and window pop happen
+    # after replay inside the adapter/backend path.
+    assert len(runtime.window_buffers[2].events) == 4
+    assert runtime.checkpoints.get_checkpoint(2, "w0") is not None
+    assert 2 in runtime.pending_checkpoint_rolls
+    assert plans[2].oldest_event_id == "w0"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

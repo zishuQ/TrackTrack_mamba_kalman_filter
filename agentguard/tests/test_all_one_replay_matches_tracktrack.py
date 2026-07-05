@@ -1,0 +1,71 @@
+"""Test that gate=1.0 replay matches original TrackTrack update behavior."""
+
+import numpy as np
+
+from agentguard.contracts.states import DetectionObservation, TrackStateSnapshot
+from agentguard.runtime.replay import ReplayPlan, ReplayStep
+
+
+def test_all_one_replay_matches_full_write():
+    from integrations.agentguard.replay_backend import TrackTrackReplayBackend
+
+    detection = DetectionObservation(
+        detection_index=0,
+        box=np.array([100, 100, 200, 200], dtype=np.float64),
+        score=0.9,
+        feature=np.ones((1, 64), dtype=np.float64) / 8.0,
+        source=0,
+        class_id=1,
+    )
+
+    snapshot = TrackStateSnapshot(
+        track_id=1,
+        box=np.array([100, 100, 200, 200], dtype=np.float64),
+        score=0.9,
+        mean=np.array([150, 150, 100, 100, 0, 0, 0, 0], dtype=np.float64),
+        covariance=np.eye(8, dtype=np.float64) * 0.1,
+        velocity=np.zeros((4, 2), dtype=np.float64),
+        feature=np.ones((1, 64), dtype=np.float64) / 8.0,
+        history={},
+        end_frame_id=10,
+        state=1,
+    )
+
+    plan = ReplayPlan(
+        track_id=1,
+        checkpoint=snapshot,
+        steps=[ReplayStep(11, np.eye(2, 3), True, detection, 1.0, 1.0)],
+    )
+
+    class SpyTrack:
+        def __init__(self):
+            self.calls = []
+            self.mean = np.array([150, 150, 100, 100, 0, 0, 0, 0], dtype=np.float64)
+            self.covariance = np.eye(8, dtype=np.float64) * 0.1
+            self.box = np.array([100, 100, 200, 200], dtype=np.float64)
+            self.score = 0.9
+            self.feat = np.ones((1, 64), dtype=np.float64) / 8.0
+            self.history = {}
+            self.end_frame_id = 10
+            self.state = 1
+            self.track_id = 1
+            self.velocity = np.zeros((4, 2))
+            self.kalman_filter = _DummyKF()
+
+        def predict(self): pass
+
+        def update_with_gates(self, fid, det, mg, ag):
+            self.calls.append(("update_with_gates", mg, ag))
+            self.end_frame_id = fid
+
+    class _DummyKF:
+        def predict(self, m, c): return m, c
+        def update(self, m, c, meas, score): return m, c
+        def initiate(self, cxcywh): return np.zeros(8), np.eye(8)
+
+    spy = SpyTrack()
+    backend = TrackTrackReplayBackend()
+    backend.replay_into_live_track(spy, plan)
+
+    assert spy.calls[0] == ("update_with_gates", 1.0, 1.0)
+    assert spy.end_frame_id == 11

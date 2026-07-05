@@ -46,17 +46,11 @@ class AgentGuardTrackerAdapter:
         self._dataset: str = getattr(args, "dataset", "unknown")
 
         # EventSink from runtime (for cache recording)
-        self.event_sink = agentguard_runtime.event_sink if agentguard_runtime else None
+        self.event_sink = getattr(agentguard_runtime, "event_sink", None) if agentguard_runtime else None
 
         # Pending frame-level data for EventSink
         self._pending_frame_record = None
         self._pending_frame_events: List[dict] = []
-
-        # Initialise runtime sub-components when available
-        if self.runtime is not None:
-            reid_dim = getattr(args, "reid_dim", _REID_DIM)
-            self.runtime.init_feature_builder(reid_dim=reid_dim)
-            self.runtime.init_motion_model()
 
     # ------------------------------------------------------------------
     # Frame lifecycle
@@ -243,8 +237,16 @@ class AgentGuardTrackerAdapter:
                 for track_id, plan in plans.items():
                     live_track = track_by_id.get(track_id)
                     if live_track is None:
-                        continue
+                        raise RuntimeError(
+                            f"Live track {track_id} not found for replay plan "
+                            f"({len(plan.steps)} steps)"
+                        )
                     backend.replay_into_live_track(live_track, plan)
+                    self._roll_checkpoint_with_live_track(
+                        backend=backend,
+                        live_track=live_track,
+                        track_id=track_id,
+                    )
 
         # Flush pending events to EventSink
         if self.event_sink is not None and hasattr(self.event_sink, 'on_frame') and self._pending_frame_record is not None:
@@ -252,6 +254,39 @@ class AgentGuardTrackerAdapter:
             self.event_sink.on_frame(self._pending_frame_record, frame_events)
             self._pending_frame_events = []
             self._pending_frame_record = None
+
+    def _roll_checkpoint_with_live_track(
+        self,
+        backend,
+        live_track: Track,
+        track_id: int,
+    ) -> None:
+        if self.runtime is None:
+            return
+        roll = self.runtime.pending_checkpoint_rolls.get(track_id)
+        if roll is None:
+            return
+
+        live_snapshot = export_track_state(live_track)
+        oldest_step = roll["oldest_step"]
+        roll_plan = type("CheckpointRollPlan", (), {
+            "checkpoint": roll["checkpoint"],
+            "steps": [oldest_step],
+        })()
+        backend.replay_into_live_track(live_track, roll_plan)
+        new_checkpoint = export_track_state(live_track)
+
+        next_event_id = roll["next_event_id"]
+        if next_event_id is not None:
+            self.runtime.checkpoints.save_checkpoint(
+                track_id,
+                next_event_id,
+                new_checkpoint,
+            )
+        self.runtime.window_buffers[track_id].pop_oldest()
+        self.runtime.checkpoints.remove_checkpoint(track_id, roll["oldest_event_id"])
+        self.runtime.pending_checkpoint_rolls.pop(track_id, None)
+        live_track.restore_state(live_snapshot)
 
     # ------------------------------------------------------------------
     # IWG decision

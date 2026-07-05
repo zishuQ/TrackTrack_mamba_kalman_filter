@@ -36,11 +36,36 @@ VERSION = "0.1.0"
 # ---------------------------------------------------------------------------
 # Path handling – always reach the TrackTrack project root from this file.
 # ---------------------------------------------------------------------------
-_PROJECT_ROOT: str = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "../../../../..")
-)
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
+assert (
+    _PROJECT_ROOT / "agentguard" / "pyproject.toml"
+).is_file(), f"agentguard/pyproject.toml not found at {_PROJECT_ROOT}"
+assert (
+    _PROJECT_ROOT / "3. Tracker"
+).is_dir(), f"'3. Tracker' directory not found at {_PROJECT_ROOT}"
+PROJECT_ROOT = str(_PROJECT_ROOT)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+# ---------------------------------------------------------------------------
+# Mode → split routing
+# ---------------------------------------------------------------------------
+MODE_TO_SPLIT: Dict[str, str] = {
+    "train_custom": "train_custom",
+    "val_custom": "val_custom",
+    "val": "val",
+    "all": "all",
+    "test": "test",
+}
+
+
+def _resolve_split(mode: str) -> str:
+    split = MODE_TO_SPLIT.get(mode)
+    if split is None:
+        raise ValueError(
+            f"Unknown mode {mode!r}. Expected one of {list(MODE_TO_SPLIT)}"
+        )
+    return split
 
 # ---------------------------------------------------------------------------
 # Output directory helpers
@@ -48,11 +73,12 @@ if _PROJECT_ROOT not in sys.path:
 
 
 def _outputs_dir() -> str:
-    return os.path.join(_PROJECT_ROOT, "outputs")
+    return os.path.join(PROJECT_ROOT, "outputs")
 
 
 def _cache_dir(dataset: str, mode: str) -> str:
-    return os.path.join(_outputs_dir(), "agentguard", "cache", dataset, mode)
+    split = _resolve_split(mode)
+    return os.path.join(_outputs_dir(), "agentguard", "cache", dataset, split)
 
 
 def _labels_dir(dataset: str) -> str:
@@ -102,9 +128,9 @@ def _resolve_sequences(
     from agentguard.data.split_manager import SplitManager
 
     manager = SplitManager(
-        config_dir=os.path.join(_PROJECT_ROOT, "agentguard", "configs", "splits")
+        config_dir=os.path.join(PROJECT_ROOT, "agentguard", "configs", "splits")
     )
-    return manager.get_sequences(dataset, mode)
+    return manager.get_sequences(dataset, _resolve_split(mode))
 
 
 # ===================================================================
@@ -135,7 +161,7 @@ def _add_cache_events_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     p.add_argument(
         "--pickle-dir",
-        default=os.path.join(_PROJECT_ROOT, "outputs", "2. det_feat"),
+        default=os.path.join(PROJECT_ROOT, "outputs", "2. det_feat"),
         help="Directory containing detection pickle files.",
     )
 
@@ -805,7 +831,7 @@ def _cmd_evaluate_oracle(args: argparse.Namespace) -> None:
         "TRACKTRACK_DATA_DIR", "/home/shang/datasets/"
     )
     pickle_dir = args.pickle_dir or os.path.join(
-        _PROJECT_ROOT, "outputs", "2. det_feat"
+        PROJECT_ROOT, "outputs", "2. det_feat"
     )
 
     # Load rollout labels to get oracle gates

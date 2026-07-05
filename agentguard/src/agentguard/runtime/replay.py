@@ -36,6 +36,8 @@ class ReplayPlan:
     track_id: int
     checkpoint: TrackStateSnapshot
     steps: List[ReplayStep] = field(default_factory=list)
+    oldest_event_id: Optional[str] = None
+    next_event_id: Optional[str] = None
 
 
 class ReplayEngine:

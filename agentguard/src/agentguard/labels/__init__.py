@@ -77,16 +77,20 @@ def compute_dataset_stats(all_benefits: Dict[str, List[float]]) -> Dict[str, flo
 def compute_soft_target(benefit: float, tau: float) -> float:
     """Convert a benefit value into a soft binary target.
 
+    Benefit sign: ``B = L_skip - L_write``.
+
     .. math::
 
         y = \\sigma\\left(\\frac{\\text{benefit}}{\\tau}\\right)
 
-    where :math:`\\sigma` is the sigmoid function.
+    where :math:`\\sigma` is the sigmoid function.  Values > 0.5 favour
+    the write branch (skip loss dominates).
 
     Parameters
     ----------
     benefit : float
-        Motion or appearance benefit (``B_m`` or ``B_a``).
+        Motion or appearance benefit (``B_m`` or ``B_a``), computed as
+        ``L_skip - L_write``.
     tau : float
         Scaling temperature (e.g. from :func:`compute_dataset_stats`).
 

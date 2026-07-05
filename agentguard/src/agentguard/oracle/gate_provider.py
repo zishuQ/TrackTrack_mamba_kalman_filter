@@ -6,11 +6,13 @@ from typing import Optional
 
 class OracleGateProvider:
     """Provides oracle gates from pre-computed rollout labels.
-    
+
     Oracle uses HARD decisions (not soft targets):
-    - B > 0 -> gate = 1 (write)
-    - B < 0 -> gate = 0 (skip)
-    - |B| <= 1e-6 -> gate = 1 (tie -> favor baseline)
+    - B >= -1e-6 -> gate = 1 (write: beneficial or neutral)
+    - B < -1e-6  -> gate = 0 (skip: write is harmful)
+
+    Benefit sign: B = L_skip - L_write.
+      B > 0 → skip loss > write loss → writing is beneficial.
     """
     
     def __init__(self, iwg_labels: dict, tgr_window_labels: Optional[dict] = None):
@@ -57,10 +59,13 @@ class OracleGateProvider:
     
     @staticmethod
     def _benefit_to_hard(benefit: float) -> float:
-        """Convert benefit to hard gate decision."""
-        if abs(benefit) <= 1e-6:
-            return 1.0  # tie -> write
-        return 1.0 if benefit > 0 else 0.0
+        """Convert benefit to hard gate decision.
+
+        B = L_skip - L_write:
+          B >= -1e-6 → gate = 1 (write, beneficial or neutral)
+          B < -1e-6  → gate = 0 (skip, write is harmful)
+        """
+        return 1.0 if benefit >= -1e-6 else 0.0
     
     @classmethod
     def from_label_files(cls, label_dir: str) -> 'OracleGateProvider':

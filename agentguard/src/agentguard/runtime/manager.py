@@ -9,7 +9,6 @@ from agentguard.contracts.events import TrackEvent
 from agentguard.contracts.outputs import GateDecision
 from agentguard.runtime.buffers import EventBuffer, WindowBuffer
 from agentguard.runtime.checkpoint import CheckpointManager
-from agentguard.runtime.replay import ReplayEngine
 from agentguard.runtime.statistics import RuntimeStatistics
 
 
@@ -22,7 +21,6 @@ class AgentGuardRuntime:
     - Per-track event buffers (IWG history)
     - Per-track window buffers (TGR windows)
     - Checkpoint manager
-    - Replay engine
 
     Modes
     -----
@@ -54,10 +52,14 @@ class AgentGuardRuntime:
         self.event_buffers: Dict[int, EventBuffer] = {}
         self.window_buffers: Dict[int, WindowBuffer] = {}
         self.checkpoints = CheckpointManager()
-        self.replay = ReplayEngine(motion_model=None)  # will be set
 
-        # Feature builder (lazy init)
+        # Feature builder (initialised once via init_feature_builder)
         self.feature_builder: Any = None
+        self._feature_builder_initialised: bool = False
+
+        # EventSink (set by external caller if needed)
+        self.event_sink: Any = None
+        self.pending_checkpoint_rolls: Dict[int, Any] = {}
 
         # Statistics
         self.stats = RuntimeStatistics()
@@ -80,15 +82,12 @@ class AgentGuardRuntime:
         norm_stats : NormalizationStats or None
             Optional pre-computed normalisation statistics for scalar features.
         """
+        if self._feature_builder_initialised:
+            return
         from agentguard.features.builder import EventFeatureBuilder
 
         self.feature_builder = EventFeatureBuilder(reid_dim, norm_stats)
-
-    def init_motion_model(self) -> None:
-        """Initialise the Kalman filter used by the replay engine."""
-        from agentguard.motion.nsa_numpy import NSAKalmanFilter
-
-        self.replay.motion = NSAKalmanFilter()
+        self._feature_builder_initialised = True
 
     # ------------------------------------------------------------------
     # Track maturity
@@ -190,16 +189,15 @@ class AgentGuardRuntime:
         self,
         all_tracks: Optional[List[Any]] = None,
         all_matches: Optional[List[Any]] = None,
-    ) -> dict:
+    ) -> Dict[int, Any]:
         """Build replay plans for all tracks with full TGR windows.
 
         Does **not** modify live track state.  The caller receives
         ``ReplayPlan`` objects and must execute them on live ``Track``
         objects via ``TrackTrackReplayBackend.replay_into_live_track()``.
 
-        While building plans, this method also advances the checkpoint chain:
-        the oldest event's checkpoint is replayed with the revised gate to
-        produce the checkpoint for the new window start.
+        In full mode, missing TGR model or checkpoint are raised as
+        ``RuntimeError`` rather than silently skipped.
 
         Parameters
         ----------
@@ -219,9 +217,12 @@ class AgentGuardRuntime:
         if self.mode != "full":
             return {}
         if self.tgr is None:
-            raise RuntimeError("TGR is None in full mode - cannot build replay plans")
+            raise RuntimeError("TGR model is None in full mode - cannot build replay plans")
+        if self.feature_builder is None:
+            raise RuntimeError("Feature builder is None in full mode - cannot build replay plans")
 
-        plans: dict = {}
+        plans: Dict[int, Any] = {}
+        self.pending_checkpoint_rolls = {}
 
         for track_id, window_buffer in list(self.window_buffers.items()):
             if not window_buffer.is_full:
@@ -231,19 +232,19 @@ class AgentGuardRuntime:
             revised_gates = self._run_tgr_inference(window_events)
             self.stats.record_tgr()
 
-            # Assign revised gates for offline logging
             for evt, gate in zip(window_events, revised_gates):
                 evt.revised_gate = gate.copy()
 
-            # Checkpoint: state before oldest event
             oldest_event = window_events[0]
             checkpoint_snapshot = self.checkpoints.get_checkpoint(
                 track_id, oldest_event.event_id
             )
             if checkpoint_snapshot is None:
-                continue
+                raise RuntimeError(
+                    f"Missing checkpoint for track {track_id} event {oldest_event.event_id} "
+                    f"in full mode - cannot build replay plan"
+                )
 
-            # Build replay plan
             steps = []
             for evt, gate in zip(window_events, revised_gates):
                 has_det = evt.has_detection
@@ -261,28 +262,16 @@ class AgentGuardRuntime:
                 track_id=track_id,
                 checkpoint=checkpoint_snapshot,
                 steps=steps,
+                oldest_event_id=oldest_event.event_id,
+                next_event_id=window_events[1].event_id if len(window_events) > 1 else None,
             )
             self.stats.record_replay()
-
-            # ------------------------------------------------------------------
-            # Checkpoint roll: replay only the OLDEST event with its revised
-            # gate to produce a new checkpoint that sits before the new window
-            # start (the old second-oldest event).
-            # ------------------------------------------------------------------
-            if len(window_events) > 1:
-                new_checkpoint = self.replay.replay_event(
-                    checkpoint_snapshot,
-                    window_events[0],
-                    revised_gates[0],
-                )
-                self.checkpoints.save_checkpoint(
-                    track_id,
-                    window_events[1].event_id,
-                    new_checkpoint,
-                )
-
-            window_buffer.pop_oldest()
-            self.checkpoints.remove_checkpoint(track_id, oldest_event.event_id)
+            self.pending_checkpoint_rolls[track_id] = {
+                "oldest_event_id": oldest_event.event_id,
+                "next_event_id": window_events[1].event_id if len(window_events) > 1 else None,
+                "oldest_step": steps[0],
+                "checkpoint": checkpoint_snapshot,
+            }
 
         return plans
 
@@ -353,9 +342,14 @@ class AgentGuardRuntime:
         """
         # Fallback when IWG is unavailable
         if self.iwg is None or self.feature_builder is None:
+            if self.mode in ("iwg", "full"):
+                raise RuntimeError(
+                    f"IWG model or feature builder is None in {self.mode} mode"
+                )
             self.stats.record_skipped_immature()
             return {
                 "policy_probs": np.ones(5, dtype=np.float64) / 5.0,
+
                 "gate": np.ones(2, dtype=np.float64),
                 "event_logits": np.zeros(10, dtype=np.float64),
                 "cue": np.ones(3, dtype=np.float64),

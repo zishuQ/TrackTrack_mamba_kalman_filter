@@ -1,3 +1,5 @@
+from typing import Optional
+
 from trackers.cmc import *
 from trackers.utils import *
 from trackers.track import *
@@ -26,6 +28,9 @@ class Tracker(object):
         self.cmc = CMC(vid_name)
         self.disable_gmc = getattr(args, 'disable_gmc', False)
 
+        # Per-frame warp matrix (read once per frame)
+        self._current_warp: Optional[np.ndarray] = None
+
         # AgentGuard integration
         self.agentguard_adapter = None
         ag_mode = getattr(args, 'agentguard_mode', 'off')
@@ -40,14 +45,10 @@ class Tracker(object):
             tgr_ckpt = getattr(args, 'tgr_checkpoint', None)
             device = getattr(args, 'agentguard_device', 'cpu')
 
-            # Determine ReID dimension from detection format (2054 total - 6 metadata)
-            reid_dim = getattr(args, 'reid_dim', None)
-
             def _load_checkpoint(ckpt_path):
-                """Load a checkpoint and return (state_dict, reid_dim, norm_stats)."""
                 checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
 
-                # Extract state dict
+                # State dict load order: model_state_dict > state_dict > entire checkpoint
                 if 'model_state_dict' in checkpoint:
                     sd = checkpoint['model_state_dict']
                 elif 'state_dict' in checkpoint:
@@ -55,54 +56,122 @@ class Tracker(object):
                 else:
                     sd = checkpoint
 
-                # Read reid_dim from checkpoint if not already set
-                local_reid_dim = reid_dim
-                if local_reid_dim is None:
-                    if 'reid_dim' in checkpoint:
-                        local_reid_dim = checkpoint['reid_dim']
-                    elif 'metadata' in checkpoint and 'reid_dim' in checkpoint['metadata']:
-                        local_reid_dim = checkpoint['metadata']['reid_dim']
-                    else:
-                        # Try to infer from state dict shape
-                        reid_proj_weight = sd.get('reid_proj.weight') or sd.get('encoder.reid_proj.weight')
-                        if reid_proj_weight is not None:
-                            local_reid_dim = reid_proj_weight.shape[1]
-                        else:
-                            raise ValueError(f"Cannot determine reid_dim from checkpoint {ckpt_path}")
+                # Formal fields validation
+                ckpt_reid_dim = checkpoint.get('reid_dim')
+                scalar_dim = checkpoint.get('scalar_dim')
+                event_dim = checkpoint.get('event_dim')
+                policy_prototypes = checkpoint.get('policy_prototypes')
+                norm_mean = checkpoint.get('normalization_mean')
+                norm_std = checkpoint.get('normalization_std')
+                feature_schema_sha256 = checkpoint.get('feature_schema_sha256')
 
-                # Read normalization stats if available
-                norm_stats = None
-                if 'normalization_mean' in checkpoint:
-                    from agentguard.features.normalization import NormalizationStats
-                    ns = NormalizationStats()
-                    ns.mean = checkpoint['normalization_mean']
-                    ns.std = checkpoint['normalization_std']
-                    norm_stats = ns
+                if ckpt_reid_dim is None:
+                    raise ValueError(
+                        f"Checkpoint {ckpt_path} missing required field 'reid_dim'"
+                    )
+                if scalar_dim is None:
+                    raise ValueError(
+                        f"Checkpoint {ckpt_path} missing required field 'scalar_dim'"
+                    )
+                if scalar_dim != 63:
+                    raise ValueError(
+                        f"Checkpoint {ckpt_path} scalar_dim={scalar_dim}, expected 63"
+                    )
+                if event_dim is None:
+                    raise ValueError(
+                        f"Checkpoint {ckpt_path} missing required field 'event_dim'"
+                    )
+                if event_dim != 128:
+                    raise ValueError(
+                        f"Checkpoint {ckpt_path} event_dim={event_dim}, expected 128"
+                    )
+                if policy_prototypes is None:
+                    raise ValueError(
+                        f"Checkpoint {ckpt_path} missing required field 'policy_prototypes'"
+                    )
+                if norm_mean is None or norm_std is None:
+                    raise ValueError(
+                        f"Checkpoint {ckpt_path} missing normalization_mean/std"
+                    )
+                if feature_schema_sha256 is None:
+                    raise ValueError(
+                        f"Checkpoint {ckpt_path} missing required field 'feature_schema_sha256'"
+                    )
+                pp_arr = np.asarray(policy_prototypes)
+                if pp_arr.shape != (5, 2):
+                    raise ValueError(
+                        f"Checkpoint {ckpt_path} policy_prototypes shape {pp_arr.shape}, expected (5, 2)"
+                    )
+                if np.asarray(norm_mean).shape != (63,):
+                    raise ValueError(
+                        f"Checkpoint {ckpt_path} normalization_mean shape "
+                        f"{np.asarray(norm_mean).shape}, expected (63,)"
+                    )
+                if np.asarray(norm_std).shape != (63,):
+                    raise ValueError(
+                        f"Checkpoint {ckpt_path} normalization_std shape "
+                        f"{np.asarray(norm_std).shape}, expected (63,)"
+                    )
 
-                return sd, int(local_reid_dim), norm_stats
+                # ReID dimension consistency: checkpoint reid_dim must match
+                # any inference of reid_dim from weight shapes
+                reid_proj_weight = sd.get('reid_proj.weight')
+                if reid_proj_weight is None:
+                    reid_proj_weight = sd.get('encoder.reid_proj.weight')
+                if reid_proj_weight is not None:
+                    inferred_dim = reid_proj_weight.shape[1]
+                    if inferred_dim != ckpt_reid_dim:
+                        raise ValueError(
+                            f"Checkpoint {ckpt_path} reid_dim={ckpt_reid_dim} "
+                            f"inconsistent with weight shape dim={inferred_dim}"
+                        )
+
+                # Normalization stats
+                from agentguard.features.normalization import NormalizationStats
+                ns = NormalizationStats()
+                ns.mean = np.asarray(norm_mean, dtype=np.float64)
+                ns.std = np.asarray(norm_std, dtype=np.float64)
+                norm_stats = ns
+
+                return sd, int(ckpt_reid_dim), norm_stats
 
             iwg_model = None
-            sd_iwg, reid_dim_iwg, iwg_norm_stats = None, reid_dim, None
-            if iwg_ckpt and ag_mode in ('iwg', 'full'):
-                sd_iwg, reid_dim_iwg, iwg_norm_stats = _load_checkpoint(iwg_ckpt)
-                iwg_model = IWG(reid_dim=reid_dim_iwg)
+            tgr_model = None
+            checkpoint_reid_dim = None
+            checkpoint_norm_stats = None
+
+            if ag_mode in ('iwg', 'full'):
+                if iwg_ckpt is None:
+                    raise RuntimeError(
+                        f"IWG checkpoint required for mode={ag_mode} but none provided"
+                    )
+                sd_iwg, checkpoint_reid_dim, checkpoint_norm_stats = _load_checkpoint(iwg_ckpt)
+                iwg_model = IWG(reid_dim=checkpoint_reid_dim)
                 iwg_model.load_state_dict(sd_iwg)
                 iwg_model.eval()
 
-            tgr_model = None
-            sd_tgr, reid_dim_tgr, tgr_norm_stats = None, reid_dim_iwg, None
-            if tgr_ckpt and ag_mode == 'full':
-                sd_tgr, reid_dim_tgr, tgr_norm_stats = _load_checkpoint(tgr_ckpt)
-                tgr_model = TGR(reid_dim=reid_dim_tgr)
+            if ag_mode == 'full':
+                if tgr_ckpt is None:
+                    raise RuntimeError(
+                        "TGR checkpoint required for full mode but none provided"
+                    )
+                sd_tgr, tgr_reid_dim, tgr_norm_stats = _load_checkpoint(tgr_ckpt)
+                if tgr_reid_dim != checkpoint_reid_dim:
+                    raise ValueError(
+                        f"TGR reid_dim={tgr_reid_dim} does not match IWG reid_dim={checkpoint_reid_dim}"
+                    )
+                tgr_model = TGR(reid_dim=checkpoint_reid_dim)
                 tgr_model.load_state_dict(sd_tgr)
                 tgr_model.eval()
 
             runtime = AgentGuardRuntime(runtime_config, iwg_model, tgr_model, device)
 
-            # Pass normalization stats to runtime if available
-            norm_stats = iwg_norm_stats or tgr_norm_stats
-            if norm_stats is not None:
-                runtime.init_feature_builder(normalization_stats=norm_stats)
+            if checkpoint_reid_dim is not None:
+                runtime.init_feature_builder(
+                    reid_dim=checkpoint_reid_dim,
+                    norm_stats=checkpoint_norm_stats,
+                )
+
             self.agentguard_adapter = AgentGuardTrackerAdapter(args, vid_name, agentguard_runtime=runtime)
 
     def init_tracks(self, dets):
@@ -161,6 +230,7 @@ class Tracker(object):
             effective_warp = self.cmc.get_warp_matrix()
             apply_cmc(tracked_lost, effective_warp)
             apply_cmc(new, effective_warp)
+        self._current_warp = effective_warp.copy()
 
         # Predict the current location with KF
         [t.predict() for t in tracked_lost]
@@ -289,6 +359,7 @@ class Tracker(object):
         else:
             effective_warp = self.cmc.get_warp_matrix()
             apply_cmc(self.tracks, effective_warp)
+        self._current_warp = effective_warp.copy()
 
         [t.predict() for t in self.tracks]
 

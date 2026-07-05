@@ -1,7 +1,8 @@
-"""Replay backend that applies TGR replay plans to live Track objects.
+"""Replay backend that applies TGR replay plans directly to live Track objects.
 
-This is the only module that knows both TrackTrack internals (Track) and the
-AgentGuard replay protocol (ReplayPlan, TrackStateSnapshot).
+This module mutates real ``Track`` instances in-place using native TrackTrack
+operations (CMC warp, KF predict, ``update_with_gates``, ``mark_lost``)
+without depending on ``agentguard.runtime.replay.ReplayEngine``.
 """
 
 from __future__ import annotations
@@ -10,24 +11,48 @@ from typing import Any
 
 import numpy as np
 
-from agentguard.contracts.events import TrackEvent
-from agentguard.contracts.states import TrackStateSnapshot
-from agentguard.runtime.replay import ReplayEngine, ReplayPlan
+from agentguard.runtime.replay import ReplayPlan
+from trackers.cmc import apply_cmc
+from integrations.agentguard.converters import restore_track_state
+
+
+class _ReplayDetection:
+    """Lightweight wrapper that exposes a DetectionObservation as a Track-like
+    detection to satisfy the ``Track.update_with_gates`` interface."""
+
+    def __init__(self, detection: Any) -> None:
+        self.box = detection.box
+        self.score = detection.score
+        self.feat = detection.feature.copy()
+
+    @property
+    def x1y1x2y2(self) -> np.ndarray:
+        return self.box.copy()
+
+    @property
+    def cxcywh(self) -> np.ndarray:
+        x1, y1, x2, y2 = self.box
+        return np.array(
+            [(x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1],
+            dtype=np.float64,
+        )
 
 
 class TrackTrackReplayBackend:
     """Applies a TGR ``ReplayPlan`` onto a live ``Track`` object.
 
-    The strategy is:
-      1. Restore the live Track to the plan's checkpoint snapshot.
-      2. For each step in the plan, build a minimal ``TrackEvent``
-         and feed it to ``ReplayEngine.replay_event`` to compute the
-         updated state.
-      3. Restore the live Track to the final state snapshot.
+    The strategy:
+      1. Restore the live Track to the plan's checkpoint snapshot using
+         ``restore_track_state``.
+      2. For each step in the plan:
+         a. Apply the step's warp matrix via ``apply_cmc``.
+         b. Call ``live_track.predict()``.
+         c. If matched: ``live_track.update_with_gates(frame_id, detection,
+            motion_gate, appearance_gate)``.
+         d. If unmatched: ``live_track.mark_lost()``.
+      3. The live Track ends at the correct post-replay state (no restore
+         needed — the mutations are applied in-place).
     """
-
-    def __init__(self) -> None:
-        self._engine = ReplayEngine()
 
     # ------------------------------------------------------------------
     # Public API
@@ -43,31 +68,36 @@ class TrackTrackReplayBackend:
         Parameters
         ----------
         live_track : Track
-            The live ``Track`` object to update.  Must have ``snapshot_state``
-            and ``restore_state`` methods.
+            The live ``Track`` object to update.  Must support
+            ``restore_state`` (or ``restore_track_state``), ``predict()``,
+            ``update_with_gates()``, and ``mark_lost()``.
         plan : ReplayPlan
             The replay plan produced by the runtime's ``finalize_first_stage``.
         """
-        current: TrackStateSnapshot = plan.checkpoint
+        # Step 1: Restore the live track to the checkpoint snapshot.
+        if hasattr(live_track, "restore_state"):
+            live_track.restore_state(plan.checkpoint)
+        else:
+            restore_track_state(live_track, plan.checkpoint)
 
+        # Step 2: Replay each step in sequence.
         for step in plan.steps:
-            # Build a minimal TrackEvent for the replay engine
-            event = TrackEvent(
-                event_id=f"replay/{plan.track_id}/{step.frame_id}",
-                dataset="",
-                sequence="",
-                frame_id=step.frame_id,
-                track_id=plan.track_id,
-                image_width=0,
-                image_height=0,
-                has_detection=step.has_detection,
-                detection=step.detection,
-                warp_matrix=step.warp_matrix.copy(),
-            )
-            gate = np.array(
-                [step.motion_gate, step.appearance_gate], dtype=np.float64
-            )
-            current = self._engine.replay_event(current, event, gate)
+            # Apply step-level CMC warp.
+            wp = step.warp_matrix
+            if wp is not None and not np.allclose(wp, np.eye(2, 3, dtype=np.float64)):
+                apply_cmc([live_track], wp)
 
-        # Restore the computed final state onto the live Track
-        live_track.restore_state(current)
+            # Kalman predict.
+            live_track.predict()
+
+            if step.has_detection and step.detection is not None:
+                det = _ReplayDetection(step.detection)
+                live_track.update_with_gates(
+                    step.frame_id,
+                    det,
+                    step.motion_gate,
+                    step.appearance_gate,
+                )
+            else:
+                live_track.mark_lost()
+                live_track.end_frame_id = step.frame_id
