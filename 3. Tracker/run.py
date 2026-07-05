@@ -115,6 +115,17 @@ def make_parser():
     parser.add_argument("--sequences", type=str, nargs="+", default=None,
                        help="Only track specific sequences (e.g. --sequences MOT20-01)")
 
+    # AgentGuard parameters
+    parser.add_argument("--agentguard-mode", type=str, default="off",
+                       choices=["off", "iwg", "full"],
+                       help="AgentGuard gating mode: off (baseline), iwg (per-frame gating), full (gating + TGR replay)")
+    parser.add_argument("--iwg-checkpoint", type=str, default=None,
+                       help="Path to IWG model checkpoint (.pt)")
+    parser.add_argument("--tgr-checkpoint", type=str, default=None,
+                       help="Path to TGR model checkpoint (.pt)")
+    parser.add_argument("--agentguard-device", type=str, default="cpu",
+                       help="Device for AgentGuard inference (cpu or cuda)")
+
     return parser
 
 
@@ -194,6 +205,10 @@ def run():
         trackers_to_eval += '_' + args.kf_type
     if hasattr(args, 'tracker_suffix') and args.tracker_suffix:
         trackers_to_eval += '_' + args.tracker_suffix
+    if args.agentguard_mode == 'iwg':
+        trackers_to_eval += '_agentguard_iwg'
+    elif args.agentguard_mode == 'full':
+        trackers_to_eval += '_agentguard_full'
     result_folder_base = os.path.join(args.output_dir, trackers_to_eval)
     if 'dance' in args.dataset.lower() and args.mode == 'test':
         result_folder = os.path.join(result_folder_base, 'tracker')
@@ -262,6 +277,15 @@ def run():
 if __name__ == "__main__":
     # Get arguments
     args = make_parser().parse_args()
+
+    # AgentGuard validation
+    if args.agentguard_mode == 'iwg' and args.iwg_checkpoint is None:
+        parser.error("--iwg-checkpoint is required when --agentguard-mode=iwg")
+    if args.agentguard_mode == 'full':
+        if args.iwg_checkpoint is None:
+            parser.error("--iwg-checkpoint is required when --agentguard-mode=full")
+        if args.tgr_checkpoint is None:
+            parser.error("--tgr-checkpoint is required when --agentguard-mode=full")
 
     # Set random seed
     random.seed(args.seed)

@@ -191,7 +191,7 @@ def associate(cost, match_thr):
 
 
 def iterative_assignment(tracks, dets_high, dets_low, dets_del_high, match_thr, penalty_p, penalty_q,
-                        reduce_step, frame_id, d_t=3, no_reid=False):
+                        reduce_step, frame_id, d_t=3, no_reid=False, return_meta=False):
     # Initialization
     matches = []
     dets = dets_high + dets_low + dets_del_high
@@ -199,13 +199,26 @@ def iterative_assignment(tracks, dets_high, dets_low, dets_del_high, match_thr, 
     # Calculate preliminaries
     iou_sim, iou_dist = iou_distance(tracks, dets)
 
+    # Calculate confidence and angle distance (compute once for both branches)
+    conf_dist_arr = conf_distance(tracks, dets)
+    angle_dist_arr = angle_distance(tracks, dets, frame_id, d_t)
+
     # Calculate cost
     if no_reid:
-        cost = iou_dist + 0.10 * conf_distance(tracks, dets) + 0.05 * angle_distance(tracks, dets, frame_id, d_t)
+        cost = iou_dist + 0.10 * conf_dist_arr + 0.05 * angle_dist_arr
     else:
         cos_dist = cos_distance(tracks, dets)
         cost = 0.50 * iou_dist + 0.50 * cos_dist
-        cost += 0.10 * conf_distance(tracks, dets) + 0.05 * angle_distance(tracks, dets, frame_id, d_t)
+        cost += 0.10 * conf_dist_arr + 0.05 * angle_dist_arr
+
+    # Build association metadata (capture before any modification)
+    if return_meta:
+        iou_sim_meta = iou_sim.copy()
+        iou_dist_meta = iou_dist.copy()
+        cos_dist_meta = cos_dist.copy() if not no_reid else None
+        conf_dist_meta = conf_dist_arr.copy()
+        angle_dist_meta = angle_dist_arr.copy()
+        raw_cost = cost.copy()
 
     # Give penalty
     cost[:, len(dets_high):len(dets_high + dets_low)] += penalty_p
@@ -215,21 +228,44 @@ def iterative_assignment(tracks, dets_high, dets_low, dets_del_high, match_thr, 
     cost[iou_sim <= 0.10] = 1.
     cost = np.clip(cost, 0, 1)
 
-    # # Linear assignment
-    # matches, u_tracks, u_dets = linear_assignment(cost, match_thr)
+    # Capture final cost before iteration begins
+    if return_meta:
+        final_cost = cost.copy()
+
+        # Build detection source matrix
+        num_tracks = len(tracks)
+        num_dets = len(dets)
+        detection_source = np.full((num_tracks, num_dets), -1, dtype=int)
+        n_high = len(dets_high)
+        detection_source[:, :n_high] = 0
+        detection_source[:, n_high:n_high + len(dets_low)] = 1
+        detection_source[:, n_high + len(dets_low):] = 2
+
+        # Initialize assignment tracking
+        assignment_round = np.full((num_tracks, num_dets), -1, dtype=int)
+        assignment_threshold = np.full((num_tracks, num_dets), -1.0, dtype=np.float64)
 
     # Match
+    round_idx = 0
     while True:
         # Match tracks with detections
         matches_ = associate(cost, match_thr)
+        current_threshold = match_thr
         match_thr -= reduce_step
 
         # Check (if there are no more matchable pairs)
         if len(matches_) == 0:
             break
 
+        # Track assignment metadata for this round
+        if return_meta:
+            for t, d in matches_:
+                assignment_round[t, d] = round_idx
+                assignment_threshold[t, d] = current_threshold
+
         # Append
         matches += matches_
+        round_idx += 1
 
         # Update cost matrix
         for t, d in matches:
@@ -241,6 +277,21 @@ def iterative_assignment(tracks, dets_high, dets_low, dets_del_high, match_thr, 
     u_tracks = [t for t in range(len(tracks)) if t not in m_tracks]
     m_dets = set(d for _, d in matches)
     u_dets = [d for d in range(len(dets)) if d not in m_dets]
+
+    if return_meta:
+        association_meta = {
+            "iou_similarity": iou_sim_meta,
+            "iou_distance": iou_dist_meta,
+            "cosine_distance": cos_dist_meta,
+            "confidence_distance": conf_dist_meta,
+            "angle_distance": angle_dist_meta,
+            "raw_cost": raw_cost,
+            "final_cost": final_cost,
+            "assignment_round": assignment_round,
+            "assignment_threshold": assignment_threshold,
+            "detection_source": detection_source,
+        }
+        return matches, u_tracks, u_dets, association_meta
 
     return matches, u_tracks, u_dets
 

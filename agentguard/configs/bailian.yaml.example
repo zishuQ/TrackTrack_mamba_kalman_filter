@@ -1,0 +1,20 @@
+provider: bailian
+
+bulk_model: qwen3-vl-flash
+review_model: qwen3-vl-plus
+
+enable_thinking: false
+temperature: 0.0
+max_tokens: 900
+timeout_seconds: 120
+max_retries: 2
+max_concurrency: 2
+
+flash_confidence_threshold: 0.65
+rollout_conflict_threshold: 0.40
+
+input_price_per_million: null
+output_price_per_million: null
+
+api_key_env: BAILIAN_API_KEY
+api_base_url: https://dashscope-intl.aliyuncs.com/compatible-mode/v1

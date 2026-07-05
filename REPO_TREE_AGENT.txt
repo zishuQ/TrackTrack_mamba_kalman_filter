@@ -1,0 +1,55 @@
+TrackTrack Repository Structure (AgentGuard Audit)
+===================================================
+
+TrackTrack/
+├── 1. YOLOX/                  # Detection model (YOLOX)
+│   ├── exps/                  # Experiment configs per dataset
+│   ├── jsons/                 # Dataset split definitions
+│   ├── yolox/                 # Core YOLOX library
+│   ├── scripts/               # JSON creation helpers
+│   └── weights/               # Pre-trained model weights
+│
+├── 2. FastReID/               # ReID model (FastReID SBS-S50)
+│   ├── configs/               # ReID configs per dataset
+│   ├── fastreid/              # Core FastReID library
+│   └── ext_feats.py           # Feature extraction entry point
+│
+├── 3. Tracker/                # Main Tracking Pipeline
+│   ├── trackers/
+│   │   ├── tracker.py         # Main Tracker class (baseline update loop)
+│   │   ├── tracker_mamba.py   # Mamba variant of Tracker
+│   │   ├── track.py           # Track class (per-track state)
+│   │   ├── track_mamba.py     # Mamba variant of Track
+│   │   ├── utils.py           # Association utils (iou, cos, angle, iterative_assignment)
+│   │   ├── kalman_filter.py   # KF variants (NSA, standard, EKF, UKF)
+│   │   ├── cmc.py             # Camera Motion Compensation
+│   │   ├── cmc/               # Pre-computed GMC warp matrices
+│   │   ├── mamba_kalman_filter_wrapper.py
+│   │   └── alt_kalman_filter_wrapper.py
+│   ├── utils/
+│   │   ├── etc.py             # Parameter setup, write_results, evaluate
+│   │   ├── det_feat_storage.py # Detection pickle loading
+│   │   └── gbi.py             # Gaussian-based interpolation post-processing
+│   ├── trackeval/             # TrackEval evaluation library
+│   ├── AFLink/                # AFLink post-processing for DanceTrack
+│   ├── run.py                 # Main entry point (NSA KF)
+│   ├── run_mamba.py           # Mamba KF entry point
+│   ├── run_alt.py             # Alt KF entry point
+│   ├── eval_only.py           # Evaluation-only script
+│   ├── generate_cmc.py        # CMC matrix generation
+│   ├── gbi_use.py             # Post-processing runner
+│   └── aflink_use.py          # AFLink runner
+│
+├── scripts/                   # Helper scripts
+│   ├── build_nms_idx_from_95.py
+│   ├── compact_det_feat_pickles.py
+│   ├── create_inference_json.py
+│   └── run_mot20_noise_robustness.py
+│
+├── tools/                     # Extracted tools
+├── outputs/                   # All outputs
+│   ├── 1. det/                # Detection results
+│   ├── 2. det_feat/           # Detection + ReID features (pickle cache)
+│   └── 3. track/              # Tracking results
+│
+└── mamba_kalman_filter -> ../mamba_kalman_filter  (symlink)

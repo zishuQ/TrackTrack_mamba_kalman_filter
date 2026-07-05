@@ -119,6 +119,101 @@ class Track(BaseTrack):
         self.end_frame_id = frame_id
         self.state = TrackState.Tracked if len(self.history.keys()) >= self.args.min_len else TrackState.New
 
+    def snapshot_state(self):
+        from agentguard.contracts.states import TrackStateSnapshot
+
+        history_copy = {}
+        for frame_id, hist_list in self.history.items():
+            history_copy[frame_id] = [
+                hist_list[0].copy(),
+                hist_list[1],
+                hist_list[2].copy() if hist_list[2] is not None else None,
+                hist_list[3].copy() if hist_list[3] is not None else None,
+                hist_list[4].copy(),
+            ]
+
+        return TrackStateSnapshot(
+            track_id=self.track_id,
+            box=self.box.copy(),
+            score=self.score,
+            mean=self.mean.copy() if self.mean is not None else None,
+            covariance=self.covariance.copy() if self.covariance is not None else None,
+            velocity=self.velocity.copy(),
+            feature=self.feat.copy(),
+            history=history_copy,
+            end_frame_id=self.end_frame_id,
+            state=self.state,
+        )
+
+    def restore_state(self, snapshot):
+        self.track_id = snapshot.track_id
+        self.box = snapshot.box.copy()
+        self.score = snapshot.score
+        self.mean = snapshot.mean.copy() if snapshot.mean is not None else None
+        self.covariance = snapshot.covariance.copy() if snapshot.covariance is not None else None
+        self.velocity = snapshot.velocity.copy()
+        self.feat = snapshot.feature.copy()
+
+        self.history = {}
+        for frame_id, hist_list in snapshot.history.items():
+            self.history[frame_id] = [
+                hist_list[0].copy(),
+                hist_list[1],
+                hist_list[2].copy() if hist_list[2] is not None else None,
+                hist_list[3].copy() if hist_list[3] is not None else None,
+                hist_list[4].copy(),
+            ]
+
+        self.end_frame_id = snapshot.end_frame_id
+        self.state = snapshot.state
+
+    def update_with_gates(self, frame_id, detection, motion_gate, appearance_gate):
+        # Step 1: Save prior state (before KF update)
+        mean_prior = self.mean.copy()
+        covariance_prior = self.covariance.copy()
+        predicted_box = self.x1y1x2y2.copy()
+
+        # Step 2: Run full KF update
+        mean_full, cov_full = self.kalman_filter.update(
+            self.mean, self.covariance, detection.cxcywh.copy(), detection.score
+        )
+
+        # Step 3: Motion gate interpolation
+        mean_final = mean_prior + motion_gate * (mean_full - mean_prior)
+        cov_final = (1 - motion_gate) * covariance_prior + motion_gate * cov_full
+        cov_final = 0.5 * (cov_final + cov_final.T)
+        self.mean = mean_final
+        self.covariance = cov_final
+
+        # Step 4: Effective box for history/velocity
+        detection_box = detection.x1y1x2y2.copy()
+        effective_box = (1 - motion_gate) * predicted_box + motion_gate * detection_box
+
+        # Step 5: Appearance gate interpolation
+        beta = self.alpha + (1 - self.alpha) * (1 - detection.score)
+        old_feat = self.feat.copy()
+        feat_full = beta * old_feat + (1 - beta) * detection.feat.copy()
+        feat_final = (1 - appearance_gate) * old_feat + appearance_gate * feat_full
+        feat_final = feat_final / (np.linalg.norm(feat_final) + 1e-12)
+        self.feat = feat_final
+
+        # Step 6: Other fields (same as original update)
+        self.history[frame_id] = [
+            effective_box.copy(), detection.score,
+            self.mean.copy(), self.covariance.copy(), self.feat.copy()
+        ]
+
+        self.velocity = np.zeros((4, 2))
+        for d_t in range(1, self.delta_t + 1):
+            prev_box = get_prev_box(self.history, frame_id, d_t).copy()
+            self.velocity += get_vel(prev_box, effective_box) / d_t
+        self.velocity /= self.delta_t
+
+        self.box = effective_box.copy()
+        self.score = detection.score
+        self.end_frame_id = frame_id
+        self.state = TrackState.Tracked if len(self.history.keys()) >= self.args.min_len else TrackState.New
+
     @property
     def cxcywh(self):
         # Get current position in bounding box format `(center x, center y, width, height)`.

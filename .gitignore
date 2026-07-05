@@ -8,4 +8,4 @@ outputs/
 *.log
 *.csv
 *.egg-info/
-mamba_kalman_filter/
+mamba_kalman_filter/.pytest_cache/

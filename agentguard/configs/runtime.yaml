@@ -1,0 +1,21 @@
+agentguard:
+  mode: "off"  # off, iwg, full
+  device: "cpu"
+
+iwg:
+  checkpoint: null
+
+tgr:
+  checkpoint: null
+
+maturity:
+  min_history: 6
+
+iwg_buffer:
+  max_len: 6
+
+tgr_window:
+  window_size: 4
+
+replay:
+  max_replay_events: 4

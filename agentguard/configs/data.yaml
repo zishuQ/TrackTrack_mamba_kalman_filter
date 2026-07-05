@@ -1,0 +1,21 @@
+cache:
+  shard_size: 10000
+  output_dir: "outputs/agentguard/cache"
+
+detection:
+  high_threshold: 0.6
+  nms_iou_threshold: 0.97
+
+gt:
+  matching_iou_threshold: 0.5
+  identity_reliable_votes: 3
+  identity_reliable_ratio: 0.75
+
+oracle:
+  future_frames: 5
+  oracle_iou_threshold: 0.5
+
+identity:
+  prototype_min_score: 0.6
+  prototype_min_iou: 0.7
+  prototype_top_ratio: 0.7
