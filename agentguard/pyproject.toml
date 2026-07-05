@@ -11,3 +11,6 @@ dependencies = [
     "torch",
     "scipy",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

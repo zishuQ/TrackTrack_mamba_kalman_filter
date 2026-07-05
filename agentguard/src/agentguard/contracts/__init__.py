@@ -9,6 +9,7 @@ from agentguard.contracts.states import (
     TrackStateSnapshot,
     DetectionObservation,
     AssociationPairFeatures,
+    AssociationContext,
 )
 from agentguard.contracts.events import TrackEvent
 from agentguard.contracts.outputs import GateDecision
@@ -28,6 +29,7 @@ __all__ = [
     "TrackStateSnapshot",
     "DetectionObservation",
     "AssociationPairFeatures",
+    "AssociationContext",
     "TrackEvent",
     "GateDecision",
     "serialize_event",

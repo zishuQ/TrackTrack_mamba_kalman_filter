@@ -70,6 +70,9 @@ class EventCacheWriter:
     ) -> List[str]:
         """Write events to sharded ``.pt`` files.
 
+        Events are serialised to JSON-compatible dicts before saving
+        (see :func:`agentguard.contracts.serialization.serialize_events`).
+
         Parameters
         ----------
         events : list
@@ -84,12 +87,15 @@ class EventCacheWriter:
         list of str
             Paths of the written shard files.
         """
+        from agentguard.contracts.serialization import serialize_events
+
         if manifest is None:
             manifest = CacheManifest()
         seq_dir = self._ensure_seq_dir(manifest)
         paths: List[str] = []
-        for shard_idx, start in enumerate(range(0, len(events), shard_size)):
-            chunk = events[start : start + shard_size]
+        serialized = serialize_events(events)
+        for shard_idx, start in enumerate(range(0, len(serialized), shard_size)):
+            chunk = serialized[start : start + shard_size]
             shard_path = os.path.join(seq_dir, f"events_{shard_idx:05d}.pt")
             torch.save(chunk, shard_path)
             paths.append(shard_path)

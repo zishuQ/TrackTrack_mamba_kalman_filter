@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import numpy as np
+from numpy.typing import NDArray
 
 
 @dataclass(frozen=True)
@@ -106,3 +107,27 @@ class AssociationPairFeatures:
     assignment_round: int  # -1 if unmatched
     assignment_threshold: float  # -1.0 if unmatched
     detection_source: int
+
+
+@dataclass(frozen=True)
+class AssociationContext:
+    """Complete association context for a track-detection pair.
+
+    Unlike AssociationPairFeatures (which stores only a single pair),
+    AssociationContext stores the full cost row for the track and
+    cost column for the detection, enabling proper entropy and margin
+    computation in the 63-dim scalar features.
+    """
+    track_cost_row: NDArray[np.float64]      # (num_detections,) all costs for this track
+    detection_cost_col: NDArray[np.float64]  # (num_tracks,) all costs for this detection
+    detection_overlap_row: NDArray[np.float64]  # (num_detections,) IoU with other dets
+    accepted_detection_index: Optional[int]  # which detection was accepted, or None
+    num_tracks: int
+    num_detections: int
+    reid_available: bool = True     # whether cosine distance was available
+
+    def __post_init__(self):
+        for name in ['track_cost_row', 'detection_cost_col', 'detection_overlap_row']:
+            val = getattr(self, name)
+            if isinstance(val, np.ndarray):
+                object.__setattr__(self, name, val.copy())

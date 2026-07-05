@@ -98,7 +98,7 @@ class EventFeatureBuilder:
                 det_feats[i] = evt.detection_feature.ravel()
             # else stays zero
 
-            scalar_feats[i] = evt.scalar_features.ravel()
+            scalar_feats[i] = evt.scalar_features.ravel() if evt.scalar_features is not None else np.zeros(self._scalar_dim, dtype=np.float64)
 
         # Optional normalisation
         scalar_feats = self.normalize_scalars(scalar_feats)
@@ -168,6 +168,82 @@ class EventFeatureBuilder:
             "iwg_gates": torch.from_numpy(iwg_gates).unsqueeze(0).float(),
             "has_detection_mask": torch.from_numpy(has_detection_mask).unsqueeze(0),
         }
+
+    # ------------------------------------------------------------------
+    # Single-event feature building
+    # ------------------------------------------------------------------
+
+    def build(self, event, association_context=None):
+        """Build 63-dim scalar features for an event.
+
+        Parameters
+        ----------
+        event : TrackEvent
+            The event to build features for.
+        association_context : optional
+            Unused, reserved for future use.
+
+        Returns
+        -------
+        tuple of (scalar_feats, track_feats, det_feats)
+        """
+        scalar = self.compute_scalar(event)
+
+        # Track feature: prefer pre-computed track_feature, else from state snapshot.
+        if event.track_feature is not None and event.track_feature.size > 0:
+            track_raw = event.track_feature.ravel()
+        else:
+            src_state = event.pre_update_state or event.frame_start_state
+            if src_state is not None and src_state.feature is not None and src_state.feature.size > 0:
+                track_raw = src_state.feature.ravel()
+            else:
+                track_raw = np.zeros(self.reid_dim)
+        # Pad or truncate to reid_dim
+        if track_raw.size < self.reid_dim:
+            track_f = np.pad(track_raw, (0, self.reid_dim - track_raw.size))
+        elif track_raw.size > self.reid_dim:
+            track_f = track_raw[:self.reid_dim]
+        else:
+            track_f = track_raw
+
+        # Detection feature: prefer pre-computed detection_feature, else from detection observation.
+        if event.has_detection:
+            if event.detection_feature is not None and event.detection_feature.size > 0:
+                det_raw = event.detection_feature.ravel()
+            elif event.detection is not None and event.detection.feature is not None and event.detection.feature.size > 0:
+                det_raw = event.detection.feature.ravel()
+            else:
+                det_raw = np.zeros(self.reid_dim)
+            if det_raw.size < self.reid_dim:
+                det_f = np.pad(det_raw, (0, self.reid_dim - det_raw.size))
+            elif det_raw.size > self.reid_dim:
+                det_f = det_raw[:self.reid_dim]
+            else:
+                det_f = det_raw
+        else:
+            det_f = np.zeros(self.reid_dim)
+
+        return scalar, track_f, det_f
+
+    def build_normalized(self, event, association_context=None):
+        """Build and normalize 63-dim scalar features for an event.
+
+        Parameters
+        ----------
+        event : TrackEvent
+            The event to build features for.
+        association_context : optional
+            Unused, reserved for future use.
+
+        Returns
+        -------
+        tuple of (scalar_feats, track_feats, det_feats)
+            Scalar features are z-score normalised if stats are available.
+        """
+        scalar, t, d = self.build(event)
+        if self.normalizer is not None:
+            scalar = self.normalizer.transform(scalar.reshape(1, -1)).ravel()
+        return scalar, t, d
 
     # ------------------------------------------------------------------
     # Single-event scalar computation

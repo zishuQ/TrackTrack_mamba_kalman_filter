@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pytest
@@ -21,6 +22,7 @@ from agentguard.rollout.appearance import (
     compute_appearance_benefit,
     ema_update,
 )
+from agentguard.rollout.context import RolloutContext
 from agentguard.rollout.losses import (
     appearance_loss,
     iou_loss,
@@ -39,6 +41,66 @@ from agentguard.labels import (
     compute_soft_target,
     build_rollout_labels,
 )
+
+
+# ---------------------------------------------------------------------------
+#  Helper: build a RolloutContext from old-style (event, oracle_data)
+# ---------------------------------------------------------------------------
+
+
+def _build_rollout_context(
+    event: TrackEvent,
+    oracle_data: dict,
+    *,
+    identity_prototype: Optional[np.ndarray] = None,
+    appearance_alpha: float = 0.95,
+) -> RolloutContext:
+    """Convert old-style (event, oracle_data) arguments to a RolloutContext."""
+    # Use explicit future_gt_boxes if provided; otherwise fall back to
+    # future_oracle_detections (old-style) as the GT boxes for loss computation.
+    future_gt = oracle_data.get("future_gt_boxes")
+    if future_gt is None:
+        future_gt = oracle_data.get("future_oracle_detections", [None] * 5)
+
+    raw_dets = oracle_data.get("future_oracle_detections", [None] * 5)
+    raw_feats = oracle_data.get("future_oracle_features", [None] * 5)
+    raw_scores = oracle_data.get("future_oracle_scores", [0.0] * 5)
+    future_warps = oracle_data.get("future_warp_matrices", [np.eye(2, 3)] * 5)
+    current_gt = oracle_data.get("current_gt_box")
+    if current_gt is None:
+        current_gt = np.array([0, 0, 0, 0], dtype=np.float64)
+
+    oracle_dets: List[Optional[DetectionObservation]] = []
+    for i in range(len(raw_dets)):
+        box = raw_dets[i]
+        if box is None:
+            oracle_dets.append(None)
+        else:
+            feat = raw_feats[i] if i < len(raw_feats) and raw_feats[i] is not None else np.zeros((1, 64), dtype=np.float64)
+            score = raw_scores[i] if i < len(raw_scores) else 0.0
+            oracle_dets.append(
+                DetectionObservation(
+                    detection_index=i,
+                    box=box,
+                    score=score,
+                    feature=feat,
+                    source=0,
+                    class_id=1,
+                )
+            )
+
+    return RolloutContext(
+        frame_id=event.frame_id,
+        target_gt_id=getattr(event, "target_gt_id", -1),
+        pre_update_state=event.pre_update_state,
+        current_candidate=event.detection if event.has_detection else None,
+        current_gt_box=current_gt,
+        future_gt_boxes=future_gt,
+        future_oracle_detections=oracle_dets,
+        future_warp_matrices=future_warps,
+        identity_prototype=identity_prototype,
+        appearance_alpha=appearance_alpha,
+    )
 
 
 # =========================================================================
@@ -231,13 +293,14 @@ class TestLosses:
 class TestMotionRollout:
     def test_compute_motion_benefit_basic(self, make_event, future_oracle_data, kf):
         event = make_event()
-        B_m, write_losses, skip_losses, write_boxes, skip_boxes = (
-            compute_motion_benefit(event, future_oracle_data, kf, future_frames=3)
+        ctx = _build_rollout_context(event, future_oracle_data)
+        B_m, write_losses, skip_losses, valid_mask = (
+            compute_motion_benefit(ctx, kf, future_frames=3)
         )
         assert len(write_losses) == 3
         assert len(skip_losses) == 3
-        assert len(write_boxes) == 3
-        assert len(skip_boxes) == 3
+        assert len(valid_mask) == 3
+        assert valid_mask.dtype == bool
         # All losses should be non-negative
         for wl in write_losses:
             assert wl >= 0.0
@@ -248,8 +311,9 @@ class TestMotionRollout:
 
     def test_motion_benefit_no_detection(self, make_event, future_oracle_data, kf):
         event = make_event(has_detection=False)
-        B_m, write_losses, skip_losses, write_boxes, skip_boxes = (
-            compute_motion_benefit(event, future_oracle_data, kf, future_frames=3)
+        ctx = _build_rollout_context(event, future_oracle_data)
+        B_m, write_losses, skip_losses, valid_mask = (
+            compute_motion_benefit(ctx, kf, future_frames=3)
         )
         # Without a detection, write and skip branches start identically,
         # so losses should be equal (benefit ~ 0)
@@ -262,24 +326,26 @@ class TestMotionRollout:
             "future_oracle_detections": [],
             "future_warp_matrices": [],
         }
-        B_m, write_losses, skip_losses, write_boxes, skip_boxes = (
-            compute_motion_benefit(event, empty_oracle, kf, future_frames=5)
+        ctx = _build_rollout_context(event, empty_oracle)
+        B_m, write_losses, skip_losses, valid_mask = (
+            compute_motion_benefit(ctx, kf, future_frames=5)
         )
         # No oracle => all losses are 0
         assert B_m == 0.0
         assert all(wl == 0.0 for wl in write_losses)
         assert all(sl == 0.0 for sl in skip_losses)
+        assert len(valid_mask) == 0
 
     def test_compute_motion_rollout_dict(self, make_event, future_oracle_data, kf):
         event = make_event()
-        result = compute_motion_rollout(event, future_oracle_data, kf, future_frames=3)
+        ctx = _build_rollout_context(event, future_oracle_data)
+        result = compute_motion_rollout(ctx, kf, future_frames=3)
         assert "benefit" in result
         assert "write_losses" in result
         assert "skip_losses" in result
-        assert "write_boxes" in result
-        assert "skip_boxes" in result
+        assert "valid_mask" in result
         assert isinstance(result["benefit"], float)
-        assert len(result["write_boxes"]) == 3
+        assert len(result["valid_mask"]) == 3
 
 
 # =========================================================================
@@ -290,16 +356,16 @@ class TestMotionRollout:
 class TestAppearanceRollout:
     def test_compute_appearance_benefit_basic(self, make_event, future_oracle_data, identity_prototype):
         event = make_event()
-        B_a, write_losses, skip_losses, write_feats, skip_feats = (
-            compute_appearance_benefit(
-                event, future_oracle_data, identity_prototype,
-                alpha=0.95, future_frames=3,
-            )
+        ctx = _build_rollout_context(event, future_oracle_data, identity_prototype=identity_prototype)
+        B_a, write_losses, skip_losses, write_feats, skip_feats, valid_mask = (
+            compute_appearance_benefit(ctx, future_frames=3)
         )
         assert len(write_losses) == 3
         assert len(skip_losses) == 3
         assert len(write_feats) == 3
         assert len(skip_feats) == 3
+        assert len(valid_mask) == 3
+        assert valid_mask.dtype == bool
         assert isinstance(B_a, float)
 
     def test_ema_update(self):
@@ -330,11 +396,9 @@ class TestAppearanceRollout:
 
     def test_appearance_no_detection(self, make_event, future_oracle_data, identity_prototype):
         event = make_event(has_detection=False)
-        B_a, write_losses, skip_losses, write_feats, skip_feats = (
-            compute_appearance_benefit(
-                event, future_oracle_data, identity_prototype,
-                alpha=0.95, future_frames=3,
-            )
+        ctx = _build_rollout_context(event, future_oracle_data, identity_prototype=identity_prototype)
+        B_a, write_losses, skip_losses, write_feats, skip_feats, valid_mask = (
+            compute_appearance_benefit(ctx, future_frames=3)
         )
         # Without detection, write and skip start identically
         assert abs(B_a) < 1e-10
@@ -550,10 +614,12 @@ class TestIntegration:
         all_motion = []
         all_appearance = []
         for evt in events:
-            B_m, *_ = compute_motion_benefit(evt, future_oracle_data, kf, future_frames=3)
-            B_a, *_ = compute_appearance_benefit(
-                evt, future_oracle_data, identity_prototype, future_frames=3
+            ctx_m = _build_rollout_context(evt, future_oracle_data)
+            B_m, *_ = compute_motion_benefit(ctx_m, kf, future_frames=3)
+            ctx_a = _build_rollout_context(
+                evt, future_oracle_data, identity_prototype=identity_prototype,
             )
+            B_a, *_ = compute_appearance_benefit(ctx_a, future_frames=3)
             all_motion.append(B_m)
             all_appearance.append(B_a)
 

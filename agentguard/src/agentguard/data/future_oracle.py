@@ -44,8 +44,12 @@ class FutureOracleBuilder:
         gt_reader: GTReader,
         all_frame_detections: Dict[int, List[Tuple[np.ndarray, float, int]]],
         frame_ids: List[int],
-    ) -> Dict[str, Any]:
+        target_gt_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Build future oracle data for an event.
+
+        Uses *target_gt_id* (the resolved GT identity for this track) to
+        find ground-truth boxes, NOT the track_id.
 
         Parameters
         ----------
@@ -59,30 +63,39 @@ class FutureOracleBuilder:
         frame_ids : list of int
             Sorted list of all frame IDs in the sequence (used for
             determining future frames).
+        target_gt_id : int or None
+            The resolved ground-truth identity for this track. If None,
+            no oracle data can be built.
 
         Returns
         -------
-        dict
-            Keys:
+        dict or None
+            None if *target_gt_id* is None or the current GT box cannot be
+            found. Otherwise returns a dict with keys:
 
             * ``current_gt_box`` — (4,) ndarray or ``None``.
             * ``future_gt_boxes`` — list of (4,) ndarray (length 0-5).
             * ``future_oracle_detections`` — list of (4,) ndarray or ``None``.
             * ``future_warp_matrices`` — list of (2, 3) ndarray.
         """
+        if target_gt_id is None:
+            return None  # No reliable identity -> no oracle
+
         current_frame = event.frame_id
         future_frames = self._get_future_frames(current_frame, frame_ids)
 
-        # Current GT box
-        current_gt = self._find_gt_for_track(gt_reader, current_frame, event.track_id)
+        # Current GT box by target_gt_id
+        current_gt = self._find_gt_for_id(gt_reader, current_frame, target_gt_id)
+        if current_gt is None:
+            return None  # No GT box at current frame
 
         future_gt_boxes: List[np.ndarray] = []
         future_oracle_detections: List[Optional[np.ndarray]] = []
         future_warp_matrices: List[np.ndarray] = []
 
         for ff in future_frames:
-            # GT box
-            gt_box = self._find_gt_for_track(gt_reader, ff, event.track_id)
+            # GT box by target_gt_id
+            gt_box = self._find_gt_for_id(gt_reader, ff, target_gt_id)
             future_gt_boxes.append(gt_box)
 
             # Oracle detection (best IoU to GT among frozen detections)
@@ -126,15 +139,15 @@ class FutureOracleBuilder:
         return future
 
     @staticmethod
-    def _find_gt_for_track(
+    def _find_gt_for_id(
         gt_reader: GTReader,
         frame_id: int,
-        track_id: int,
+        gt_id: int,
     ) -> Optional[np.ndarray]:
-        """Return the GT box for *track_id* at *frame_id*, or ``None``."""
+        """Return the GT box for *gt_id* at *frame_id*, or ``None``."""
         entries = gt_reader.get_gt_for_frame(frame_id)
         for box, tid in entries:
-            if tid == track_id:
+            if tid == gt_id:
                 return box
         return None
 

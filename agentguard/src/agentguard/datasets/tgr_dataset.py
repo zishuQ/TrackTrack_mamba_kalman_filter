@@ -154,7 +154,9 @@ class TGRDataset(torch.utils.data.Dataset):
         sample_weights = []
         for evt_idx in window_info["event_indices"]:
             label = self.labels[evt_idx]
-            gate = np.asarray(label.get("target_gate", [0.0, 0.0]), dtype=np.float64)
+            if "target_gate" not in label:
+                raise KeyError(f"Missing 'target_gate' in label for window")
+            gate = np.asarray(label["target_gate"], dtype=np.float64)
             target_gates.append(gate)
             sample_weights.append(label.get("sample_weight", 1.0))
 

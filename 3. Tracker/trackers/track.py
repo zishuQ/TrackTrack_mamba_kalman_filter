@@ -168,6 +168,12 @@ class Track(BaseTrack):
         self.state = snapshot.state
 
     def update_with_gates(self, frame_id, detection, motion_gate, appearance_gate):
+        # Validate
+        motion_gate = float(np.clip(motion_gate, 0.0, 1.0))
+        appearance_gate = float(np.clip(appearance_gate, 0.0, 1.0))
+        if not np.isfinite(motion_gate) or not np.isfinite(appearance_gate):
+            raise ValueError(f"Non-finite gate: m={motion_gate}, a={appearance_gate}")
+
         # Step 1: Save prior state (before KF update)
         mean_prior = self.mean.copy()
         covariance_prior = self.covariance.copy()
@@ -178,24 +184,36 @@ class Track(BaseTrack):
             self.mean, self.covariance, detection.cxcywh.copy(), detection.score
         )
 
-        # Step 3: Motion gate interpolation
-        mean_final = mean_prior + motion_gate * (mean_full - mean_prior)
-        cov_final = (1 - motion_gate) * covariance_prior + motion_gate * cov_full
-        cov_final = 0.5 * (cov_final + cov_final.T)
-        self.mean = mean_final
-        self.covariance = cov_final
+        # Step 3: Motion gate with EXACT endpoint handling
+        if motion_gate == 1.0:
+            self.mean = mean_full
+            self.covariance = cov_full
+            effective_box = detection.x1y1x2y2.copy()
+        elif motion_gate == 0.0:
+            self.mean = mean_prior
+            self.covariance = covariance_prior
+            effective_box = predicted_box.copy()
+        else:
+            mean_final = mean_prior + motion_gate * (mean_full - mean_prior)
+            cov_final = (1 - motion_gate) * covariance_prior + motion_gate * cov_full
+            cov_final = 0.5 * (cov_final + cov_final.T)
+            self.mean = mean_final
+            self.covariance = cov_final
+            effective_box = (1 - motion_gate) * predicted_box + motion_gate * detection.x1y1x2y2.copy()
 
-        # Step 4: Effective box for history/velocity
-        detection_box = detection.x1y1x2y2.copy()
-        effective_box = (1 - motion_gate) * predicted_box + motion_gate * detection_box
-
-        # Step 5: Appearance gate interpolation
-        beta = self.alpha + (1 - self.alpha) * (1 - detection.score)
+        # Step 4: Appearance gate with EXACT endpoint handling
         old_feat = self.feat.copy()
-        feat_full = beta * old_feat + (1 - beta) * detection.feat.copy()
-        feat_final = (1 - appearance_gate) * old_feat + appearance_gate * feat_full
-        feat_final = feat_final / (np.linalg.norm(feat_final) + 1e-12)
-        self.feat = feat_final
+        if appearance_gate == 1.0:
+            beta = self.alpha + (1 - self.alpha) * (1 - detection.score)
+            self.feat = beta * old_feat + (1 - beta) * detection.feat.copy()
+            self.feat /= np.linalg.norm(self.feat)
+        elif appearance_gate == 0.0:
+            self.feat = old_feat.copy()
+        else:
+            beta = self.alpha + (1 - self.alpha) * (1 - detection.score)
+            feat_full = beta * old_feat + (1 - beta) * detection.feat.copy()
+            feat_final = (1 - appearance_gate) * old_feat + appearance_gate * feat_full
+            self.feat = feat_final / (np.linalg.norm(feat_final) + 1e-12)
 
         # Step 6: Other fields (same as original update)
         self.history[frame_id] = [

@@ -1,4 +1,3 @@
-import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -46,6 +45,13 @@ class AgentGuardTrackerAdapter:
         # Optional dataset name extracted from args.
         self._dataset: str = getattr(args, "dataset", "unknown")
 
+        # EventSink from runtime (for cache recording)
+        self.event_sink = agentguard_runtime.event_sink if agentguard_runtime else None
+
+        # Pending frame-level data for EventSink
+        self._pending_frame_record = None
+        self._pending_frame_events: List[dict] = []
+
         # Initialise runtime sub-components when available
         if self.runtime is not None:
             reid_dim = getattr(args, "reid_dim", _REID_DIM)
@@ -68,19 +74,27 @@ class AgentGuardTrackerAdapter:
         self.img_width = img_width
         self.img_height = img_height
 
+        # Accumulate frame record for EventSink
+        self._pending_frame_record = {
+            "frame_id": frame_id,
+            "image_width": img_width,
+            "image_height": img_height,
+            "warp_matrix": None,  # Set when warp is known
+            "detections": [],
+        }
+        self._pending_frame_events = []
+
     # ------------------------------------------------------------------
     # Event builders
     # ------------------------------------------------------------------
 
     def _make_event_id(self, track_id: int) -> str:
-        """Generate a unique event identifier."""
-        return "{}/{}/{:06d}/{:06d}/{}".format(
-            self._dataset,
-            self.vid_name,
-            self.frame_id,
-            track_id,
-            uuid.uuid4().hex[:8],
-        )
+        """Generate a deterministic event identifier."""
+        return f"{self._dataset}/{self.vid_name}/{self.frame_id:06d}/{track_id:06d}"
+
+    def _make_candidate_id(self, event_id: str, candidate_type: str) -> str:
+        """Generate a deterministic candidate identifier."""
+        return f"{event_id}/{candidate_type}"
 
     def build_matched_event(
         self,
@@ -203,16 +217,41 @@ class AgentGuardTrackerAdapter:
 
     def finalize_first_stage(
         self,
-        tracks: List[Track],
-        matches: List[Tuple[int, int]],
+        tracked_lost_tracks: List[Track],
     ) -> None:
         """Called after first-stage association is complete.
 
-        Delegates to ``runtime.finalize_first_stage`` for TGR replay
-        when in ``'full'`` mode.
+        In ``'full'`` mode:
+          1. Asks the runtime to build ``ReplayPlan`` objects for every
+             track whose TGR window has reached capacity.
+          2. Executes each plan on the corresponding live ``Track`` via
+             ``TrackTrackReplayBackend.replay_into_live_track()``.
+
+        This actually modifies the live Track state, applying the revised
+        gates determined by TGR inference.
         """
         if self.runtime is not None:
-            self.runtime.finalize_first_stage(tracks, matches)
+            plans = self.runtime.finalize_first_stage()
+            if plans:
+                from integrations.agentguard.replay_backend import (
+                    TrackTrackReplayBackend,
+                )
+
+                backend = TrackTrackReplayBackend()
+                track_by_id = {t.track_id: t for t in tracked_lost_tracks}
+
+                for track_id, plan in plans.items():
+                    live_track = track_by_id.get(track_id)
+                    if live_track is None:
+                        continue
+                    backend.replay_into_live_track(live_track, plan)
+
+        # Flush pending events to EventSink
+        if self.event_sink is not None and hasattr(self.event_sink, 'on_frame') and self._pending_frame_record is not None:
+            frame_events = list(self._pending_frame_events)
+            self.event_sink.on_frame(self._pending_frame_record, frame_events)
+            self._pending_frame_events = []
+            self._pending_frame_record = None
 
     # ------------------------------------------------------------------
     # IWG decision
@@ -287,6 +326,8 @@ class AgentGuardTrackerAdapter:
         (the gate has already been applied via :meth:`apply_gate`).
         """
         if self.runtime is None:
+            # Still accumulate for EventSink even without runtime
+            self._accumulate_event_for_sink(event)
             return
 
         self.runtime.stats.record_event()
@@ -307,6 +348,9 @@ class AgentGuardTrackerAdapter:
                 track_id, event.event_id, event.frame_start_state
             )
 
+        # Accumulate for EventSink
+        self._accumulate_event_for_sink(event)
+
     def record_unmatched_event(
         self,
         track_id: int,
@@ -317,6 +361,7 @@ class AgentGuardTrackerAdapter:
         The gate is forced to ``[0.0, 0.0]`` (no detection).
         """
         if self.runtime is None:
+            self._accumulate_event_for_sink(event)
             return
 
         self.runtime.stats.record_event()
@@ -330,6 +375,37 @@ class AgentGuardTrackerAdapter:
             self.runtime.checkpoints.save_checkpoint(
                 track_id, event.event_id, event.frame_start_state
             )
+
+        # Accumulate for EventSink
+        self._accumulate_event_for_sink(event)
+
+    # ------------------------------------------------------------------
+    # EventSink accumulation helper
+    # ------------------------------------------------------------------
+
+    def _accumulate_event_for_sink(self, event: TrackEvent) -> None:
+        """Serialise *event* and append to the pending frame events list."""
+        if self.event_sink is None:
+            return
+        if self._pending_frame_record is None:
+            return  # begin_frame was not called
+
+        from agentguard.contracts.serialization import serialize_event
+
+        event_dict = serialize_event(event)
+        event_dict["target_gt_id"] = None
+        event_dict["detection_gt_id"] = None
+        event_dict["accepted_detection_index"] = (
+            event.detection.detection_index
+            if event.has_detection and event.detection is not None
+            else None
+        )
+        event_dict["association_row"] = (
+            event.association.final_cost
+            if event.association is not None
+            else None
+        )
+        self._pending_frame_events.append(event_dict)
 
     # ------------------------------------------------------------------
     # Track removal cleanup

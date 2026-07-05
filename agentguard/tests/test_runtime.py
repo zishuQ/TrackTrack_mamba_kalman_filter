@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 from typing import Any, Dict, List
 
+import pytest
 import numpy as np
 
 # ── Ensure ``src`` is on the path ──────────────────────────────────────────
@@ -347,29 +348,44 @@ def test_runtime_iwg_inference_no_model():
 
 
 def test_runtime_tgr_inference_no_model():
-    """_run_tgr_inference should return zeros when TGR is None."""
+    """_run_tgr_inference should raise RuntimeError when TGR is None."""
     config = {"mode": "full"}
     runtime = AgentGuardRuntime(config)
-    result = runtime._run_tgr_inference([
-        _make_event("t0"), _make_event("t1"),
-        _make_event("t2"), _make_event("t3"),
-    ])
-    assert result.shape == (4, 2)
-    assert np.all(result == 0.0)
+    runtime.init_feature_builder(reid_dim=128)
+    with pytest.raises(RuntimeError, match="TGR model is not loaded"):
+        runtime._run_tgr_inference([
+            _make_event("t0"), _make_event("t1"),
+            _make_event("t2"), _make_event("t3"),
+        ])
+
+
+def _make_mock_tgr(reid_dim=128):
+    """Create a minimal TGR model stub that returns zeros."""
+    import torch
+    import torch.nn as nn
+    from agentguard.models.tgr import TGR
+    tgr = TGR(reid_dim=reid_dim)
+    tgr.eval()
+    return tgr
 
 
 def test_runtime_finalize_first_stage_full_mode_no_full_windows():
     """finalize_first_stage does nothing when no windows are full."""
+    import torch
     config = {"mode": "full"}
-    runtime = AgentGuardRuntime(config)
-    runtime.finalize_first_stage([], [])
+    tgr = _make_mock_tgr(reid_dim=128)
+    runtime = AgentGuardRuntime(config, tgr_model=tgr)
+    runtime.init_feature_builder(reid_dim=128)
+    result = runtime.finalize_first_stage([], [])
+    assert result == {}
     # No crash = success
 
 
 def test_runtime_finalize_first_stage_partial_window():
     """finalize_first_stage skips windows that aren't full."""
     config = {"mode": "full"}
-    runtime = AgentGuardRuntime(config)
+    tgr = _make_mock_tgr(reid_dim=128)
+    runtime = AgentGuardRuntime(config, tgr_model=tgr)
     runtime.init_feature_builder(reid_dim=128)
     track = FakeTrack(track_id=1)
 
@@ -382,7 +398,8 @@ def test_runtime_finalize_first_stage_partial_window():
         )
         runtime.checkpoints.save_checkpoint(1, evt.event_id, _make_snapshot())
 
-    runtime.finalize_first_stage([], [])
+    result = runtime.finalize_first_stage([], [])
+    assert result == {}
     # Window not full → nothing popped
     assert len(runtime.window_buffers[1].events) == 3
 
@@ -390,7 +407,8 @@ def test_runtime_finalize_first_stage_partial_window():
 def test_runtime_finalize_first_stage_full_window():
     """With a full window and checkpoint, finalize_first_stage runs TGR replay."""
     config = {"mode": "full"}
-    runtime = AgentGuardRuntime(config)
+    tgr = _make_mock_tgr(reid_dim=128)
+    runtime = AgentGuardRuntime(config, tgr_model=tgr)
     runtime.init_feature_builder(reid_dim=128)
     track = FakeTrack(track_id=2)
 
@@ -407,7 +425,7 @@ def test_runtime_finalize_first_stage_full_window():
     assert runtime.window_buffers[2].is_full
     assert len(runtime.window_buffers[2].events) == 4
 
-    runtime.finalize_first_stage([], [])
+    plans = runtime.finalize_first_stage([], [])
 
     # After finalize: oldest event popped from window, checkpoint removed
     assert len(runtime.window_buffers[2].events) == 3

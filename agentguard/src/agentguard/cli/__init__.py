@@ -127,7 +127,7 @@ def _add_cache_events_parser(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument(
         "--sequence", type=str, default=None, help="Single sequence to process."
     )
-    p.add_argument("--max-frames", type=int, default=200, help="Max frames per seq.")
+    p.add_argument("--max-frames", type=int, default=0, help="Max frames per seq (0=unlimited).")
     p.add_argument(
         "--data-dir",
         default=os.environ.get("TRACKTRACK_DATA_DIR", "/home/shang/datasets/"),
@@ -148,7 +148,9 @@ def _cmd_cache_events(args: argparse.Namespace) -> None:
     from utils.etc import set_parameters
     from agentguard.data.cache_writer import EventCacheWriter
     from agentguard.data.cache_schema import CacheManifest
+    from agentguard.data.event_sink import CacheEventSink
     from agentguard.contracts.events import TrackEvent
+    from agentguard.contracts.states import TrackStateSnapshot
     from agentguard.features.scalar import compute_scalar_features
 
     dataset = args.dataset
@@ -218,7 +220,55 @@ def _cmd_cache_events(args: argparse.Namespace) -> None:
         # Create tracker
         tracker = Tracker(tracker_args, seq_name)
 
-        # Prepare cache writer
+        # Create EventSink backed by CacheEventSink
+        event_sink = CacheEventSink(
+            output_dir=cache_output,
+            dataset=dataset,
+            split=mode,
+            sequence=seq_name,
+        )
+        event_sink.on_sequence_start(
+            sequence=seq_name,
+            reid_dim=getattr(tracker_args, 'reid_dim', 2048),
+            image_width=img_w,
+            image_height=img_h,
+        )
+
+        # Create minimal runtime-like object so adapter works
+        class _CacheRuntime:
+            pass
+
+        runtime = _CacheRuntime()
+        runtime.mode = "off"
+        runtime.event_sink = event_sink
+        runtime.stats = None
+        runtime.event_buffers = {}
+        runtime.checkpoints = None
+        runtime.iwg = None
+        runtime.feature_builder = None
+
+        def _noop(*args_, **kwargs_):
+            pass
+
+        runtime.init_feature_builder = _noop
+        runtime.init_motion_model = _noop
+        runtime.finalize_first_stage = lambda: {}
+        runtime.get_or_create_buffer = lambda tid: (None, None)
+        runtime.cleanup_track = _noop
+        runtime.run_iwg_inference = lambda seq: {
+            "policy_probs": np.ones(5, dtype=np.float64) / 5.0,
+            "gate": np.ones(2, dtype=np.float64),
+            "event_logits": np.zeros(10, dtype=np.float64),
+            "cue": np.ones(3, dtype=np.float64),
+            "gate_residual": np.zeros(2, dtype=np.float64),
+        }
+
+        # Create adapter
+        from integrations.agentguard.adapter import AgentGuardTrackerAdapter
+
+        adapter = AgentGuardTrackerAdapter(tracker_args, seq_name, runtime)
+
+        # Prepare cache writer for frame data and identity prototypes
         writer = EventCacheWriter(cache_output)
         manifest = CacheManifest(
             dataset=dataset,
@@ -227,39 +277,97 @@ def _cmd_cache_events(args: argparse.Namespace) -> None:
             image_width=img_w,
             image_height=img_h,
         )
-        all_events: List[TrackEvent] = []
         frame_data: Dict[int, Any] = {}
-        identity_prototypes: Dict[int, Any] = {}
+        identity_prototypes: Dict[Any, Any] = {}
 
         # Frame iteration
         frame_ids = sorted(detections[seq_name].keys())
-        if args.max_frames and args.max_frames > 0:
-            frame_ids = frame_ids[: args.max_frames]
+        max_frames = getattr(args, 'max_frames', 0)
+        for i, frame_id in enumerate(frame_ids):
+            if max_frames > 0 and i >= max_frames:
+                break
 
-        for frame_id in frame_ids:
             det_frame = detections[seq_name][frame_id]
             det_frame_95 = detections_95[seq_name][frame_id]
 
             # Capture warp matrix from CMC (before update)
             warp_matrix = tracker.cmc.get_warp_matrix().copy() if hasattr(tracker, 'cmc') else np.eye(2, 3, dtype=np.float64)
 
+            # Notify adapter of new frame
+            adapter.begin_frame(frame_id, img_w, img_h)
+
             if det_frame is not None:
                 track_results = tracker.update(det_frame, det_frame_95)
             else:
                 track_results = tracker.update_without_detections()
 
-            # Build events from tracker state
-            seq_events = _extract_tracker_events(
-                tracker, frame_id, seq_name, dataset, img_w, img_h, warp_matrix
-            )
-            all_events.extend(seq_events)
+            # Build and record events via adapter
+            from agentguard.contracts.outputs import GateDecision
 
-            # Build identity prototypes (simplified: use track features)
+            for t in tracker.tracks:
+                if getattr(t, 'state', -1) not in (1, 2):  # Tracked or Lost
+                    continue
+
+                has_det = hasattr(t, 'feat') and t.feat is not None
+
+                # Build state snapshots
+                frame_start = TrackStateSnapshot(
+                    track_id=t.track_id,
+                    box=t.box.copy() if hasattr(t, 'box') else np.zeros(4),
+                    score=float(getattr(t, 'score', 0.0)),
+                    mean=t.mean.copy() if hasattr(t, 'mean') and t.mean is not None else None,
+                    covariance=t.covariance.copy() if hasattr(t, 'covariance') and t.covariance is not None else None,
+                    velocity=t.velocity.copy() if hasattr(t, 'velocity') else np.zeros((4, 2)),
+                    feature=t.feat.copy() if has_det else np.zeros((1, 2048)),
+                    history=getattr(t, 'history', {}),
+                    end_frame_id=getattr(t, 'end_frame_id', frame_id),
+                    state=getattr(t, 'state', 1),
+                )
+                pre_update = frame_start  # simplified
+
+                event = TrackEvent(
+                    event_id=f"{dataset}/{seq_name}/{frame_id:06d}/{t.track_id:06d}",
+                    dataset=dataset,
+                    sequence=seq_name,
+                    frame_id=frame_id,
+                    track_id=t.track_id,
+                    image_width=img_w,
+                    image_height=img_h,
+                    has_detection=has_det,
+                    frame_start_state=frame_start,
+                    pre_update_state=pre_update,
+                    detection=None,
+                    association=None,
+                    warp_matrix=warp_matrix.copy(),
+                )
+
+                # Compute scalar features
+                event.scalar_features = compute_scalar_features(event)
+
+                # Populate track/detection features
+                if has_det:
+                    event.track_feature = t.feat.ravel().copy()
+                    event.detection_feature = t.feat.ravel().copy()
+                else:
+                    event.track_feature = np.zeros(2048, dtype=np.float64)
+                    event.detection_feature = np.zeros(2048, dtype=np.float64)
+
+                # Record via adapter (which pushes to EventSink)
+                if has_det:
+                    gate = GateDecision(1.0, 1.0, np.ones(5, dtype=np.float64) / 5.0, 1.0)
+                    adapter.record_event(t.track_id, event, gate)
+                else:
+                    adapter.record_unmatched_event(t.track_id, event)
+
+            # Flush frame to EventSink via finalize_first_stage
+            adapter.finalize_first_stage(tracker.tracks)
+
+            # Build identity prototypes by (seq, track_id)
             for t in tracker.tracks:
                 if hasattr(t, 'feat') and t.feat is not None and t.feat.size > 0:
-                    tid = t.track_id
-                    if tid not in identity_prototypes:
-                        identity_prototypes[tid] = t.feat.copy()
+                    identity_key = (seq_name, t.track_id)
+                    if identity_key not in identity_prototypes:
+                        identity_prototypes[identity_key] = t.feat.copy()
 
             frame_data[frame_id] = {
                 "num_detections": len(det_frame) if det_frame is not None else 0,
@@ -267,107 +375,23 @@ def _cmd_cache_events(args: argparse.Namespace) -> None:
                 "warp_matrix": warp_matrix.tolist(),
             }
 
-        # Update manifest
-        manifest.num_frames = len(frame_ids)
-        manifest.num_events = len(all_events)
+        # Finalize EventSink (writes cache shards)
+        manifest_info = event_sink.on_sequence_end()
 
-        # Write cache
+        # Update manifest with actual counts
+        manifest.num_frames = len(frame_ids)
+        manifest.num_events = manifest_info.get("num_events", 0)
+
+        # Write manifest and frame data (identity prototypes are handled by event_sink)
         writer.write_manifest(manifest)
         writer.write_frames(frame_data, manifest)
-        writer.write_events(all_events, manifest=manifest)
         writer.write_identity_prototypes(identity_prototypes, manifest)
 
         print(f"  Wrote {manifest.num_events} events, {manifest.num_frames} frames "
               f"to {writer._seq_dir(manifest)}")
 
 
-def _extract_tracker_events(
-    tracker: Any,
-    frame_id: int,
-    sequence: str,
-    dataset: str,
-    img_w: int,
-    img_h: int,
-    warp_matrix: np.ndarray,
-) -> List[TrackEvent]:
-    """Build TrackEvent objects from the current tracker state.
-
-    This is a simplified extraction that creates events for all tracks
-    that have been updated in the current frame.  In a full pipeline the
-    ``AgentGuardTrackerAdapter`` would be used to build richer events.
-    """
-    from agentguard.contracts.states import (
-        TrackStateSnapshot,
-        DetectionObservation,
-        AssociationPairFeatures,
-    )
-    from agentguard.features.scalar import compute_scalar_features
-
-    events: List[TrackEvent] = []
-    for t in tracker.tracks:
-        # Skip new tracks not yet updated
-        if getattr(t, 'state', -1) not in (1, 2):  # Tracked or Lost
-            continue
-
-        has_det = hasattr(t, 'feat') and t.feat is not None
-
-        # Build state snapshots
-        frame_start = TrackStateSnapshot(
-            track_id=t.track_id,
-            box=t.box.copy() if hasattr(t, 'box') else np.zeros(4),
-            score=float(getattr(t, 'score', 0.0)),
-            mean=t.mean.copy() if hasattr(t, 'mean') and t.mean is not None else None,
-            covariance=t.covariance.copy() if hasattr(t, 'covariance') and t.covariance is not None else None,
-            velocity=t.velocity.copy() if hasattr(t, 'velocity') else np.zeros((4, 2)),
-            feature=t.feat.copy() if has_det else np.zeros((1, 2048)),
-            history=getattr(t, 'history', {}),
-            end_frame_id=getattr(t, 'end_frame_id', frame_id),
-            state=getattr(t, 'state', 1),
-        )
-        pre_update = frame_start  # simplified – same as frame_start when CMC/predict not captured separately
-
-        detection = None
-        association = None
-        if has_det:
-            detection = DetectionObservation(
-                detection_index=0,
-                box=t.box.copy(),
-                score=float(getattr(t, 'score', 0.0)),
-                feature=t.feat.copy(),
-                source=0,
-                class_id=1,
-            )
-
-        event = TrackEvent(
-            event_id=f"{dataset}/{sequence}/{frame_id:06d}/{t.track_id:06d}",
-            dataset=dataset,
-            sequence=sequence,
-            frame_id=frame_id,
-            track_id=t.track_id,
-            image_width=img_w,
-            image_height=img_h,
-            has_detection=has_det,
-            frame_start_state=frame_start,
-            pre_update_state=pre_update,
-            detection=detection,
-            association=association,
-            warp_matrix=warp_matrix.copy(),
-        )
-
-        # Compute scalar features
-        event.scalar_features = compute_scalar_features(event)
-
-        # Populate track/detection features
-        if has_det:
-            event.track_feature = t.feat.ravel().copy()
-            event.detection_feature = t.feat.ravel().copy()
-        else:
-            event.track_feature = np.zeros(2048, dtype=np.float64)
-            event.detection_feature = np.zeros(2048, dtype=np.float64)
-
-        events.append(event)
-
-    return events
+# _extract_tracker_events removed — events now come from the adapter during processing
 
 
 # ===================================================================
@@ -539,7 +563,7 @@ def _cmd_build_rollout_labels(args: argparse.Namespace) -> None:
     all_events: List[TrackEvent] = []
     all_motion_benefits: List[float] = []
     all_appearance_benefits: List[float] = []
-    all_identity_prototypes: Dict[int, np.ndarray] = {}
+    all_identity_prototypes: Dict[Any, np.ndarray] = {}
 
     motion_model = NSAKalmanFilter()
 
@@ -566,6 +590,10 @@ def _cmd_build_rollout_labels(args: argparse.Namespace) -> None:
         except Exception:
             gt_reader = None
 
+        # Identity vote state for resolving target_gt_id
+        from agentguard.data.identity_vote import TrackIdentityVoteState
+        identity_vote = TrackIdentityVoteState()
+
         all_frame_detections: Dict[int, List[Tuple[np.ndarray, float, int]]] = {}
         for fid, fdata in frame_data.items():
             all_frame_detections[fid] = []
@@ -583,35 +611,85 @@ def _cmd_build_rollout_labels(args: argparse.Namespace) -> None:
 
         all_identity_prototypes.update(prototypes)
 
+        # Helper to compute IoU between two boxes
+        def _box_iou(a, b):
+            x1 = max(float(a[0]), float(b[0]))
+            y1 = max(float(a[1]), float(b[1]))
+            x2 = min(float(a[2]), float(b[2]))
+            y2 = min(float(a[3]), float(b[3]))
+            inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+            area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+            area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+            union = area_a + area_b - inter
+            return 0.0 if union <= 0.0 else inter / union
+
         for evt in events:
             if args.max_events > 0 and total_processed >= args.max_events:
                 break
 
-            # Get identity prototype
-            proto = prototypes.get(evt.track_id)
-            if proto is None:
-                total_processed += 1
-                continue
-
-            # Build oracle data
+            # Resolve target_gt_id from identity vote state
+            target_gt_id = None
             if gt_reader is not None:
+                target_gt_id = identity_vote.resolve_before_current(evt.sequence, evt.track_id)
+
+                # Determine detection GT ID for current event to feed vote state
+                detection_gt_id = -1
+                if evt.has_detection and evt.detection is not None:
+                    det_box = evt.detection.box
+                    gt_entries = gt_reader.get_gt_for_frame(evt.frame_id)
+                    best_iou = 0.5  # threshold
+                    for gt_box, gt_id in gt_entries:
+                        iou = _box_iou(det_box, gt_box)
+                        if iou > best_iou:
+                            best_iou = iou
+                            detection_gt_id = gt_id
+                identity_vote.add_current_observation(evt.sequence, evt.track_id, detection_gt_id)
+
+            # Get identity prototype by (seq, target_gt_id)
+            proto = None
+            identity_key = (seq, target_gt_id) if target_gt_id is not None else None
+            if identity_key is not None:
+                proto = all_identity_prototypes.get(identity_key)
+
+            # Build oracle data with target_gt_id
+            if gt_reader is not None and target_gt_id is not None:
                 oracle_data = oracle_builder.build(
-                    evt, gt_reader, all_frame_detections, frame_ids
+                    evt, gt_reader, all_frame_detections, frame_ids,
+                    target_gt_id=target_gt_id,
                 )
             else:
+                oracle_data = None
+
+            if oracle_data is None:
                 oracle_data = {
                     "current_gt_box": None,
                     "future_gt_boxes": [],
                     "future_oracle_detections": [],
                     "future_warp_matrices": [],
-                    "future_oracle_features": [],
-                    "future_oracle_scores": [],
                 }
+
+            # Build RolloutContext for benefit computation
+            from agentguard.rollout.context import RolloutContext
+
+            ctx = RolloutContext(
+                frame_id=evt.frame_id,
+                target_gt_id=target_gt_id if target_gt_id is not None else -1,
+                pre_update_state=evt.pre_update_state if evt.pre_update_state is not None
+                else evt.frame_start_state,
+                current_candidate=evt.detection,
+                current_gt_box=oracle_data.get("current_gt_box"),
+                future_gt_boxes=oracle_data.get("future_gt_boxes", []),
+                future_oracle_detections=oracle_data.get("future_oracle_detections", []),
+                future_warp_matrices=oracle_data.get("future_warp_matrices", []),
+                identity_prototype=proto,
+            )
 
             # Compute benefits
             try:
-                B_m, _, _, _, _ = compute_motion_benefit(evt, oracle_data, motion_model)
-                B_a, _, _, _, _ = compute_appearance_benefit(evt, oracle_data, proto)
+                B_m, write_losses, skip_losses, valid_m = compute_motion_benefit(
+                    ctx, motion_model
+                )
+                B_a, _, _, _, _, valid_a = compute_appearance_benefit(ctx)
             except Exception as e:
                 print(f"  WARN: benefit computation failed for {evt.event_id}: {e}")
                 total_processed += 1
@@ -1004,10 +1082,18 @@ def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
             print(f"  WARN: no labels for {seq}, skipping.")
             continue
 
-        # Ensure alignment
-        min_len = min(len(events), len(seq_labels))
-        all_events.extend(events[:min_len])
-        all_labels.extend(seq_labels[:min_len])
+        # Build label lookup by (event_id, candidate_type)
+        label_by_key = {}
+        for lbl in seq_labels:
+            key = (lbl.get("event_id", ""), lbl.get("candidate_type", "A"))
+            label_by_key[key] = lbl
+
+        for evt in events:
+            key = (evt.event_id, getattr(evt, 'candidate_type', 'A'))
+            if key not in label_by_key:
+                raise ValueError(f"Missing label for event {key}")
+            all_events.append(evt)
+            all_labels.append(label_by_key[key])
 
     if not all_events:
         print("No events/labels loaded.")
@@ -1199,9 +1285,17 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
             continue
         with open(seq_label_path) as f:
             seq_labels = json.load(f)
-        min_len = min(len(events), len(seq_labels))
-        all_events.extend(events[:min_len])
-        all_labels.extend(seq_labels[:min_len])
+        # Build label lookup by (event_id, candidate_type)
+        label_by_key = {}
+        for lbl in seq_labels:
+            key = (lbl.get("event_id", ""), lbl.get("candidate_type", "A"))
+            label_by_key[key] = lbl
+        for evt in events:
+            key = (evt.event_id, getattr(evt, 'candidate_type', 'A'))
+            if key not in label_by_key:
+                raise ValueError(f"Missing label for event {key}")
+            all_events.append(evt)
+            all_labels.append(label_by_key[key])
 
     train_evts = [evt for evt in all_events if evt.sequence in train_seqs]
     val_evts = [evt for evt in all_events if evt.sequence in val_seqs]
@@ -1339,9 +1433,17 @@ def _cmd_select_teacher_events(args: argparse.Namespace) -> None:
         with open(seq_label_path) as f:
             seq_labels = json.load(f)
 
-        min_len = min(len(events), len(seq_labels))
-        all_events.extend(events[:min_len])
-        all_labels.extend(seq_labels[:min_len])
+        # Build label lookup by (event_id, candidate_type)
+        label_by_key = {}
+        for lbl in seq_labels:
+            key = (lbl.get("event_id", ""), lbl.get("candidate_type", "A"))
+            label_by_key[key] = lbl
+        for evt in events:
+            key = (evt.event_id, getattr(evt, 'candidate_type', 'A'))
+            if key not in label_by_key:
+                raise ValueError(f"Missing label for event {key}")
+            all_events.append(evt)
+            all_labels.append(label_by_key[key])
 
     print(f"Loaded {len(all_events)} events with labels.")
 
@@ -1670,7 +1772,7 @@ def _cmd_verify_and_fuse(args: argparse.Namespace) -> None:
             continue
 
         event = event_map[event_id]
-        proto = seq_prototypes.get(event.sequence, {}).get(event.track_id)
+        proto = seq_prototypes.get(event.sequence, {}).get((event.sequence, event.track_id))
 
         # Build verifier with this event's prototypes
         verifier.identity_prototypes = {event.track_id: proto} if proto is not None else {}

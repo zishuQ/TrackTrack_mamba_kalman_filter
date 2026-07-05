@@ -29,6 +29,9 @@ class TGR(nn.Module):
             nn.Linear(128, 64), nn.GELU(), nn.Linear(64, 2),
         )
 
+        self.position_embedding = nn.Parameter(torch.zeros(1, 4, event_dim))
+        nn.init.normal_(self.position_embedding, mean=0.0, std=0.02)
+
     def forward(self, track_feats: torch.Tensor, det_feats: torch.Tensor,
                 scalar_feats: torch.Tensor, iwg_policy_probs: torch.Tensor,
                 iwg_gates: torch.Tensor, has_detection_mask: torch.BoolTensor,
@@ -50,6 +53,7 @@ class TGR(nn.Module):
 
         fused = torch.cat([event_embs, policy_proj, gate_proj], dim=-1)
         fused = self.pre_fusion(fused)
+        fused = fused + self.position_embedding[:, :seq_len, :]
 
         if padding_mask is not None:
             trans_out = self.transformer(fused, src_key_padding_mask=padding_mask)

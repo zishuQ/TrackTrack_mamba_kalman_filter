@@ -13,8 +13,12 @@ echo "Output dir: $OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"
 
 echo "Caching detections and GT matches for $DATASET ..."
-cd agentguard
-../.venv/bin/python -c "
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+
+cd "${REPO_ROOT}/agentguard"
+"${PYTHON_BIN}" -c "
 from agentguard.data.cache_reader import iterate_cache
 from agentguard.data.gt_matching import match_detections_to_gt
 print('Cache and GT matching modules loaded successfully.')

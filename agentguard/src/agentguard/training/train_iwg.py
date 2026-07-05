@@ -24,6 +24,8 @@ def train_iwg(
     val_loader: torch.utils.data.DataLoader,
     config: Dict[str, Any],
     output_dir: str,
+    norm_mean: Optional[np.ndarray] = None,
+    norm_std: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """Train an IWG model.
 
@@ -303,6 +305,7 @@ def train_iwg(
                 "event_dim": cfg["event_dim"],
             },
             path=last_ckpt_path,
+            norm_mean=norm_mean, norm_std=norm_std,
         )
 
         # Save best checkpoint.
@@ -323,6 +326,7 @@ def train_iwg(
                     "is_best": True,
                 },
                 path=best_ckpt_path,
+                norm_mean=norm_mean, norm_std=norm_std,
             )
             logger.info(f"New best model (val_loss={val_loss:.6f}) — saved to {best_ckpt_path}")
         else:
@@ -416,36 +420,29 @@ def _compute_iwg_loss(
         [targets["motion_target"], targets["appearance_target"]], dim=-1
     )                                               # (B, 2)
     target_policy = targets["policy_soft_target"]    # (B, 5)
-    valid_mask = torch.stack(
-        [targets["valid_motion"], targets["valid_appearance"]], dim=-1
-    )                                               # (B, 2)
 
-    # Gate BCE loss (only on valid entries).
-    pred_gate_clipped = torch.clamp(pred_gate, 1e-6, 1.0 - 1e-6)
-    gate_bce = F.binary_cross_entropy(
-        pred_gate_clipped, target_gate, reduction="none"
-    )                                               # (B, 2)
-    gate_loss = (gate_bce * valid_mask.float()).sum() / valid_mask.float().sum().clamp(min=1)
+    # Per-sample losses
+    gate_loss_per_sample = F.binary_cross_entropy(
+        pred_gate.clamp(1e-6, 1-1e-6), target_gate, reduction='none'
+    ).mean(dim=-1)  # (B,)
 
-    # Policy KL divergence.
-    policy_kl = F.kl_div(
-        torch.clamp(pred_policy, min=1e-8).log(),
-        torch.clamp(target_policy, min=1e-8),
-        reduction="batchmean",
-        log_target=False,
-    )
+    pred_log_policy = torch.clamp(pred_policy, min=1e-8).log()
+    target_policy_dist = torch.clamp(target_policy, min=1e-8)
+    policy_kl_per_sample = F.kl_div(
+        pred_log_policy, target_policy_dist, reduction='none'
+    ).sum(dim=-1)  # (B,)
 
-    # Brier score (MSE on gates).
-    brier_loss = F.mse_loss(pred_gate, target_gate, reduction="mean")
+    brier_per_sample = ((pred_gate - target_gate) ** 2).sum(dim=-1)  # (B,)
 
-    # Weighted total.
-    sample_weight = targets.get("sample_weight", torch.ones_like(target_gate[:, 0]))
-    loss = gate_loss + 0.1 * policy_kl + 0.1 * brier_loss
-    loss = (loss * sample_weight.detach()).mean()
+    loss_per_sample = gate_loss_per_sample + 0.1 * policy_kl_per_sample + 0.1 * brier_per_sample
 
-    return loss, {
-        "loss": loss.detach(),
-        "gate_loss": gate_loss.detach(),
-        "policy_loss": policy_kl.detach(),
-        "brier_loss": brier_loss.detach(),
+    # Apply sample weights
+    sample_weight = targets.get("sample_weight", torch.ones_like(loss_per_sample))
+    weighted_loss = (loss_per_sample * sample_weight).sum() / sample_weight.sum().clamp(min=1e-8)
+
+    return weighted_loss, {
+        "loss": weighted_loss.detach(),
+        "gate_loss": (gate_loss_per_sample * sample_weight).sum() / sample_weight.sum().clamp(min=1).detach(),
+        "policy_loss": policy_kl_per_sample.detach().mean(),
+        "brier_loss": brier_per_sample.detach().mean(),
     }

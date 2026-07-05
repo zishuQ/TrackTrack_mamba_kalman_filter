@@ -25,6 +25,9 @@ class IWG(nn.Module):
         self.event_head = nn.Sequential(nn.Linear(event_dim, 64), nn.Linear(64, 10))
         self.cue_head = nn.Sequential(nn.Linear(event_dim, 32), nn.Linear(32, 3))
 
+        self.position_embedding = nn.Parameter(torch.zeros(1, 6, event_dim))
+        nn.init.normal_(self.position_embedding, mean=0.0, std=0.02)
+
     def forward(self, track_feats: torch.Tensor, det_feats: torch.Tensor,
                 scalar_feats: torch.Tensor, mask: torch.BoolTensor = None) -> dict:
         B, seq_len, _ = track_feats.shape
@@ -35,15 +38,14 @@ class IWG(nn.Module):
         event_embs = self.encoder(track_flat, det_flat, scalar_flat)
         event_embs = event_embs.view(B, seq_len, -1)
 
+        x = event_embs + self.position_embedding[:, :seq_len, :]
         if mask is not None:
-            trans_out = self.transformer(event_embs, src_key_padding_mask=mask)
-            seq_lens = (~mask).sum(dim=1).long()
-            last_valid_idx = (seq_lens - 1).clamp(min=0)
-            batch_indices = torch.arange(B, device=track_feats.device)
-            last_out = trans_out[batch_indices, last_valid_idx]
+            trans_out = self.transformer(x, src_key_padding_mask=mask)
         else:
-            trans_out = self.transformer(event_embs)
-            last_out = trans_out[:, -1, :]
+            trans_out = self.transformer(x)
+
+        # Use position -1 (last position, guaranteed non-padded for left-padded sequences)
+        last_out = trans_out[:, -1, :]
 
         policy_logits = self.policy_head(last_out)
         policy_probs = F.softmax(policy_logits, dim=-1)

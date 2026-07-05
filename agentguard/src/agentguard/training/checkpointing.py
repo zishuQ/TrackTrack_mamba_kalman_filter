@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -14,6 +15,8 @@ def save_checkpoint(
     epoch: int,
     metadata: Dict[str, Any],
     path: str,
+    norm_mean: Optional[np.ndarray] = None,
+    norm_std: Optional[np.ndarray] = None,
 ) -> str:
     """Save a full training checkpoint to disk.
 
@@ -57,6 +60,10 @@ def save_checkpoint(
         checkpoint["optimizer_state_dict"] = optimizer.state_dict()
     if scheduler is not None:
         checkpoint["scheduler_state_dict"] = scheduler.state_dict()
+    if norm_mean is not None:
+        checkpoint["normalization_mean"] = norm_mean
+    if norm_std is not None:
+        checkpoint["normalization_std"] = norm_std
 
     torch.save(checkpoint, path)
     return os.path.abspath(path)

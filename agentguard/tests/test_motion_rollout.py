@@ -15,9 +15,81 @@ import pytest
 sys.path.insert(0, "src")
 
 from agentguard.contracts.events import TrackEvent
-from agentguard.contracts.states import TrackStateSnapshot
+from agentguard.contracts.states import DetectionObservation, TrackStateSnapshot
 from agentguard.motion.nsa_numpy import NSAKalmanFilter
+from agentguard.rollout.context import RolloutContext
 from agentguard.rollout.motion import compute_motion_benefit
+
+
+# ---------------------------------------------------------------------------
+#  Helper: build a RolloutContext from old-style (event, oracle_data)
+# ---------------------------------------------------------------------------
+
+
+def _build_rollout_context(
+    event: TrackEvent,
+    oracle_data: dict,
+) -> RolloutContext:
+    """Convert old-style (event, oracle_data) arguments to a RolloutContext.
+
+    The *oracle_data* dict may contain:
+        future_gt_boxes         — list of (4,) boxes or None (default [None]*5)
+        future_oracle_detections — list of (4,) raw boxes or None
+        future_oracle_features   — list of (1, D) features or None
+        future_oracle_scores     — list of float scores
+        future_warp_matrices     — list of (2, 3) warp matrices
+        current_gt_box           — (4,) current GT box
+
+    Raw oracle boxes are converted to ``DetectionObservation`` objects with
+    the corresponding feature and score (or defaults).
+    """
+    # Use explicit future_gt_boxes if provided; otherwise fall back to
+    # future_oracle_detections (old-style) as the GT boxes for loss computation.
+    future_gt = oracle_data.get("future_gt_boxes")
+    if future_gt is None:
+        future_gt = oracle_data.get("future_oracle_detections", [None] * 5)
+
+    raw_dets = oracle_data.get("future_oracle_detections", [None] * 5)
+    raw_feats = oracle_data.get("future_oracle_features", [None] * 5)
+    raw_scores = oracle_data.get("future_oracle_scores", [0.0] * 5)
+    future_warps = oracle_data.get("future_warp_matrices", [np.eye(2, 3)] * 5)
+    current_gt = oracle_data.get("current_gt_box")
+
+    if current_gt is None:
+        current_gt = np.array([0, 0, 0, 0], dtype=np.float64)
+
+    # Convert raw boxes → DetectionObservation objects
+    oracle_dets: List[Optional[DetectionObservation]] = []
+    for i in range(len(raw_dets)):
+        box = raw_dets[i]
+        if box is None:
+            oracle_dets.append(None)
+        else:
+            feat = raw_feats[i] if i < len(raw_feats) and raw_feats[i] is not None else np.zeros((1, 64), dtype=np.float64)
+            score = raw_scores[i] if i < len(raw_scores) else 0.0
+            oracle_dets.append(
+                DetectionObservation(
+                    detection_index=i,
+                    box=box,
+                    score=score,
+                    feature=feat,
+                    source=0,
+                    class_id=1,
+                )
+            )
+
+    return RolloutContext(
+        frame_id=event.frame_id,
+        target_gt_id=getattr(event, "target_gt_id", -1),
+        pre_update_state=event.pre_update_state,
+        current_candidate=event.detection if event.has_detection else None,
+        current_gt_box=current_gt,
+        future_gt_boxes=future_gt,
+        future_oracle_detections=oracle_dets,
+        future_warp_matrices=future_warps,
+        identity_prototype=None,
+        appearance_alpha=0.95,
+    )
 
 
 @pytest.fixture
@@ -31,8 +103,9 @@ def test_motion_benefit_nonzero_with_gt(
     motion_kf: NSAKalmanFilter,
 ):
     """Motion benefit should be non-zero when detection and oracle data exist."""
-    B_m, write_losses, skip_losses, write_boxes, skip_boxes = compute_motion_benefit(
-        mock_event, mock_future_oracle_data, motion_kf, future_frames=5,
+    ctx = _build_rollout_context(mock_event, mock_future_oracle_data)
+    B_m, write_losses, skip_losses, valid_mask = compute_motion_benefit(
+        ctx, motion_kf, future_frames=5,
     )
     # At least one branch should differ from the other
     assert not np.allclose(sum(write_losses), sum(skip_losses)), \
@@ -40,6 +113,7 @@ def test_motion_benefit_nonzero_with_gt(
     # Benefit should be non-zero
     assert B_m != pytest.approx(0.0, abs=1e-10), \
         "Motion benefit should be non-zero with detection and oracle GT"
+    assert valid_mask.dtype == bool
 
 
 def test_motion_benefit_shapes(
@@ -49,13 +123,14 @@ def test_motion_benefit_shapes(
 ):
     """Output shapes should be consistent with future_frames."""
     future_frames = 3
-    B_m, write_losses, skip_losses, write_boxes, skip_boxes = compute_motion_benefit(
-        mock_event, mock_future_oracle_data, motion_kf, future_frames=future_frames,
+    ctx = _build_rollout_context(mock_event, mock_future_oracle_data)
+    B_m, write_losses, skip_losses, valid_mask = compute_motion_benefit(
+        ctx, motion_kf, future_frames=future_frames,
     )
     assert len(write_losses) == future_frames
     assert len(skip_losses) == future_frames
-    assert len(write_boxes) == future_frames
-    assert len(skip_boxes) == future_frames
+    assert len(valid_mask) == future_frames
+    assert valid_mask.dtype == bool
     assert isinstance(B_m, float)
 
 
@@ -65,8 +140,9 @@ def test_motion_benefit_losses_nonnegative(
     motion_kf: NSAKalmanFilter,
 ):
     """All per-frame losses should be non-negative."""
-    _, write_losses, skip_losses, _, _ = compute_motion_benefit(
-        mock_event, mock_future_oracle_data, motion_kf, future_frames=5,
+    ctx = _build_rollout_context(mock_event, mock_future_oracle_data)
+    _, write_losses, skip_losses, _ = compute_motion_benefit(
+        ctx, motion_kf, future_frames=5,
     )
     for wl in write_losses:
         assert wl >= 0.0, f"Write loss {wl} should be >= 0"
@@ -80,8 +156,9 @@ def test_motion_benefit_no_detection(
     motion_kf: NSAKalmanFilter,
 ):
     """Without detection, write and skip branches should be identical -> benefit ~0."""
-    B_m, write_losses, skip_losses, write_boxes, skip_boxes = compute_motion_benefit(
-        mock_event_no_detection, mock_future_oracle_data, motion_kf, future_frames=3,
+    ctx = _build_rollout_context(mock_event_no_detection, mock_future_oracle_data)
+    B_m, write_losses, skip_losses, _ = compute_motion_benefit(
+        ctx, motion_kf, future_frames=3,
     )
     assert abs(B_m) < 1e-10
     assert write_losses == pytest.approx(skip_losses)
@@ -96,12 +173,14 @@ def test_motion_benefit_no_oracle(
         "future_oracle_detections": [],
         "future_warp_matrices": [],
     }
-    B_m, write_losses, skip_losses, write_boxes, skip_boxes = compute_motion_benefit(
-        mock_event, empty_oracle, motion_kf, future_frames=5,
+    ctx = _build_rollout_context(mock_event, empty_oracle)
+    B_m, write_losses, skip_losses, valid_mask = compute_motion_benefit(
+        ctx, motion_kf, future_frames=5,
     )
     assert B_m == 0.0
     assert all(wl == 0.0 for wl in write_losses)
     assert all(sl == 0.0 for sl in skip_losses)
+    assert len(valid_mask) == 0
 
 
 def test_motion_benefit_with_oracle_mismatch(
@@ -121,25 +200,25 @@ def test_motion_benefit_with_oracle_mismatch(
             np.eye(2, 3, dtype=np.float64),
         ],
     }
-    B_m, write_losses, skip_losses, write_boxes, skip_boxes = compute_motion_benefit(
-        mock_event, oracle_data, motion_kf, future_frames=2,
+    ctx = _build_rollout_context(mock_event, oracle_data)
+    B_m, write_losses, skip_losses, _ = compute_motion_benefit(
+        ctx, motion_kf, future_frames=2,
     )
     assert abs(B_m) > 1e-6, "Benefit should be non-zero with mismatched oracle"
 
 
-def test_motion_benefit_oracle_boxes_shape(
+def test_motion_benefit_valid_mask(
     mock_event: TrackEvent,
     mock_future_oracle_data: dict,
     motion_kf: NSAKalmanFilter,
 ):
-    """Oracle boxes should be returned as (4,) arrays."""
-    _, _, _, write_boxes, skip_boxes = compute_motion_benefit(
-        mock_event, mock_future_oracle_data, motion_kf, future_frames=3,
+    """Valid mask should be a boolean array matching future_frames."""
+    ctx = _build_rollout_context(mock_event, mock_future_oracle_data)
+    _, _, _, valid_mask = compute_motion_benefit(
+        ctx, motion_kf, future_frames=3,
     )
-    for wb in write_boxes:
-        assert wb.shape == (4,), f"Expected (4,) got {wb.shape}"
-    for sb in skip_boxes:
-        assert sb.shape == (4,), f"Expected (4,) got {sb.shape}"
+    assert valid_mask.shape == (3,)
+    assert valid_mask.dtype == bool
 
 
 def test_motion_benefit_truncates_to_available_data(
@@ -155,11 +234,13 @@ def test_motion_benefit_truncates_to_available_data(
             np.eye(2, 3, dtype=np.float64),
         ],
     }
-    B_m, write_losses, skip_losses, write_boxes, skip_boxes = compute_motion_benefit(
-        mock_event, oracle_data, motion_kf, future_frames=10,
+    ctx = _build_rollout_context(mock_event, oracle_data)
+    B_m, write_losses, skip_losses, valid_mask = compute_motion_benefit(
+        ctx, motion_kf, future_frames=10,
     )
     assert len(write_losses) == 1
     assert len(skip_losses) == 1
+    assert len(valid_mask) == 1
 
 
 def test_motion_benefit_pre_state_none_raises(motion_kf):
@@ -169,5 +250,6 @@ def test_motion_benefit_pre_state_none_raises(motion_kf):
         dataset="test", sequence="test", frame_id=0, track_id=0,
         image_width=640, image_height=480, has_detection=False,
     )
+    ctx = _build_rollout_context(ev, {})
     with pytest.raises(ValueError, match="no pre_update_state"):
-        compute_motion_benefit(ev, {}, motion_kf)
+        compute_motion_benefit(ctx, motion_kf)

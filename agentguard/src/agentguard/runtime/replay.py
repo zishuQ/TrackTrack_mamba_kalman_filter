@@ -1,12 +1,41 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import Any, List, Optional
 
 import numpy as np
 
 from agentguard.contracts.events import TrackEvent
 from agentguard.contracts.states import TrackStateSnapshot
 from agentguard.motion.nsa_numpy import NSAKalmanFilter
+
+
+@dataclass
+class ReplayStep:
+    """A single step in a TGR replay plan.
+
+    Carries the per-frame data needed to replay one event with revised gates.
+    """
+
+    frame_id: int
+    warp_matrix: np.ndarray
+    has_detection: bool
+    detection: Optional[Any]  # DetectionObservation or None
+    motion_gate: float
+    appearance_gate: float
+
+
+@dataclass
+class ReplayPlan:
+    """A complete replay plan for one track.
+
+    The caller uses the checkpoint and steps to replay revised gates onto a
+    live ``Track`` object.
+    """
+
+    track_id: int
+    checkpoint: TrackStateSnapshot
+    steps: List[ReplayStep] = field(default_factory=list)
 
 
 class ReplayEngine:

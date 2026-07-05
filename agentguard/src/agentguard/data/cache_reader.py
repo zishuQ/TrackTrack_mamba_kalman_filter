@@ -73,12 +73,18 @@ class EventCacheReader:
     def read_events(self) -> List[Any]:
         """Load all events from sharded ``.pt`` files.
 
+        Events are deserialised from JSON-compatible dicts back to
+        ``TrackEvent`` objects (see
+        :func:`agentguard.contracts.serialization.deserialize_events`).
+
         Returns
         -------
         list
             Concatenated list of all events across all shards, preserving
             the original shard ordering.
         """
+        from agentguard.contracts.serialization import deserialize_events
+
         shard_paths = self._glob_shards("events")
         all_events: List[Any] = []
         for sp in shard_paths:
@@ -87,7 +93,8 @@ class EventCacheReader:
                 all_events.extend(chunk)
             else:
                 all_events.append(chunk)
-        return all_events
+        # Deserialise raw dicts back to TrackEvent objects
+        return deserialize_events(all_events)
 
     def read_candidates(self) -> List[Any]:
         """Load all candidates from sharded ``.pt`` files.

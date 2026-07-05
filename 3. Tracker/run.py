@@ -147,6 +147,9 @@ def track(detections, detections_95, data_path, result_folder, mode):
                 if 'imHeight' in s_i:
                     args.img_h = int(s_i.split('=')[-1])
 
+        if not hasattr(args, 'img_w'):
+            raise ValueError("Image dimensions not set. Ensure seqinfo.ini is read.")
+
         # Set tracker
         tracker = Tracker(args, vid_name)
 
@@ -276,7 +279,8 @@ def run():
 
 if __name__ == "__main__":
     # Get arguments
-    args = make_parser().parse_args()
+    parser = make_parser()
+    args = parser.parse_args()
 
     # AgentGuard validation
     if args.agentguard_mode == 'iwg' and args.iwg_checkpoint is None:

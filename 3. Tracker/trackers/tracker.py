@@ -41,27 +41,68 @@ class Tracker(object):
             device = getattr(args, 'agentguard_device', 'cpu')
 
             # Determine ReID dimension from detection format (2054 total - 6 metadata)
-            reid_dim = getattr(args, 'reid_dim', 2048)
+            reid_dim = getattr(args, 'reid_dim', None)
+
+            def _load_checkpoint(ckpt_path):
+                """Load a checkpoint and return (state_dict, reid_dim, norm_stats)."""
+                checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+
+                # Extract state dict
+                if 'model_state_dict' in checkpoint:
+                    sd = checkpoint['model_state_dict']
+                elif 'state_dict' in checkpoint:
+                    sd = checkpoint['state_dict']
+                else:
+                    sd = checkpoint
+
+                # Read reid_dim from checkpoint if not already set
+                local_reid_dim = reid_dim
+                if local_reid_dim is None:
+                    if 'reid_dim' in checkpoint:
+                        local_reid_dim = checkpoint['reid_dim']
+                    elif 'metadata' in checkpoint and 'reid_dim' in checkpoint['metadata']:
+                        local_reid_dim = checkpoint['metadata']['reid_dim']
+                    else:
+                        # Try to infer from state dict shape
+                        reid_proj_weight = sd.get('reid_proj.weight') or sd.get('encoder.reid_proj.weight')
+                        if reid_proj_weight is not None:
+                            local_reid_dim = reid_proj_weight.shape[1]
+                        else:
+                            raise ValueError(f"Cannot determine reid_dim from checkpoint {ckpt_path}")
+
+                # Read normalization stats if available
+                norm_stats = None
+                if 'normalization_mean' in checkpoint:
+                    from agentguard.features.normalization import NormalizationStats
+                    ns = NormalizationStats()
+                    ns.mean = checkpoint['normalization_mean']
+                    ns.std = checkpoint['normalization_std']
+                    norm_stats = ns
+
+                return sd, int(local_reid_dim), norm_stats
 
             iwg_model = None
+            sd_iwg, reid_dim_iwg, iwg_norm_stats = None, reid_dim, None
             if iwg_ckpt and ag_mode in ('iwg', 'full'):
-                sd = torch.load(iwg_ckpt, map_location='cpu')
-                if 'state_dict' in sd:
-                    sd = sd['state_dict']
-                iwg_model = IWG(reid_dim=reid_dim)
-                iwg_model.load_state_dict(sd)
+                sd_iwg, reid_dim_iwg, iwg_norm_stats = _load_checkpoint(iwg_ckpt)
+                iwg_model = IWG(reid_dim=reid_dim_iwg)
+                iwg_model.load_state_dict(sd_iwg)
                 iwg_model.eval()
 
             tgr_model = None
+            sd_tgr, reid_dim_tgr, tgr_norm_stats = None, reid_dim_iwg, None
             if tgr_ckpt and ag_mode == 'full':
-                sd = torch.load(tgr_ckpt, map_location='cpu')
-                if 'state_dict' in sd:
-                    sd = sd['state_dict']
-                tgr_model = TGR(reid_dim=reid_dim)
-                tgr_model.load_state_dict(sd)
+                sd_tgr, reid_dim_tgr, tgr_norm_stats = _load_checkpoint(tgr_ckpt)
+                tgr_model = TGR(reid_dim=reid_dim_tgr)
+                tgr_model.load_state_dict(sd_tgr)
                 tgr_model.eval()
 
             runtime = AgentGuardRuntime(runtime_config, iwg_model, tgr_model, device)
+
+            # Pass normalization stats to runtime if available
+            norm_stats = iwg_norm_stats or tgr_norm_stats
+            if norm_stats is not None:
+                runtime.init_feature_builder(normalization_stats=norm_stats)
             self.agentguard_adapter = AgentGuardTrackerAdapter(args, vid_name, agentguard_runtime=runtime)
 
     def init_tracks(self, dets):
@@ -114,10 +155,12 @@ class Tracker(object):
                     frame_start_snapshots[t.track_id] = t.snapshot_state()
 
         # Camera motion compensation
-        warp_matrix = self.cmc.get_warp_matrix()
-        if not self.disable_gmc:
-            apply_cmc(tracked_lost, warp_matrix)
-            apply_cmc(new, warp_matrix)
+        if self.disable_gmc:
+            effective_warp = np.eye(2, 3, dtype=np.float64)
+        else:
+            effective_warp = self.cmc.get_warp_matrix()
+            apply_cmc(tracked_lost, effective_warp)
+            apply_cmc(new, effective_warp)
 
         # Predict the current location with KF
         [t.predict() for t in tracked_lost]
@@ -158,7 +201,7 @@ class Tracker(object):
                 pu_snap = pre_update_snapshots.get(track.track_id)
                 event = self.agentguard_adapter.build_matched_event(
                     track, detection, t_idx, d_idx,
-                    association_meta, warp_matrix, fs_snap, pu_snap
+                    association_meta, effective_warp, fs_snap, pu_snap
                 )
                 gate_decision = self.agentguard_adapter.get_iwg_decision(track.track_id, event)
                 self.agentguard_adapter.apply_gate(track, detection, gate_decision)
@@ -175,7 +218,7 @@ class Tracker(object):
                 fs_snap = frame_start_snapshots.get(track.track_id)
                 pu_snap = pre_update_snapshots.get(track.track_id)
                 event = self.agentguard_adapter.build_unmatched_event(
-                    track, warp_matrix, fs_snap, pu_snap
+                    track, effective_warp, fs_snap, pu_snap
                 )
                 self.agentguard_adapter.record_unmatched_event(track.track_id, event)
                 track.mark_lost()
@@ -184,7 +227,7 @@ class Tracker(object):
 
         # AgentGuard: finalize first stage (TGR)
         if self.agentguard_adapter:
-            self.agentguard_adapter.finalize_first_stage(tracked_lost, matches)
+            self.agentguard_adapter.finalize_first_stage(tracked_lost)
 
         # ==============================================================================================================
         # Get remained high confidence detections
@@ -221,30 +264,66 @@ class Tracker(object):
         return [t for t in self.tracks if t.state == TrackState.Tracked]
 
     def update_without_detections(self):
-        # Update frame id
         self.frame_id += 1
 
-        # Only maintain already tracked and new tracks, Drop all the new tracks
+        # AgentGuard: begin frame
+        if self.agentguard_adapter:
+            self.agentguard_adapter.begin_frame(
+                self.frame_id,
+                getattr(self.args, 'img_w', 1920),
+                getattr(self.args, 'img_h', 1080)
+            )
+
         self.tracks = [t for t in self.tracks if t.state != TrackState.New]
 
-        # Camera motion compensation
-        warp_matrix = self.cmc.get_warp_matrix()
-        if not self.disable_gmc:
-            apply_cmc(self.tracks, warp_matrix)
+        # AgentGuard: save frame_start snapshots for mature tracks
+        frame_start_snapshots = {}
+        if self.agentguard_adapter:
+            rt = self.agentguard_adapter.runtime
+            for t in self.tracks:
+                if rt and rt.is_mature_track(t):
+                    frame_start_snapshots[t.track_id] = t.snapshot_state()
 
-        # Predict the current location with KF
+        if self.disable_gmc:
+            effective_warp = np.eye(2, 3, dtype=np.float64)
+        else:
+            effective_warp = self.cmc.get_warp_matrix()
+            apply_cmc(self.tracks, effective_warp)
+
         [t.predict() for t in self.tracks]
 
-        # Change every track as lost tracks
-        for t in self.tracks:
-            t.mark_lost()
+        # AgentGuard: pre_update snapshots
+        pre_update_snapshots = {}
+        if self.agentguard_adapter:
+            rt = self.agentguard_adapter.runtime
+            for t in self.tracks:
+                if rt and rt.is_mature_track(t):
+                    pre_update_snapshots[t.track_id] = t.snapshot_state()
 
-        # Mark "remove" to lost tracks which are too old
+        # Mark all as lost
+        for t in self.tracks:
+            if self.agentguard_adapter and self.agentguard_adapter.runtime and \
+               self.agentguard_adapter.runtime.is_mature_track(t):
+                fs_snap = frame_start_snapshots.get(t.track_id)
+                pu_snap = pre_update_snapshots.get(t.track_id)
+                event = self.agentguard_adapter.build_unmatched_event(
+                    t, effective_warp, fs_snap, pu_snap
+                )
+                self.agentguard_adapter.record_unmatched_event(t.track_id, event)
+                t.mark_lost()
+            else:
+                t.mark_lost()
+
+        # AgentGuard: finalize first stage (TGR)
+        if self.agentguard_adapter:
+            self.agentguard_adapter.finalize_first_stage(self.tracks)
+
+        # Remove too-old tracks
         for track in self.tracks:
             if self.frame_id - track.end_frame_id > self.max_time_lost:
+                if self.agentguard_adapter:
+                    self.agentguard_adapter.remove_track(track.track_id)
                 track.mark_removed()
 
-        # Filter out the removed tracks
         self.tracks = [t for t in self.tracks if t.state != TrackState.Removed]
-
         return []

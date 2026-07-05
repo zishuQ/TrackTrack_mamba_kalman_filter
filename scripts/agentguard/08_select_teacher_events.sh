@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-DATASET="${DATASET:-MOT17}"
-echo "=== Selecting Teacher Events: $DATASET ==="
-cd "3. Tracker"
-../.venv/bin/python -m agentguard.cli select_teacher_events --dataset "$DATASET"
-echo "=== Teacher event selection complete ==="
+echo "ERROR: This stage is intentionally disabled until Student-V0 and Oracle validation are complete." >&2
+exit 1

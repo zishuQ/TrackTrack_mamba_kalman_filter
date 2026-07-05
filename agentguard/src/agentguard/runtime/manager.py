@@ -188,40 +188,54 @@ class AgentGuardRuntime:
 
     def finalize_first_stage(
         self,
-        all_tracks: List[Any],
-        all_matches: List[Any],
-    ) -> None:
-        """Called after first-stage association is complete.
+        all_tracks: Optional[List[Any]] = None,
+        all_matches: Optional[List[Any]] = None,
+    ) -> dict:
+        """Build replay plans for all tracks with full TGR windows.
 
-        In ``'full'`` mode this runs TGR inference on every track whose
-        window buffer has reached capacity, replays the window with revised
-        gates, and updates the checkpoint chain.
+        Does **not** modify live track state.  The caller receives
+        ``ReplayPlan`` objects and must execute them on live ``Track``
+        objects via ``TrackTrackReplayBackend.replay_into_live_track()``.
+
+        While building plans, this method also advances the checkpoint chain:
+        the oldest event's checkpoint is replayed with the revised gate to
+        produce the checkpoint for the new window start.
 
         Parameters
         ----------
-        all_tracks : list
-            List of all active Track objects (provided by the tracker).
-        all_matches : list
-            List of all accepted match tuples from the first association stage.
-        """
-        if self.mode != "full":
-            return
+        all_tracks : list or None
+            Unused, reserved for API compatibility.
+        all_matches : list or None
+            Unused, reserved for API compatibility.
 
-        # For each track with a FULL window
+        Returns
+        -------
+        dict[int, ReplayPlan]
+            ``track_id`` → ``ReplayPlan`` for every track whose TGR window
+            reached capacity.
+        """
+        from .replay import ReplayPlan, ReplayStep
+
+        if self.mode != "full":
+            return {}
+        if self.tgr is None:
+            raise RuntimeError("TGR is None in full mode - cannot build replay plans")
+
+        plans: dict = {}
+
         for track_id, window_buffer in list(self.window_buffers.items()):
             if not window_buffer.is_full:
                 continue
 
-            # Get the 4 window events (oldest first)
             window_events = window_buffer.get_window()
-            if len(window_events) < window_buffer.window_size:
-                continue
-
-            # Run TGR inference → revised gates for all 4 events
             revised_gates = self._run_tgr_inference(window_events)
             self.stats.record_tgr()
 
-            # Determine the checkpoint snapshot (state before oldest event)
+            # Assign revised gates for offline logging
+            for evt, gate in zip(window_events, revised_gates):
+                evt.revised_gate = gate.copy()
+
+            # Checkpoint: state before oldest event
             oldest_event = window_events[0]
             checkpoint_snapshot = self.checkpoints.get_checkpoint(
                 track_id, oldest_event.event_id
@@ -229,31 +243,32 @@ class AgentGuardRuntime:
             if checkpoint_snapshot is None:
                 continue
 
-            # Assign revised gates to the events (for offline use / logging)
+            # Build replay plan
+            steps = []
             for evt, gate in zip(window_events, revised_gates):
-                evt.revised_gate = gate.copy()
+                has_det = evt.has_detection
+                det = evt.detection if has_det else None
+                steps.append(ReplayStep(
+                    frame_id=evt.frame_id,
+                    warp_matrix=evt.warp_matrix.copy(),
+                    has_detection=has_det,
+                    detection=det,
+                    motion_gate=float(np.clip(gate[0], 0.0, 1.0)),
+                    appearance_gate=float(np.clip(gate[1], 0.0, 1.0)),
+                ))
 
-            # ------------------------------------------------------------------
-            # Full replay implementation:
-            # 1. Replay the entire window from the checkpoint with revised gates.
-            # 2. Save a new checkpoint for the state after the (now-replayed)
-            #    oldest event — this becomes the checkpoint for the new window
-            #    start (the old second-oldest event).
-            # 3. Pop the oldest event from the window buffer.
-            # 4. Remove the old checkpoint.
-            #
-            # The live track state is **not** modified; only the checkpoints
-            # and events are updated.
-            # ------------------------------------------------------------------
-            final_snapshot = self.replay.replay_window(
-                checkpoint_snapshot,
-                window_events,
-                revised_gates,
+            plans[track_id] = ReplayPlan(
+                track_id=track_id,
+                checkpoint=checkpoint_snapshot,
+                steps=steps,
             )
             self.stats.record_replay()
 
-            # Save new checkpoint: replay only the oldest event to produce the
-            # state that should be checkpointed before the new oldest event.
+            # ------------------------------------------------------------------
+            # Checkpoint roll: replay only the OLDEST event with its revised
+            # gate to produce a new checkpoint that sits before the new window
+            # start (the old second-oldest event).
+            # ------------------------------------------------------------------
             if len(window_events) > 1:
                 new_checkpoint = self.replay.replay_event(
                     checkpoint_snapshot,
@@ -266,9 +281,10 @@ class AgentGuardRuntime:
                     new_checkpoint,
                 )
 
-            # Pop oldest from window and remove its checkpoint
             window_buffer.pop_oldest()
             self.checkpoints.remove_checkpoint(track_id, oldest_event.event_id)
+
+        return plans
 
     def _run_tgr_inference(
         self,
@@ -286,78 +302,21 @@ class AgentGuardRuntime:
         ndarray, shape ``(4, 2)``
             Revised ``[motion_gate, appearance_gate]`` for each event.
         """
-        if self.tgr is None or self.feature_builder is None:
-            return np.zeros((len(window_events), 2), dtype=np.float64)
+        if self.tgr is None:
+            raise RuntimeError("TGR model is not loaded but full mode was requested")
+        if self.feature_builder is None:
+            raise RuntimeError("Feature builder is not initialized but full mode was requested")
 
         device = next(self.tgr.parameters()).device
-        seq_len = len(window_events)
 
-        # Collect per-event data
-        track_feats: List[np.ndarray] = []
-        det_feats: List[np.ndarray] = []
-        scalar_feats: List[np.ndarray] = []
-        iwg_policy_probs: List[np.ndarray] = []
-        iwg_gates: List[np.ndarray] = []
-        has_detection: List[float] = []
-
-        for evt in window_events:
-            track_feats.append(evt.track_feature)
-
-            if evt.has_detection and evt.detection_feature.size > 0:
-                det_feats.append(evt.detection_feature)
-            else:
-                det_feats.append(np.zeros(self.feature_builder.reid_dim))
-
-            scalar_feats.append(evt.scalar_features)
-
-            if evt.iwg_policy_probs is not None:
-                iwg_policy_probs.append(evt.iwg_policy_probs)
-            else:
-                iwg_policy_probs.append(np.ones(5, dtype=np.float64) / 5.0)
-
-            if evt.iwg_gate is not None:
-                iwg_gates.append(evt.iwg_gate)
-            else:
-                iwg_gates.append(np.ones(2, dtype=np.float64))
-
-            has_detection.append(float(evt.has_detection))
-
-        # Stack into (1, seq_len, D) tensors
-        track_t = (
-            torch.from_numpy(np.stack(track_feats, axis=0))
-            .unsqueeze(0)
-            .float()
-            .to(device)
-        )
-        det_t = (
-            torch.from_numpy(np.stack(det_feats, axis=0))
-            .unsqueeze(0)
-            .float()
-            .to(device)
-        )
-        scalar_t = (
-            torch.from_numpy(np.stack(scalar_feats, axis=0))
-            .unsqueeze(0)
-            .float()
-            .to(device)
-        )
-        policy_t = (
-            torch.from_numpy(np.stack(iwg_policy_probs, axis=0))
-            .unsqueeze(0)
-            .float()
-            .to(device)
-        )
-        gate_t = (
-            torch.from_numpy(np.stack(iwg_gates, axis=0))
-            .unsqueeze(0)
-            .float()
-            .to(device)
-        )
-        has_det_t = (
-            torch.from_numpy(np.array(has_detection, dtype=np.bool_))
-            .unsqueeze(0)
-            .to(device)
-        )
+        # Use feature builder for TGR input
+        inputs = self.feature_builder.build_tgr_input(window_events)
+        track_t = inputs["track_feats"].to(device)
+        det_t = inputs["det_feats"].to(device)
+        scalar_t = inputs["scalar_feats"].to(device)
+        policy_t = inputs["iwg_policy_probs"].to(device)
+        gate_t = inputs["iwg_gates"].to(device)
+        has_det_t = inputs["has_detection_mask"].to(device)
 
         with torch.no_grad():
             g_revised: torch.Tensor = self.tgr(
@@ -404,55 +363,13 @@ class AgentGuardRuntime:
             }
 
         device = next(self.iwg.parameters()).device
-        seq_len = len(events_sequence)
 
-        # Collect per-event data; padded (None) events use zero features.
-        track_feats: List[np.ndarray] = []
-        det_feats: List[np.ndarray] = []
-        scalar_feats: List[np.ndarray] = []
-
-        for evt in events_sequence:
-            if evt is None:
-                # Padded slot — use zeros
-                track_feats.append(np.zeros(self.feature_builder.reid_dim))
-                det_feats.append(np.zeros(self.feature_builder.reid_dim))
-                scalar_feats.append(np.zeros(63, dtype=np.float64))
-            else:
-                track_feats.append(evt.track_feature)
-                if evt.has_detection and evt.detection_feature.size > 0:
-                    det_feats.append(evt.detection_feature)
-                else:
-                    det_feats.append(np.zeros(self.feature_builder.reid_dim))
-                scalar_feats.append(evt.scalar_features)
-
-        # Build padding mask: True = padded / masked-out position
-        mask = np.zeros(seq_len, dtype=np.bool_)
-        for i, evt in enumerate(events_sequence):
-            if evt is None:
-                mask[i] = True
-
-        # Convert to tensors with batch dimension
-        track_t = (
-            torch.from_numpy(np.stack(track_feats, axis=0))
-            .unsqueeze(0)
-            .float()
-            .to(device)
-        )
-        det_t = (
-            torch.from_numpy(np.stack(det_feats, axis=0))
-            .unsqueeze(0)
-            .float()
-            .to(device)
-        )
-        scalar_t = (
-            torch.from_numpy(np.stack(scalar_feats, axis=0))
-            .unsqueeze(0)
-            .float()
-            .to(device)
-        )
-        mask_t = (
-            torch.from_numpy(mask).unsqueeze(0).to(device)
-        )
+        # Use feature builder for IWG input
+        inputs = self.feature_builder.build_iwg_input(events_sequence)
+        track_t = inputs["track_feats"].to(device)
+        det_t = inputs["det_feats"].to(device)
+        scalar_t = inputs["scalar_feats"].to(device)
+        mask_t = inputs["mask"].to(device)
 
         with torch.no_grad():
             outputs = self.iwg(track_t, det_t, scalar_t, mask_t)

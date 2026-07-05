@@ -42,9 +42,7 @@ class TrackEvent:
     )
 
     # --- Feature vectors ---
-    scalar_features: np.ndarray = field(
-        default_factory=lambda: np.zeros(63, dtype=np.float64)
-    )
+    scalar_features: Optional[np.ndarray] = None
     track_feature: np.ndarray = field(
         default_factory=lambda: np.zeros(0, dtype=np.float64)
     )
