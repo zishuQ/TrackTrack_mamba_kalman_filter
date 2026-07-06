@@ -19,7 +19,7 @@ def bbox_overlaps(a_x1y1x2y2, b_x1y1x2y2):
     return overlaps
 
 
-def find_deleted_detections(dets, dets_95):
+def find_deleted_detections(dets, dets_95, source_indices=None, return_indices=False):
     # Get boxes
     a_x1y1x2y2 = np.ascontiguousarray(dets[:, :4], dtype=np.float64)
     b_x1y1x2y2 = np.ascontiguousarray(dets_95[:, :4], dtype=np.float64)
@@ -28,8 +28,13 @@ def find_deleted_detections(dets, dets_95):
     ious = bbox_overlaps(a_x1y1x2y2, b_x1y1x2y2)
 
     # Find deleted detections
-    dets_del = dets_95[np.max(ious, axis=0) < 0.97]
+    keep_mask = np.max(ious, axis=0) < 0.97
+    dets_del = dets_95[keep_mask]
 
+    if return_indices:
+        if source_indices is None:
+            return dets_del, np.flatnonzero(keep_mask)
+        return dets_del, np.asarray(source_indices, dtype=np.int64)[keep_mask]
     return dets_del
 
 
@@ -204,6 +209,7 @@ def iterative_assignment(tracks, dets_high, dets_low, dets_del_high, match_thr, 
     angle_dist_arr = angle_distance(tracks, dets, frame_id, d_t)
 
     # Calculate cost
+    cos_dist = None
     if no_reid:
         cost = iou_dist + 0.10 * conf_dist_arr + 0.05 * angle_dist_arr
     else:
@@ -215,7 +221,7 @@ def iterative_assignment(tracks, dets_high, dets_low, dets_del_high, match_thr, 
     if return_meta:
         iou_sim_meta = iou_sim.copy()
         iou_dist_meta = iou_dist.copy()
-        cos_dist_meta = cos_dist.copy() if not no_reid else None
+        cos_dist_meta = cos_dist.copy() if cos_dist is not None else np.zeros_like(iou_dist)
         conf_dist_meta = conf_dist_arr.copy()
         angle_dist_meta = angle_dist_arr.copy()
         raw_cost = cost.copy()

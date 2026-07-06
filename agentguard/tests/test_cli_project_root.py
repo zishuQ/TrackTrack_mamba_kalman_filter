@@ -27,12 +27,14 @@ def test_mode_to_split_mapping():
     from agentguard.cli import MODE_TO_SPLIT, _resolve_split
 
     assert MODE_TO_SPLIT["val"] == "val"
-    assert MODE_TO_SPLIT["val_custom"] == "val_custom"
-    assert MODE_TO_SPLIT["train_custom"] == "train_custom"
+    assert MODE_TO_SPLIT["val_custom"] == "val"
+    assert MODE_TO_SPLIT["train_custom"] == "train"
+    assert MODE_TO_SPLIT["train"] == "train"
     assert MODE_TO_SPLIT["all"] == "all"
     assert MODE_TO_SPLIT["test"] == "test"
     assert _resolve_split("val") == "val"
-    assert _resolve_split("train_custom") == "train_custom"
+    assert _resolve_split("train_custom") == "train"
+    assert _resolve_split("val_custom") == "val"
 
     with pytest.raises(ValueError):
         _resolve_split("nonexistent_mode")

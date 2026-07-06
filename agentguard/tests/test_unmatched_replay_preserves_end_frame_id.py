@@ -62,7 +62,9 @@ def test_unmatched_replay_preserves_end_frame_id():
     backend.replay_into_live_track(spy, plan)
 
     assert spy.state == 2
-    assert spy.end_frame_id == 11
+    # Unmatched steps call mark_lost only; end_frame_id stays at
+    # snapshot value (5), not the unmatched step frame_ids
+    assert spy.end_frame_id == 5
 
 
 def test_no_detection_frame_enters_tgr_window():

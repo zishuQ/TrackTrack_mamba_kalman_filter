@@ -6,18 +6,18 @@ from agentguard.contracts.enums import DetectionSource
 from agentguard.contracts.events import TrackEvent
 from agentguard.contracts.outputs import GateDecision
 from agentguard.contracts.states import (
+    DetectionObservation,
     TrackStateSnapshot,
 )
 
 from trackers.track import Track
 
 from .converters import (
+    build_association_context,
     export_association_pair,
     export_detection,
     export_track_state,
 )
-
-_REID_DIM = 2048  # default ReID feature dimension
 
 
 class AgentGuardTrackerAdapter:
@@ -47,26 +47,59 @@ class AgentGuardTrackerAdapter:
 
         # EventSink from runtime (for cache recording)
         self.event_sink = getattr(agentguard_runtime, "event_sink", None) if agentguard_runtime else None
+        self.capture_only = bool(
+            getattr(args, "capture_agentguard_events", False)
+            and getattr(args, "agentguard_mode", "off") == "off"
+        )
 
         # Pending frame-level data for EventSink
-        self._pending_frame_record = None
+        self._pending_frame_record: Optional[dict] = None
         self._pending_frame_events: List[dict] = []
+
+        # Per-frame detection pool for stable indexing
+        self._frame_detections: List[Track] = []
+        self._frame_detection_sources: List[int] = []
 
     # ------------------------------------------------------------------
     # Frame lifecycle
     # ------------------------------------------------------------------
 
     def begin_frame(
-        self, frame_id: int, img_width: int, img_height: int
+        self,
+        frame_id: int,
+        img_width: int,
+        img_height: int,
+        detection_pool: Optional[List[Track]] = None,
+        detection_sources: Optional[List[int]] = None,
     ) -> None:
         """Called at the start of each frame.
 
-        Stores the current frame id and image dimensions so they are available
-        when building events later in the same frame.
+        Stores the current frame id, image dimensions, and detection pool
+        for stable detection indexing.
         """
         self.frame_id = frame_id
         self.img_width = img_width
         self.img_height = img_height
+
+        self._frame_detections = detection_pool if detection_pool is not None else []
+        self._frame_detection_sources = detection_sources if detection_sources is not None else []
+
+        # Serialize detection pool with stable indices
+        detections_serialized = []
+        for idx, det in enumerate(self._frame_detections):
+            source = (
+                self._frame_detection_sources[idx]
+                if idx < len(self._frame_detection_sources)
+                else 0
+            )
+            detection_index = int(getattr(det, "frame_detection_index", idx))
+            detections_serialized.append({
+                "index": idx,
+                "detection_index": detection_index,
+                "score": float(det.score),
+                "source": int(source),
+                "class_id": int(getattr(det, "class_id", 0)),
+            })
 
         # Accumulate frame record for EventSink
         self._pending_frame_record = {
@@ -74,9 +107,60 @@ class AgentGuardTrackerAdapter:
             "image_width": img_width,
             "image_height": img_height,
             "warp_matrix": None,  # Set when warp is known
-            "detections": [],
+            "detections": detections_serialized,
+            "association": None,
         }
         self._pending_frame_events = []
+
+    def set_frame_warp(self, warp_matrix: np.ndarray) -> None:
+        """Attach the effective per-frame warp to the pending frame record."""
+        if self._pending_frame_record is None:
+            return
+        self._pending_frame_record["warp_matrix"] = np.asarray(
+            warp_matrix,
+            dtype=np.float64,
+        ).copy()
+
+    def set_association_record(
+        self,
+        track_ids: List[int],
+        detection_pool: List[Track],
+        association_meta: Optional[dict],
+        no_reid: bool = False,
+    ) -> None:
+        """Attach one frame-level association record to the pending frame.
+
+        Detection features are deliberately not stored here.  Detections are
+        represented by their sequence-global detection-cache indices.
+        """
+        if self._pending_frame_record is None or association_meta is None:
+            return
+
+        detection_indices = np.asarray(
+            [
+                int(getattr(det, "frame_detection_index", idx))
+                for idx, det in enumerate(detection_pool)
+            ],
+            dtype=np.int64,
+        )
+        self._pending_frame_record["association"] = {
+            "track_ids": np.asarray(track_ids, dtype=np.int64),
+            "detection_indices": detection_indices,
+            "raw_cost": np.asarray(association_meta["raw_cost"], dtype=np.float32).copy(),
+            "final_cost": np.asarray(association_meta["final_cost"], dtype=np.float32).copy(),
+            "iou_similarity": np.asarray(association_meta["iou_similarity"], dtype=np.float32).copy(),
+            "iou_distance": np.asarray(association_meta["iou_distance"], dtype=np.float32).copy(),
+            "cosine_distance": (
+                np.zeros_like(association_meta["final_cost"], dtype=np.float32)
+                if no_reid
+                else np.asarray(association_meta["cosine_distance"], dtype=np.float32).copy()
+            ),
+            "confidence_distance": np.asarray(association_meta["confidence_distance"], dtype=np.float32).copy(),
+            "angle_distance": np.asarray(association_meta["angle_distance"], dtype=np.float32).copy(),
+            "assignment_round": np.asarray(association_meta["assignment_round"], dtype=np.int16).copy(),
+            "assignment_threshold": np.asarray(association_meta["assignment_threshold"], dtype=np.float32).copy(),
+            "reid_available": not bool(no_reid),
+        }
 
     # ------------------------------------------------------------------
     # Event builders
@@ -100,6 +184,9 @@ class AgentGuardTrackerAdapter:
         warp_matrix: np.ndarray,
         frame_start_state_snapshot: TrackStateSnapshot,
         pre_update_state_snapshot: TrackStateSnapshot,
+        num_tracks: int = 0,
+        num_detections: int = 0,
+        no_reid: bool = False,
     ) -> TrackEvent:
         """Build a ``TrackEvent`` for an accepted match.
 
@@ -114,18 +201,36 @@ class AgentGuardTrackerAdapter:
         det_idx : int
             Index of the detection in the association matrix.
         association_meta : dict
-            Meta dict containing association cost matrices (see
-            :func:`.converters.export_association_pair`).
+            Meta dict containing *pre-mutation copies* of cost matrices.
         warp_matrix : np.ndarray
             (2, 3) warp matrix from global motion compensation.
         frame_start_state_snapshot : TrackStateSnapshot
             Snapshot taken at the start of the frame (before prediction).
         pre_update_state_snapshot : TrackStateSnapshot
             Snapshot taken after KF predict but before the update step.
+        num_tracks : int
+            Total number of tracks in the association.
+        num_detections : int
+            Total number of detections in the association pool.
+        no_reid : bool
+            If True, cosine distance is unavailable.
         """
         # Detection source is read from the meta dict.
         det_source = int(
             association_meta["detection_source"][track_idx, det_idx]
+        )
+
+        # Use stable detection index from the merged frame pool
+        stable_det_idx = self._resolve_stable_detection_index(detection)
+
+        # Build AssociationContext from pre-mutation matrix copies
+        assoc_ctx = build_association_context(
+            association_meta,
+            track_idx,
+            det_idx,
+            num_tracks=num_tracks if num_tracks > 0 else association_meta.get("num_tracks", 0),
+            num_detections=num_detections if num_detections > 0 else association_meta.get("num_detections", 0),
+            no_reid=no_reid,
         )
 
         return TrackEvent(
@@ -139,10 +244,11 @@ class AgentGuardTrackerAdapter:
             has_detection=True,
             frame_start_state=frame_start_state_snapshot,
             pre_update_state=pre_update_state_snapshot,
-            detection=export_detection(detection, det_source, det_idx),
+            detection=export_detection(detection, det_source, stable_det_idx),
             association=export_association_pair(
                 association_meta, track_idx, det_idx
             ),
+            association_context=assoc_ctx,
             warp_matrix=warp_matrix.copy(),
         )
 
@@ -174,9 +280,26 @@ class AgentGuardTrackerAdapter:
             warp_matrix=warp_matrix.copy(),
         )
 
-    # ------------------------------------------------------------------
-    # Gate application
-    # ------------------------------------------------------------------
+    def _resolve_stable_detection_index(self, detection: Track) -> int:
+        """Resolve the stable frame_detection_index for a detection.
+
+        Uses the frame's merged detection pool (HIGH + LOW + NMS_DELETED_HIGH)
+        to find the stable index. Falls back to ``detection.track_id`` if
+        detection is not found in the pool.
+        """
+        if hasattr(detection, "frame_detection_index"):
+            return int(detection.frame_detection_index)
+        for idx, det in enumerate(self._frame_detections):
+            if det is detection:
+                return int(getattr(det, "frame_detection_index", idx))
+        return getattr(detection, 'track_id', -1)
+
+    @property
+    def reid_dim(self) -> int:
+        """Derive ReID dimension from the runtime feature builder or fallback."""
+        if self.runtime is not None and hasattr(self.runtime, 'feature_builder') and self.runtime.feature_builder is not None:
+            return self.runtime.feature_builder.reid_dim
+        return 2048
 
     def apply_gate(
         self,
@@ -221,10 +344,10 @@ class AgentGuardTrackerAdapter:
           2. Executes each plan on the corresponding live ``Track`` via
              ``TrackTrackReplayBackend.replay_into_live_track()``.
 
-        This actually modifies the live Track state, applying the revised
-        gates determined by TGR inference.
+        In capture-only mode or ``'off'`` mode with event_sink:
+          Flushes pending events to EventSink.
         """
-        if self.runtime is not None:
+        if self.runtime is not None and self.runtime.mode == "full":
             plans = self.runtime.finalize_first_stage()
             if plans:
                 from integrations.agentguard.replay_backend import (
@@ -306,27 +429,26 @@ class AgentGuardTrackerAdapter:
         if self.runtime is None or self.runtime.iwg is None:
             return GateDecision(1.0, 1.0, np.ones(5, dtype=np.float64) / 5.0, 1.0)
 
-        # --- Populate feature vectors on the event ---
         fb = self.runtime.feature_builder
+        rd = self.reid_dim
 
-        # Track feature: use the pre-update (post-predict) snapshot if available,
-        # otherwise fall back to the frame-start snapshot.
+        # Track feature: use the pre-update (post-predict) snapshot if available
         src_state = event.pre_update_state or event.frame_start_state
         if src_state is not None and src_state.feature.size > 0:
-            event.track_feature = src_state.feature.copy()
+            event.track_feature = np.asarray(src_state.feature, dtype=np.float64).reshape(-1)
         else:
-            event.track_feature = np.zeros(fb.reid_dim, dtype=np.float64)
+            event.track_feature = np.zeros(rd, dtype=np.float64)
 
         # Detection feature
         if event.has_detection and event.detection is not None:
-            event.detection_feature = event.detection.feature.copy()
+            event.detection_feature = np.asarray(event.detection.feature, dtype=np.float64).reshape(-1)
         else:
-            event.detection_feature = np.zeros(fb.reid_dim, dtype=np.float64)
+            event.detection_feature = np.zeros(rd, dtype=np.float64)
 
-        # Scalar features (computed from the event's raw data)
+        # Scalar features
         event.scalar_features = fb.compute_scalar(event)
 
-        # --- Build inference sequence from buffer + current event ---
+        # Build inference sequence from buffer + current event
         seq_len = 6
         buffer = self.runtime.event_buffers.get(track_id)
         if buffer is None:
@@ -361,14 +483,16 @@ class AgentGuardTrackerAdapter:
         (the gate has already been applied via :meth:`apply_gate`).
         """
         if self.runtime is None:
-            # Still accumulate for EventSink even without runtime
             self._accumulate_event_for_sink(event)
             return
 
-        self.runtime.stats.record_event()
-        event_buffer, window_buffer = self.runtime.get_or_create_buffer(track_id)
-        event_buffer.push(event)
-        window_buffer.push(event)
+        is_capture = self.capture_only and self.runtime.mode == "off"
+
+        if not is_capture:
+            self.runtime.stats.record_event()
+            event_buffer, window_buffer = self.runtime.get_or_create_buffer(track_id)
+            event_buffer.push(event)
+            window_buffer.push(event)
 
         # Attach IWG outputs
         event.iwg_policy_probs = gate_decision.policy_probs.copy()
@@ -377,11 +501,12 @@ class AgentGuardTrackerAdapter:
             dtype=np.float64,
         )
 
-        # Save checkpoint for TGR (full mode)
-        if self.runtime.mode == "full" and event.frame_start_state is not None:
-            self.runtime.checkpoints.save_checkpoint(
-                track_id, event.event_id, event.frame_start_state
-            )
+        if not is_capture:
+            # Save checkpoint for TGR (full mode)
+            if self.runtime.mode == "full" and event.frame_start_state is not None:
+                self.runtime.checkpoints.save_checkpoint(
+                    track_id, event.event_id, event.frame_start_state
+                )
 
         # Accumulate for EventSink
         self._accumulate_event_for_sink(event)
@@ -394,22 +519,29 @@ class AgentGuardTrackerAdapter:
         """Record an unmatched (lost) event into the runtime buffers.
 
         The gate is forced to ``[0.0, 0.0]`` (no detection).
+        Unmatched events use the no-detection protocol: detection=None,
+        association=None, track_feature from pre_update_state.feature,
+        detection_feature = zero vector.
         """
         if self.runtime is None:
             self._accumulate_event_for_sink(event)
             return
 
-        self.runtime.stats.record_event()
-        event_buffer, window_buffer = self.runtime.get_or_create_buffer(track_id)
-        event_buffer.push(event)
-        window_buffer.push(event)
+        is_capture = self.capture_only and self.runtime.mode == "off"
+
+        if not is_capture:
+            self.runtime.stats.record_event()
+            event_buffer, window_buffer = self.runtime.get_or_create_buffer(track_id)
+            event_buffer.push(event)
+            window_buffer.push(event)
 
         event.iwg_gate = np.array([0.0, 0.0], dtype=np.float64)
 
-        if self.runtime.mode == "full" and event.frame_start_state is not None:
-            self.runtime.checkpoints.save_checkpoint(
-                track_id, event.event_id, event.frame_start_state
-            )
+        if not is_capture:
+            if self.runtime.mode == "full" and event.frame_start_state is not None:
+                self.runtime.checkpoints.save_checkpoint(
+                    track_id, event.event_id, event.frame_start_state
+                )
 
         # Accumulate for EventSink
         self._accumulate_event_for_sink(event)
@@ -425,22 +557,72 @@ class AgentGuardTrackerAdapter:
         if self._pending_frame_record is None:
             return  # begin_frame was not called
 
-        from agentguard.contracts.serialization import serialize_event
+        if getattr(self.event_sink, "compact", False):
+            event_dict = self._compact_event_dict(event)
+        else:
+            from agentguard.contracts.serialization import serialize_event
 
-        event_dict = serialize_event(event)
-        event_dict["target_gt_id"] = None
-        event_dict["detection_gt_id"] = None
-        event_dict["accepted_detection_index"] = (
-            event.detection.detection_index
-            if event.has_detection and event.detection is not None
-            else None
-        )
-        event_dict["association_row"] = (
-            event.association.final_cost
-            if event.association is not None
-            else None
-        )
+            event_dict = serialize_event(event)
+            event_dict["target_gt_id"] = None
+            event_dict["detection_gt_id"] = None
+            event_dict["accepted_detection_index"] = (
+                event.detection.detection_index
+                if event.has_detection and event.detection is not None
+                else None
+            )
+            event_dict["association_row"] = (
+                event.association.final_cost
+                if event.association is not None
+                else None
+            )
+            # association_context is already serialized by serialize_event via
+            # _context_to_dict — never store raw custom objects here.
         self._pending_frame_events.append(event_dict)
+
+    def _compact_snapshot_dict(self, snapshot: Optional[TrackStateSnapshot]) -> Optional[dict]:
+        if snapshot is None:
+            return None
+        history = {}
+        for frame_id, item in snapshot.history.items():
+            if item is None or len(item) == 0:
+                continue
+            history[int(frame_id)] = [np.asarray(item[0], dtype=np.float32).copy()]
+        return {
+            "track_id": int(snapshot.track_id),
+            "box": np.asarray(snapshot.box, dtype=np.float32).copy(),
+            "score": float(snapshot.score),
+            "mean": (
+                np.asarray(snapshot.mean, dtype=np.float32).copy()
+                if snapshot.mean is not None
+                else None
+            ),
+            "covariance": (
+                np.asarray(snapshot.covariance, dtype=np.float32).copy()
+                if snapshot.covariance is not None
+                else None
+            ),
+            "velocity": np.asarray(snapshot.velocity, dtype=np.float32).copy(),
+            "history": history,
+            "end_frame_id": int(snapshot.end_frame_id),
+            "state": int(snapshot.state),
+        }
+
+    def _compact_event_dict(self, event: TrackEvent) -> dict:
+        return {
+            "event_id": event.event_id,
+            "frame_id": int(event.frame_id),
+            "track_id": int(event.track_id),
+            "has_detection": bool(event.has_detection),
+            "accepted_detection_index": (
+                int(event.detection.detection_index)
+                if event.has_detection and event.detection is not None
+                else -1
+            ),
+            "frame_start_state": self._compact_snapshot_dict(event.frame_start_state),
+            "pre_update_state": self._compact_snapshot_dict(event.pre_update_state),
+            "scalar_features": np.asarray(event.scalar_features, dtype=np.float32).copy(),
+            "track_feature": np.asarray(event.track_feature, dtype=np.float32).reshape(-1).copy(),
+        }
 
     # ------------------------------------------------------------------
     # Track removal cleanup

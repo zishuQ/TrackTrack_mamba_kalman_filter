@@ -13,29 +13,42 @@ import numpy as np
 
 from agentguard.runtime.replay import ReplayPlan
 from trackers.cmc import apply_cmc
-from integrations.agentguard.converters import restore_track_state
+from integrations.agentguard.converters import (
+    detection_to_update_input,
+    restore_track_state,
+)
+from agentguard.contracts.states import DetectionObservation
 
 
-class _ReplayDetection:
-    """Lightweight wrapper that exposes a DetectionObservation as a Track-like
-    detection to satisfy the ``Track.update_with_gates`` interface."""
+def _make_track_like(detection: DetectionObservation) -> Any:
+    """Build a lightweight detection object compatible with
+    ``Track.update_with_gates`` from a ``DetectionObservation``.
 
-    def __init__(self, detection: Any) -> None:
-        self.box = detection.box
-        self.score = detection.score
-        self.feat = detection.feature.copy()
+    Uses ``detection_to_update_input`` for box/score/feat and adds the
+    ``x1y1x2y2`` and ``cxcywh`` properties used by the KF update in
+    ``trackers/track.py``.
+    """
+    update_input = detection_to_update_input(detection)
 
-    @property
-    def x1y1x2y2(self) -> np.ndarray:
-        return self.box.copy()
+    class _DetectionProxy:
+        def __init__(self, ui):
+            self.box = ui["box"]
+            self.score = ui["score"]
+            self.feat = ui["feat"]
 
-    @property
-    def cxcywh(self) -> np.ndarray:
-        x1, y1, x2, y2 = self.box
-        return np.array(
-            [(x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1],
-            dtype=np.float64,
-        )
+        @property
+        def x1y1x2y2(self) -> np.ndarray:
+            return self.box.copy()
+
+        @property
+        def cxcywh(self) -> np.ndarray:
+            x1, y1, x2, y2 = self.box
+            return np.array(
+                [(x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1],
+                dtype=np.float64,
+            )
+
+    return _DetectionProxy(update_input)
 
 
 class TrackTrackReplayBackend:
@@ -91,7 +104,7 @@ class TrackTrackReplayBackend:
             live_track.predict()
 
             if step.has_detection and step.detection is not None:
-                det = _ReplayDetection(step.detection)
+                det = _make_track_like(step.detection)
                 live_track.update_with_gates(
                     step.frame_id,
                     det,
@@ -99,5 +112,9 @@ class TrackTrackReplayBackend:
                     step.appearance_gate,
                 )
             else:
+                old_end_frame = live_track.end_frame_id
                 live_track.mark_lost()
-                live_track.end_frame_id = step.frame_id
+                assert live_track.end_frame_id == old_end_frame, (
+                    f"end_frame_id changed from {old_end_frame} to "
+                    f"{live_track.end_frame_id} during unmatched replay"
+                )

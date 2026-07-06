@@ -389,11 +389,12 @@ def _event_to_params(ev: TrackEvent) -> Dict[str, Any]:
         params["assignment_threshold"] = assoc.assignment_threshold
         params["detection_source"] = assoc.detection_source
 
-        # When the full cost matrix row/col is not stored we fall back to a
-        # single-element vector containing the raw_cost.
-        raw = assoc.raw_cost
-        params["track_cost_row"] = params.get("track_cost_row", [raw])
-        params["detection_cost_col"] = params.get("detection_cost_col", [raw])
+        # Prefer full AssociationContext row/col when available
+        ctx = getattr(ev, 'association_context', None)
+        if ctx is not None:
+            params["track_cost_row"] = np.asarray(ctx.track_cost_row, dtype=np.float64)
+            params["detection_cost_col"] = np.asarray(ctx.detection_cost_col, dtype=np.float64)
+            params["max_iou_with_other"] = float(np.max(ctx.detection_overlap_row)) if ctx.detection_overlap_row.size > 0 else 0.0
 
     # Detection data
     det = ev.detection
@@ -416,7 +417,7 @@ def _event_to_params(ev: TrackEvent) -> Dict[str, Any]:
     # Extra fields that may be attached to the event at runtime
     for extra in ("track_cost_row", "detection_cost_col", "max_iou_with_other"):
         val = getattr(ev, extra, None)
-        if val is not None:
+        if val is not None and extra not in params:
             params[extra] = val
 
     if "max_iou_with_other" not in params:

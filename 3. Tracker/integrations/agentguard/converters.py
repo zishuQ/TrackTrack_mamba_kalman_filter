@@ -1,5 +1,5 @@
 import copy
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 
@@ -7,6 +7,7 @@ from agentguard.contracts.states import (
     TrackStateSnapshot,
     DetectionObservation,
     AssociationPairFeatures,
+    AssociationContext,
 )
 from agentguard.contracts.enums import DetectionSource
 
@@ -163,4 +164,93 @@ def export_association_pair(
             meta["assignment_threshold"][track_index, detection_index]
         ),
         detection_source=int(meta["detection_source"][track_index, detection_index]),
+    )
+
+
+# ---------------------------------------------------------------------------
+# DetectionObservation → TrackTrack update input helper
+# ---------------------------------------------------------------------------
+
+
+def detection_to_update_input(
+    detection: DetectionObservation,
+) -> dict:
+    """Convert a ``DetectionObservation`` to a dict suitable for TrackTrack's
+    ``update_with_gates`` interface (box/score/feature).
+
+    Returns a dict with keys ``box``, ``score``, ``feat``.
+    """
+    return {
+        "box": detection.box.copy(),
+        "score": detection.score,
+        "feat": np.asarray(detection.feature, dtype=np.float64).reshape(-1),
+    }
+
+
+# ---------------------------------------------------------------------------
+# AssociationContext builder from raw association matrices
+# ---------------------------------------------------------------------------
+
+
+def build_association_context(
+    meta: dict,
+    track_index: int,
+    detection_index: int,
+    num_tracks: int,
+    num_detections: int,
+    no_reid: bool = False,
+) -> AssociationContext:
+    """Build an ``AssociationContext`` from raw association matrices.
+
+    Matrices must be *copied before iterative matching mutates them* —
+    the caller must supply pre-mutation copies of ``final_cost`` and
+    ``cosine_distance`` matrices.
+
+    Parameters
+    ----------
+    meta : dict
+        Must contain keys ``final_cost`` (copied pre-mutation), ``cosine_distance``
+        (copied pre-mutation or zeros if no reid), and optionally
+        ``detection_source`` or ``iou_similarity``.
+    track_index : int
+        Index of the accepted track in the matrix.
+    detection_index : int
+        Index of the accepted detection.
+    num_tracks : int
+        Total number of tracks in the association.
+    num_detections : int
+        Total number of detections in the association.
+    no_reid : bool
+        If True, cosine_distance_matrix is set to zeros.
+
+    Returns
+    -------
+    AssociationContext
+    """
+    final_cost_matrix = np.asarray(meta["final_cost"], dtype=np.float64)
+    track_cost_row = final_cost_matrix[track_index, :].copy()
+    detection_cost_col = final_cost_matrix[:, detection_index].copy()
+
+    if no_reid:
+        cos_matrix = np.zeros_like(final_cost_matrix, dtype=np.float64)
+        reid_available = False
+    else:
+        cos_matrix = np.asarray(meta.get("cosine_distance", meta.get("cosine_distance_matrix",
+            np.zeros_like(final_cost_matrix))), dtype=np.float64)
+        reid_available = True
+
+    raw_cost_row = np.asarray(meta.get("raw_cost", final_cost_matrix), dtype=np.float64)[track_index, :].copy()
+
+    iou_sim = np.asarray(meta.get("iou_similarity",
+        np.zeros_like(final_cost_matrix)), dtype=np.float64)
+    detection_overlap_row = iou_sim[track_index, :].copy()
+
+    return AssociationContext(
+        track_cost_row=track_cost_row,
+        detection_cost_col=detection_cost_col,
+        detection_overlap_row=detection_overlap_row,
+        accepted_detection_index=detection_index,
+        num_tracks=num_tracks,
+        num_detections=num_detections,
+        reid_available=reid_available,
     )

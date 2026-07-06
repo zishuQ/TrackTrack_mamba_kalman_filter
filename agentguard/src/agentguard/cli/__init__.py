@@ -37,12 +37,14 @@ VERSION = "0.1.0"
 # Path handling – always reach the TrackTrack project root from this file.
 # ---------------------------------------------------------------------------
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
-assert (
-    _PROJECT_ROOT / "agentguard" / "pyproject.toml"
-).is_file(), f"agentguard/pyproject.toml not found at {_PROJECT_ROOT}"
-assert (
-    _PROJECT_ROOT / "3. Tracker"
-).is_dir(), f"'3. Tracker' directory not found at {_PROJECT_ROOT}"
+_AG_PYPROJECT = _PROJECT_ROOT / "agentguard" / "pyproject.toml"
+_TRACKER_DIR = _PROJECT_ROOT / "3. Tracker"
+assert _AG_PYPROJECT.is_file(), (
+    f"agentguard/pyproject.toml not found at {_PROJECT_ROOT}"
+)
+assert _TRACKER_DIR.is_dir(), (
+    f"'3. Tracker' directory not found at {_PROJECT_ROOT}"
+)
 PROJECT_ROOT = str(_PROJECT_ROOT)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -51,8 +53,9 @@ if PROJECT_ROOT not in sys.path:
 # Mode → split routing
 # ---------------------------------------------------------------------------
 MODE_TO_SPLIT: Dict[str, str] = {
-    "train_custom": "train_custom",
-    "val_custom": "val_custom",
+    "train_custom": "train",
+    "val_custom": "val",
+    "train": "train",
     "val": "val",
     "all": "all",
     "test": "test",
@@ -60,6 +63,11 @@ MODE_TO_SPLIT: Dict[str, str] = {
 
 
 def _resolve_split(mode: str) -> str:
+    """Map user-facing *mode* to a split YAML name.
+
+    Must never index a split YAML file with ``train_custom`` or
+    ``val_custom`` — those map to the standard ``train`` / ``val`` splits.
+    """
     split = MODE_TO_SPLIT.get(mode)
     if split is None:
         raise ValueError(
@@ -162,38 +170,63 @@ def _add_cache_events_parser(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument(
         "--pickle-dir",
         default=os.path.join(PROJECT_ROOT, "outputs", "2. det_feat"),
-        help="Directory containing detection pickle files.",
+        help="Legacy directory containing detection pickle files.",
+    )
+    p.add_argument(
+        "--detection-cache-root",
+        default=os.path.join(PROJECT_ROOT, "outputs", "agentguard", "detection_cache"),
+        help="Root of per-sequence mmap detection caches.",
+    )
+    p.add_argument(
+        "--event-cache-root",
+        default=os.path.join(PROJECT_ROOT, "outputs", "agentguard", "event_cache"),
+        help="Root for compact AgentGuard event caches.",
+    )
+    p.add_argument(
+        "--allow-pickle-fallback",
+        action="store_true",
+        help="Allow legacy monolithic pickle loading when mmap detection cache is absent.",
     )
 
 
 def _cmd_cache_events(args: argparse.Namespace) -> None:
-    _ensure_dir(os.path.join(_outputs_dir(), "agentguard", "cache"))
+    import hashlib
+    import gc
+    import subprocess
+
+    _ensure_dir(getattr(args, "event_cache_root", os.path.join(_outputs_dir(), "agentguard", "event_cache")))
 
     from trackers.tracker import Tracker
-    from utils.det_feat_storage import load_detection_pair
     from utils.etc import set_parameters
-    from agentguard.data.cache_writer import EventCacheWriter
-    from agentguard.data.cache_schema import CacheManifest
-    from agentguard.data.event_sink import CacheEventSink
-    from agentguard.contracts.events import TrackEvent
-    from agentguard.contracts.states import TrackStateSnapshot
-    from agentguard.features.scalar import compute_scalar_features
+    from agentguard.data.compact_event_cache import CompactEventCacheSink
+    from agentguard.data.detection_cache import SequenceDetectionCache, sequence_cache_dir
 
     dataset = args.dataset
     mode = args.mode
+    split = _resolve_split(mode)
     data_dir = args.data_dir
     pickle_dir = args.pickle_dir
-    cache_output = _cache_dir(dataset, mode)
+    max_frames = getattr(args, 'max_frames', 0)
+    detection_cache_root = getattr(
+        args,
+        "detection_cache_root",
+        os.path.join(_outputs_dir(), "agentguard", "detection_cache"),
+    )
+    event_cache_root = getattr(
+        args,
+        "event_cache_root",
+        os.path.join(_outputs_dir(), "agentguard", "event_cache"),
+    )
+    allow_pickle_fallback = bool(getattr(args, "allow_pickle_fallback", False))
 
-    # Determine sequences to process
-    sequences = _resolve_sequences(dataset, mode)
     if args.sequence:
-        sequences = [s for s in sequences if args.sequence in s]
+        sequences = [args.sequence]
+    else:
+        sequences = _resolve_sequences(dataset, mode)
     if not sequences:
         print(f"No sequences found for {dataset}/{mode}")
         return
 
-    # We need a minimal args-like object for set_parameters
     class _TrackerArgs:
         pass
 
@@ -210,20 +243,34 @@ def _cmd_cache_events(args: argparse.Namespace) -> None:
     tracker_args.disable_gmc = False
     tracker_args.kf_type = "nsa"
     tracker_args.agentguard_mode = "off"
+    tracker_args.capture_agentguard_events = True
     tracker_args.no_reid = False
+
+    # Hash the config for manifest idempotence
+    config_hash = hashlib.sha256(
+        json.dumps({
+            "agentguard_mode": "off",
+            "capture_agentguard_events": True,
+            "schema_version": 2,
+        }, sort_keys=True).encode()
+    ).hexdigest()
+    try:
+        source_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            text=True,
+        ).strip()
+    except Exception:
+            source_commit = ""
 
     for seq_name in sequences:
         print(f"\n{'='*60}")
         print(f"Processing {seq_name} ({dataset}/{mode})")
         print(f"{'='*60}")
 
-        # Configure parameters for this sequence
         set_parameters(tracker_args, seq_name, mode)
 
-        # Read seqinfo to get image dimensions
-        seqinfo_path = os.path.join(
-            tracker_args.data_path, seq_name, "seqinfo.ini"
-        )
+        seqinfo_path = os.path.join(tracker_args.data_path, seq_name, "seqinfo.ini")
         img_w, img_h = 1920, 1080
         if os.path.isfile(seqinfo_path):
             with open(seqinfo_path, "r") as f:
@@ -232,189 +279,113 @@ def _cmd_cache_events(args: argparse.Namespace) -> None:
                         img_w = int(line.split("=")[-1])
                     if "imHeight" in line:
                         img_h = int(line.split("=")[-1])
+                    if "frameRate" in line:
+                        tracker_args.max_time_lost = int(line.split("=")[-1]) * 2
         tracker_args.img_w = img_w
         tracker_args.img_h = img_h
+        tracker_args.dataset = dataset
 
-        # Load detection pair
-        detections, detections_95 = load_detection_pair(
-            tracker_args.target_pickle_path, tracker_args.pickle_path_95
+        seq_cache_path = sequence_cache_dir(
+            detection_cache_root,
+            dataset,
+            split,
+            seq_name,
         )
-        if seq_name not in detections:
-            print(f"  WARNING: {seq_name} not found in detections, skipping.")
-            continue
+        detection_cache = None
+        legacy_detections = None
+        legacy_detections_95 = None
 
-        # Create tracker
-        tracker = Tracker(tracker_args, seq_name)
+        if seq_cache_path.is_dir():
+            detection_cache = SequenceDetectionCache(seq_cache_path)
+            total_frames = detection_cache.num_frames
+            reid_dim = detection_cache.reid_dim
+            print(f"  Using mmap detection cache: {seq_cache_path}")
+        elif allow_pickle_fallback:
+            from utils.det_feat_storage import load_detection_pair
 
-        # Create EventSink backed by CacheEventSink
-        event_sink = CacheEventSink(
-            output_dir=cache_output,
+            print("  WARNING: mmap detection cache missing; using legacy pickle fallback.")
+            legacy_detections, legacy_detections_95 = load_detection_pair(
+                tracker_args.target_pickle_path,
+                tracker_args.pickle_path_95,
+                sequence_names=[seq_name],
+            )
+            if seq_name not in legacy_detections:
+                print(f"  WARNING: {seq_name} not found in detections, skipping.")
+                continue
+            total_frames = len(legacy_detections[seq_name])
+            reid_dim = 0
+        else:
+            raise FileNotFoundError(
+                f"Per-sequence detection cache not found: {seq_cache_path}. "
+                "Run scripts/agentguard/00_split_detection_cache.py first, or pass "
+                "--allow-pickle-fallback explicitly."
+            )
+
+        event_sink = CompactEventCacheSink(
+            cache_root=event_cache_root,
             dataset=dataset,
-            split=mode,
+            split=split,
             sequence=seq_name,
+            reid_dim=reid_dim,
+            event_flush_size=256,
+            frame_flush_size=32,
+            config_hash=config_hash,
         )
+        tracker_args.event_sink = event_sink
         event_sink.on_sequence_start(
             sequence=seq_name,
-            reid_dim=getattr(tracker_args, 'reid_dim', 2048),
+            reid_dim=reid_dim,
             image_width=img_w,
             image_height=img_h,
         )
-
-        # Create minimal runtime-like object so adapter works
-        class _CacheRuntime:
-            pass
-
-        runtime = _CacheRuntime()
-        runtime.mode = "off"
-        runtime.event_sink = event_sink
-        runtime.stats = None
-        runtime.event_buffers = {}
-        runtime.checkpoints = None
-        runtime.iwg = None
-        runtime.feature_builder = None
-
-        def _noop(*args_, **kwargs_):
-            pass
-
-        runtime.init_feature_builder = _noop
-        runtime.init_motion_model = _noop
-        runtime.finalize_first_stage = lambda: {}
-        runtime.get_or_create_buffer = lambda tid: (None, None)
-        runtime.cleanup_track = _noop
-        runtime.run_iwg_inference = lambda seq: {
-            "policy_probs": np.ones(5, dtype=np.float64) / 5.0,
-            "gate": np.ones(2, dtype=np.float64),
-            "event_logits": np.zeros(10, dtype=np.float64),
-            "cue": np.ones(3, dtype=np.float64),
-            "gate_residual": np.zeros(2, dtype=np.float64),
-        }
-
-        # Create adapter
-        from integrations.agentguard.adapter import AgentGuardTrackerAdapter
-
-        adapter = AgentGuardTrackerAdapter(tracker_args, seq_name, runtime)
-
-        # Prepare cache writer for frame data and identity prototypes
-        writer = EventCacheWriter(cache_output)
-        manifest = CacheManifest(
-            dataset=dataset,
-            split=mode,
-            sequence=seq_name,
-            image_width=img_w,
-            image_height=img_h,
+        event_sink._truncated = bool(max_frames > 0 and max_frames < total_frames)
+        event_sink._num_detections = int(
+            detection_cache.num_detections if detection_cache is not None else 0
         )
-        frame_data: Dict[int, Any] = {}
-        identity_prototypes: Dict[Any, Any] = {}
 
-        # Frame iteration
-        frame_ids = sorted(detections[seq_name].keys())
-        max_frames = getattr(args, 'max_frames', 0)
-        for i, frame_id in enumerate(frame_ids):
-            if max_frames > 0 and i >= max_frames:
-                break
-
-            det_frame = detections[seq_name][frame_id]
-            det_frame_95 = detections_95[seq_name][frame_id]
-
-            # Capture warp matrix from CMC (before update)
-            warp_matrix = tracker.cmc.get_warp_matrix().copy() if hasattr(tracker, 'cmc') else np.eye(2, 3, dtype=np.float64)
-
-            # Notify adapter of new frame
-            adapter.begin_frame(frame_id, img_w, img_h)
-
-            if det_frame is not None:
-                track_results = tracker.update(det_frame, det_frame_95)
-            else:
-                track_results = tracker.update_without_detections()
-
-            # Build and record events via adapter
-            from agentguard.contracts.outputs import GateDecision
-
-            for t in tracker.tracks:
-                if getattr(t, 'state', -1) not in (1, 2):  # Tracked or Lost
-                    continue
-
-                has_det = hasattr(t, 'feat') and t.feat is not None
-
-                # Build state snapshots
-                frame_start = TrackStateSnapshot(
-                    track_id=t.track_id,
-                    box=t.box.copy() if hasattr(t, 'box') else np.zeros(4),
-                    score=float(getattr(t, 'score', 0.0)),
-                    mean=t.mean.copy() if hasattr(t, 'mean') and t.mean is not None else None,
-                    covariance=t.covariance.copy() if hasattr(t, 'covariance') and t.covariance is not None else None,
-                    velocity=t.velocity.copy() if hasattr(t, 'velocity') else np.zeros((4, 2)),
-                    feature=t.feat.copy() if has_det else np.zeros((1, 2048)),
-                    history=getattr(t, 'history', {}),
-                    end_frame_id=getattr(t, 'end_frame_id', frame_id),
-                    state=getattr(t, 'state', 1),
-                )
-                pre_update = frame_start  # simplified
-
-                event = TrackEvent(
-                    event_id=f"{dataset}/{seq_name}/{frame_id:06d}/{t.track_id:06d}",
-                    dataset=dataset,
-                    sequence=seq_name,
-                    frame_id=frame_id,
-                    track_id=t.track_id,
-                    image_width=img_w,
-                    image_height=img_h,
-                    has_detection=has_det,
-                    frame_start_state=frame_start,
-                    pre_update_state=pre_update,
-                    detection=None,
-                    association=None,
-                    warp_matrix=warp_matrix.copy(),
-                )
-
-                # Compute scalar features
-                event.scalar_features = compute_scalar_features(event)
-
-                # Populate track/detection features
-                if has_det:
-                    event.track_feature = t.feat.ravel().copy()
-                    event.detection_feature = t.feat.ravel().copy()
+        tracker = Tracker(tracker_args, seq_name)
+        try:
+            frame_count = total_frames if max_frames <= 0 else min(max_frames, total_frames)
+            for frame_idx in range(frame_count):
+                if detection_cache is not None:
+                    target_frame = detection_cache.get_frame(frame_idx, view="target")
+                    source_frame = detection_cache.get_frame(frame_idx, view="source")
+                    tracker_args.agentguard_target_detection_indices = target_frame[
+                        "detection_indices"
+                    ]
+                    tracker_args.agentguard_source_detection_indices = source_frame[
+                        "detection_indices"
+                    ]
+                    det_frame = detection_cache.get_frame_array(frame_idx, view="target")
+                    det_frame_95 = detection_cache.get_frame_array(frame_idx, view="source")
                 else:
-                    event.track_feature = np.zeros(2048, dtype=np.float64)
-                    event.detection_feature = np.zeros(2048, dtype=np.float64)
+                    frame_id = frame_idx + 1
+                    det_frame = legacy_detections[seq_name].get(frame_id)
+                    det_frame_95 = legacy_detections_95[seq_name].get(frame_id)
+                    tracker_args.agentguard_target_detection_indices = None
+                    tracker_args.agentguard_source_detection_indices = None
 
-                # Record via adapter (which pushes to EventSink)
-                if has_det:
-                    gate = GateDecision(1.0, 1.0, np.ones(5, dtype=np.float64) / 5.0, 1.0)
-                    adapter.record_event(t.track_id, event, gate)
+                if det_frame is not None and len(det_frame) > 0:
+                    if det_frame_95 is None:
+                        det_frame_95 = det_frame
+                    tracker.update(det_frame, det_frame_95)
                 else:
-                    adapter.record_unmatched_event(t.track_id, event)
+                    tracker.update_without_detections()
+        finally:
+            if detection_cache is not None:
+                detection_cache.close()
+            tracker_args.agentguard_target_detection_indices = None
+            tracker_args.agentguard_source_detection_indices = None
 
-            # Flush frame to EventSink via finalize_first_stage
-            adapter.finalize_first_stage(tracker.tracks)
-
-            # Build identity prototypes by (seq, track_id)
-            for t in tracker.tracks:
-                if hasattr(t, 'feat') and t.feat is not None and t.feat.size > 0:
-                    identity_key = (seq_name, t.track_id)
-                    if identity_key not in identity_prototypes:
-                        identity_prototypes[identity_key] = t.feat.copy()
-
-            frame_data[frame_id] = {
-                "num_detections": len(det_frame) if det_frame is not None else 0,
-                "num_tracks": len(tracker.tracks),
-                "warp_matrix": warp_matrix.tolist(),
-            }
-
-        # Finalize EventSink (writes cache shards)
         manifest_info = event_sink.on_sequence_end()
-
-        # Update manifest with actual counts
-        manifest.num_frames = len(frame_ids)
-        manifest.num_events = manifest_info.get("num_events", 0)
-
-        # Write manifest and frame data (identity prototypes are handled by event_sink)
-        writer.write_manifest(manifest)
-        writer.write_frames(frame_data, manifest)
-        writer.write_identity_prototypes(identity_prototypes, manifest)
-
-        print(f"  Wrote {manifest.num_events} events, {manifest.num_frames} frames "
-              f"to {writer._seq_dir(manifest)}")
+        total_events = manifest_info.get("num_events", 0)
+        print(
+            f"  Wrote {total_events} events, {manifest_info.get('num_frames', 0)} frames "
+            f"to {event_cache_root}/{dataset}/{split}/{seq_name}"
+        )
+        del tracker
+        del detection_cache
+        gc.collect()
 
 
 # _extract_tracker_events removed — events now come from the adapter during processing
@@ -437,14 +408,20 @@ def _add_validate_cache_parser(subparsers: argparse._SubParsersAction) -> None:
         choices=["val", "val_custom", "train_custom", "all", "test"],
         help="Dataset split mode.",
     )
+    p.add_argument(
+        "--event-cache-root",
+        default=os.path.join(PROJECT_ROOT, "outputs", "agentguard", "event_cache"),
+        help="Root of compact AgentGuard event caches.",
+    )
 
 
 def _cmd_validate_cache(args: argparse.Namespace) -> None:
-    from agentguard.data.cache_reader import EventCacheReader
+    import torch
 
     dataset = args.dataset
     mode = args.mode
-    cache_root = _cache_dir(dataset, mode)
+    split = _resolve_split(mode)
+    cache_root = os.path.join(args.event_cache_root, dataset, split)
 
     if not os.path.isdir(cache_root):
         print(f"Cache directory not found: {cache_root}")
@@ -454,78 +431,157 @@ def _cmd_validate_cache(args: argparse.Namespace) -> None:
         d
         for d in os.listdir(cache_root)
         if os.path.isdir(os.path.join(cache_root, d))
+        and not d.endswith(".incomplete")
+        and not d.startswith("_")
     )
 
     total_events = 0
-    total_mature = 0
-    total_no_detection = 0
-    reid_dim = 2048
-    missing_sequences: List[str] = []
+    matched_events = 0
+    unmatched_events = 0
+    association_record_count = 0
+    invalid_detection_indices = 0
+    duplicate_event_ids = 0
+    warp_alignment_errors = 0
+    feature_nonzero_count = 0
+    feature_element_count = 0
+    reid_dim = 0
     empty_caches: List[str] = []
+    incomplete_sequences: List[str] = []
 
     per_seq: List[Dict[str, Any]] = []
 
     for seq in sequences:
         seq_dir = os.path.join(cache_root, seq)
         try:
-            reader = EventCacheReader(seq_dir)
-            manifest = reader.read_manifest()
-            events = reader.read_events()
-            candidates = reader.read_candidates()
-            prototypes = reader.read_identity_prototypes()
-            frames = reader.read_frames()
+            with open(os.path.join(seq_dir, "manifest.json"), "r") as f:
+                manifest = json.load(f)
+            events: List[dict] = []
+            frames: List[dict] = []
+            associations: List[dict] = []
+            for path in sorted(Path(seq_dir).glob("events_*.pt")):
+                events.extend(torch.load(path, weights_only=False))
+            for path in sorted(Path(seq_dir).glob("frames_*.pt")):
+                frames.extend(torch.load(path, weights_only=False))
+            for path in sorted(Path(seq_dir).glob("associations_*.pt")):
+                associations.extend(torch.load(path, weights_only=False))
         except Exception as e:
-            missing_sequences.append(seq)
             print(f"  FAIL {seq}: {e}")
+            incomplete_sequences.append(seq)
             continue
 
         n_events = len(events)
-        n_mature = sum(
-            1
-            for ev in events
-            if ev.pre_update_state is not None
-            and ev.pre_update_state.history
-            and len(ev.pre_update_state.history) >= 6
-        )
-        n_no_det = sum(1 for ev in events if not ev.has_detection)
-        n_candidates = len(candidates)
-        n_protos = len(prototypes)
-        n_frames = len(frames)
+        n_matched = sum(1 for ev in events if bool(ev.get("matched", False)))
+        n_unmatched = n_events - n_matched
+        n_assoc = len(associations)
+        assoc_by_id = {
+            int(a["association_record_id"]): a
+            for a in associations
+            if "association_record_id" in a
+        }
+
+        seq_feature_nonzero = 0
+        seq_feature_total = 0
+        for ev in events:
+            f = np.asarray(ev.get("track_feature", []), dtype=np.float32)
+            seq_feature_nonzero += int(np.count_nonzero(f))
+            seq_feature_total += int(f.size)
+
+        seq_warp_alignment_errors = 0
+        for fr in frames:
+            wm = fr.get("effective_warp")
+            if wm is not None and np.asarray(wm).shape != (2, 3):
+                seq_warp_alignment_errors += 1
+
+        bad_det_idx = 0
+        for ev in events:
+            if not bool(ev.get("matched", False)):
+                continue
+            di = int(ev.get("accepted_detection_index", -1))
+            assoc_id = int(ev.get("association_record_id", -1))
+            assoc = assoc_by_id.get(assoc_id)
+            if di < 0 or assoc is None:
+                bad_det_idx += 1
+                continue
+            detection_indices = np.asarray(assoc.get("detection_indices", []), dtype=np.int64)
+            if not np.any(detection_indices == di):
+                bad_det_idx += 1
+
+        ids = [str(ev.get("event_id", "")) for ev in events]
+        dup_count = len(ids) - len(set(ids))
 
         total_events += n_events
-        total_mature += n_mature
-        total_no_detection += n_no_det
+        matched_events += n_matched
+        unmatched_events += n_unmatched
+        association_record_count += n_assoc
+        invalid_detection_indices += bad_det_idx
+        duplicate_event_ids += dup_count
+        warp_alignment_errors += seq_warp_alignment_errors
+        feature_nonzero_count += seq_feature_nonzero
+        feature_element_count += seq_feature_total
+        reid_dim = int(manifest.get("reid_dim", reid_dim))
 
         if n_events == 0:
             empty_caches.append(seq)
+        if not bool(manifest.get("complete", False)):
+            incomplete_sequences.append(seq)
+
+        seq_feature_ratio = (seq_feature_nonzero / max(seq_feature_total, 1))
 
         per_seq.append(
             {
                 "sequence": seq,
-                "num_events": n_events,
-                "num_mature": n_mature,
-                "num_no_detection": n_no_det,
-                "num_candidates": n_candidates,
-                "num_prototypes": n_protos,
-                "num_frames": n_frames,
-                "reid_dim": manifest.reid_dim,
-                "image_width": manifest.image_width,
-                "image_height": manifest.image_height,
+                "processed_frames": len(frames),
+                "total_events": n_events,
+                "matched_events": n_matched,
+                "unmatched_events": n_unmatched,
+                "events_with_real_detection": n_matched,
+                "association_context_count": n_assoc,
+                "association_record_count": n_assoc,
+                "feature_nonzero_ratio": seq_feature_ratio,
+                "warp_alignment_errors": seq_warp_alignment_errors,
+                "duplicate_event_ids": dup_count,
+                "invalid_detection_indices": bad_det_idx,
+                "complete": bool(manifest.get("complete", False)),
+                "truncated": bool(manifest.get("truncated", False)),
+                "num_detection_records": int(manifest.get("num_detections", 0)),
+                "reid_dim": int(manifest.get("reid_dim", 0)),
             }
         )
+
+    feature_nonzero_ratio = (
+        feature_nonzero_count / max(feature_element_count, 1)
+    )
 
     report = {
         "dataset": dataset,
         "mode": mode,
         "num_sequences": len(sequences),
+        "processed_frames": sum(item["processed_frames"] for item in per_seq),
         "total_events": total_events,
-        "total_mature": total_mature,
-        "total_no_detection": total_no_detection,
+        "matched_events": matched_events,
+        "unmatched_events": unmatched_events,
+        "events_with_real_detection": matched_events,
+        "association_context_count": association_record_count,
+        "association_record_count": association_record_count,
+        "feature_nonzero_ratio": feature_nonzero_ratio,
+        "warp_alignment_errors": warp_alignment_errors,
+        "duplicate_event_ids": duplicate_event_ids,
+        "invalid_detection_indices": invalid_detection_indices,
+        "complete": (
+            not empty_caches
+            and not incomplete_sequences
+            and invalid_detection_indices == 0
+        ),
+        "truncated": any(item.get("truncated", False) for item in per_seq),
         "reid_dim": reid_dim,
         "per_sequence": per_seq,
-        "missing_sequences": missing_sequences,
         "empty_caches": empty_caches,
-        "status": "ok" if not missing_sequences and not empty_caches else "issues_found",
+        "incomplete_sequences": incomplete_sequences,
+        "status": (
+            "ok"
+            if not empty_caches and not incomplete_sequences and invalid_detection_indices == 0
+            else "issues_found"
+        ),
     }
 
     out_dir = _ensure_dir(os.path.join(cache_root, "_validation"))
@@ -601,7 +657,7 @@ def _cmd_build_rollout_labels(args: argparse.Namespace) -> None:
             reader = EventCacheReader(seq_dir)
             manifest = reader.read_manifest()
             events = reader.read_events()
-            frame_data = reader.read_frames()
+            frames_list = reader.read_frames()
             prototypes = reader.read_identity_prototypes()
         except Exception as e:
             print(f"  SKIP {seq}: {e}")
@@ -609,6 +665,15 @@ def _cmd_build_rollout_labels(args: argparse.Namespace) -> None:
 
         if not events:
             continue
+
+        # Convert frames list to dict keyed by frame_id
+        frame_data: Dict[int, Any] = {}
+        if isinstance(frames_list, list):
+            for fr in frames_list:
+                if isinstance(fr, dict):
+                    frame_data[fr.get("frame_id", -1)] = fr
+        else:
+            frame_data = frames_list
 
         # Build future oracle data
         try:

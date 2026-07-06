@@ -12,16 +12,16 @@ from agentguard.data.cache_schema import CacheManifest
 class EventCacheReader:
     """Reads cached events from disk.
 
-    Expects the directory layout produced by :class:`EventCacheWriter`::
+    Expects the directory layout produced by :class:`CacheEventSink`::
 
         <cache_dir>/
         ├── manifest.json
-        ├── frames.pt
+        ├── frames_00000.pt
         ├── events_00000.pt
         ├── events_00001.pt
-        ├── candidates_00000.pt
-        ├── candidates_00001.pt
-        └── identity_prototypes.pt
+        ├── candidates_00000.pt   (optional stage-2)
+        ├── candidates_00001.pt   (optional stage-2)
+        └── identity_prototypes.pt (optional stage-2)
 
     Parameters
     ----------
@@ -47,7 +47,6 @@ class EventCacheReader:
 
     def _glob_shards(self, prefix: str) -> List[str]:
         """Return sorted paths of all shards matching ``<prefix>_*.pt``."""
-        pattern = f"{prefix}_*.pt"
         matching: List[str] = []
         for fname in os.listdir(self.cache_dir):
             if fname.startswith(f"{prefix}_") and fname.endswith(".pt"):
@@ -55,9 +54,23 @@ class EventCacheReader:
         matching.sort()
         if not matching:
             raise FileNotFoundError(
-                f"No shard files found matching '{pattern}' in {self.cache_dir}"
+                f"No shard files found matching '{prefix}_*.pt' in {self.cache_dir}"
             )
         return matching
+
+    def _glob_shards_optional(self, prefix: str) -> List[str]:
+        """Return sorted paths of shards matching ``<prefix>_*.pt`` or empty list."""
+        matching: List[str] = []
+        for fname in os.listdir(self.cache_dir):
+            if fname.startswith(f"{prefix}_") and fname.endswith(".pt"):
+                matching.append(os.path.join(self.cache_dir, fname))
+        matching.sort()
+        return matching
+
+    def _resolve_optional(self, filename: str) -> Optional[str]:
+        """Return path if *filename* exists, otherwise ``None``."""
+        path = os.path.join(self.cache_dir, filename)
+        return path if os.path.isfile(path) else None
 
     # ------------------------------------------------------------------
     #  Public read methods
@@ -99,12 +112,15 @@ class EventCacheReader:
     def read_candidates(self) -> List[Any]:
         """Load all candidates from sharded ``.pt`` files.
 
+        Returns an empty list when no candidates shards exist (optional
+        stage-2 file).
+
         Returns
         -------
         list
             Concatenated list of all candidates across all shards.
         """
-        shard_paths = self._glob_shards("candidates")
+        shard_paths = self._glob_shards_optional("candidates")
         all_candidates: List[Any] = []
         for sp in shard_paths:
             chunk = torch.load(sp, weights_only=False)
@@ -117,12 +133,16 @@ class EventCacheReader:
     def read_identity_prototypes(self) -> Dict[int, Any]:
         """Load identity prototypes.
 
+        Returns an empty dict when the optional stage-2 file does not exist.
+
         Returns
         -------
         dict
             Mapping ``track_id -> prototype_vector``.
         """
-        path = self._resolve("identity_prototypes.pt")
+        path = self._resolve_optional("identity_prototypes.pt")
+        if path is None:
+            return {}
         data = torch.load(path, weights_only=False)
         if not isinstance(data, dict):
             raise TypeError(
@@ -131,19 +151,23 @@ class EventCacheReader:
             )
         return data
 
-    def read_frames(self) -> Dict[int, Any]:
+    def read_frames(self) -> Any:
         """Load per-frame metadata.
+
+        Accepts both the list payload (from ``CacheEventSink``) and the
+        legacy dict payload (from ``EventCacheWriter``), returning the data
+        as-stored.
 
         Returns
         -------
-        dict
-            Mapping ``frame_id -> per-frame metadata dict``.
+        list or dict
+            Per-frame metadata in the stored format.
         """
-        path = self._resolve("frames.pt")
+        path = self._resolve("frames_00000.pt")
         data = torch.load(path, weights_only=False)
-        if not isinstance(data, dict):
+        if not isinstance(data, (list, dict)):
             raise TypeError(
-                f"Expected frames.pt to contain a dict, "
+                f"Expected frames_00000.pt to contain a list or dict, "
                 f"got {type(data).__name__}"
             )
         return data

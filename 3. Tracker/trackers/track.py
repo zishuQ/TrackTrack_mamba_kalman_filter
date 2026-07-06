@@ -119,18 +119,21 @@ class Track(BaseTrack):
         self.end_frame_id = frame_id
         self.state = TrackState.Tracked if len(self.history.keys()) >= self.args.min_len else TrackState.New
 
-    def snapshot_state(self):
+    def snapshot_state(self, compact_history=False):
         from agentguard.contracts.states import TrackStateSnapshot
 
         history_copy = {}
         for frame_id, hist_list in self.history.items():
-            history_copy[frame_id] = [
-                hist_list[0].copy(),
-                hist_list[1],
-                hist_list[2].copy() if hist_list[2] is not None else None,
-                hist_list[3].copy() if hist_list[3] is not None else None,
-                hist_list[4].copy(),
-            ]
+            if compact_history:
+                history_copy[frame_id] = [hist_list[0].copy()]
+            else:
+                history_copy[frame_id] = [
+                    hist_list[0].copy(),
+                    hist_list[1],
+                    hist_list[2].copy() if hist_list[2] is not None else None,
+                    hist_list[3].copy() if hist_list[3] is not None else None,
+                    hist_list[4].copy(),
+                ]
 
         return TrackStateSnapshot(
             track_id=self.track_id,

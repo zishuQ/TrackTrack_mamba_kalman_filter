@@ -87,7 +87,8 @@ def test_full_replay_updates_live_track_state():
 
     assert len(spy.calls) == 6
     assert spy.state == 2
-    assert spy.end_frame_id == 8
+    # After step 3 (unmatched): end_frame_id unchanged from step 2's value (7)
+    assert spy.end_frame_id == 7
 
 
 def test_all_one_replay_preserves_original_tracktrack_behavior():

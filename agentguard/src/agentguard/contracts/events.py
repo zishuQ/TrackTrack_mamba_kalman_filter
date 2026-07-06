@@ -6,6 +6,7 @@ from typing import Optional
 import numpy as np
 
 from agentguard.contracts.states import (
+    AssociationContext,
     AssociationPairFeatures,
     DetectionObservation,
     TrackStateSnapshot,
@@ -37,6 +38,7 @@ class TrackEvent:
     # --- Detection & association ---
     detection: Optional[DetectionObservation] = None
     association: Optional[AssociationPairFeatures] = None
+    association_context: Optional[AssociationContext] = None
     warp_matrix: np.ndarray = field(
         default_factory=lambda: np.eye(2, 3, dtype=np.float64)
     )

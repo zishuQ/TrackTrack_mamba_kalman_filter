@@ -14,20 +14,22 @@ class EventCacheWriter:
 
     Output structure per sequence::
 
-        outputs/agentguard/cache/<dataset>/<split>/<sequence>/
+        <output_dir>/<dataset>/<split>/<sequence>/
         ├── manifest.json
-        ├── frames.pt
+        ├── frames_00000.pt
         ├── events_00000.pt
-        ├── events_00001.pt
-        ├── candidates_00000.pt
-        ├── candidates_00001.pt
         └── identity_prototypes.pt
+
+    Path responsibility
+    -------------------
+    The *output_dir* should be the fixed ``cache_root``
+    (e.g. ``outputs/agentguard/cache``). This writer appends
+    ``<dataset>/<split>/<sequence>/`` internally via the manifest fields.
 
     Parameters
     ----------
     output_dir : str
-        Root directory under which the ``<dataset>/<split>/<sequence>/``
-        subdirectory will be created.
+        Root cache directory (cache_root only, NOT including dataset/split/sequence).
     """
 
     def __init__(self, output_dir: str) -> None:
@@ -70,9 +72,6 @@ class EventCacheWriter:
     ) -> List[str]:
         """Write events to sharded ``.pt`` files.
 
-        Events are serialised to JSON-compatible dicts before saving
-        (see :func:`agentguard.contracts.serialization.serialize_events`).
-
         Parameters
         ----------
         events : list
@@ -107,22 +106,7 @@ class EventCacheWriter:
         shard_size: int = 10000,
         manifest: Optional[CacheManifest] = None,
     ) -> List[str]:
-        """Write candidate data to sharded ``.pt`` files.
-
-        Parameters
-        ----------
-        candidates : list
-            Sequence of candidate objects (must be picklable).
-        shard_size : int
-            Maximum number per shard.
-        manifest : CacheManifest, optional
-            If provided, the shard directory is derived from it.
-
-        Returns
-        -------
-        list of str
-            Paths of the written shard files.
-        """
+        """Write candidate data to sharded ``.pt`` files."""
         if manifest is None:
             manifest = CacheManifest()
         seq_dir = self._ensure_seq_dir(manifest)
@@ -139,20 +123,7 @@ class EventCacheWriter:
         prototypes: Dict[int, Any],
         manifest: Optional[CacheManifest] = None,
     ) -> str:
-        """Write identity prototypes as a single ``.pt`` file.
-
-        Parameters
-        ----------
-        prototypes : dict
-            Mapping ``track_id -> prototype_vector`` (ndarray or tensor).
-        manifest : CacheManifest, optional
-            If provided, the shard directory is derived from it.
-
-        Returns
-        -------
-        str
-            Path of the written file.
-        """
+        """Write identity prototypes as a single ``.pt`` file."""
         if manifest is None:
             manifest = CacheManifest()
         seq_dir = self._ensure_seq_dir(manifest)
@@ -165,23 +136,10 @@ class EventCacheWriter:
         frame_data: Dict[int, Any],
         manifest: Optional[CacheManifest] = None,
     ) -> str:
-        """Write per-frame metadata as ``frames.pt``.
-
-        Parameters
-        ----------
-        frame_data : dict
-            Mapping ``frame_id -> per-frame metadata dict`` (must be picklable).
-        manifest : CacheManifest, optional
-            If provided, the shard directory is derived from it.
-
-        Returns
-        -------
-        str
-            Path of the written file.
-        """
+        """Write per-frame metadata as ``frames_00000.pt``."""
         if manifest is None:
             manifest = CacheManifest()
         seq_dir = self._ensure_seq_dir(manifest)
-        path = os.path.join(seq_dir, "frames.pt")
+        path = os.path.join(seq_dir, "frames_00000.pt")
         torch.save(frame_data, path)
         return path

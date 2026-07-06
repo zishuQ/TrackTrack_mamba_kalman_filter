@@ -1,5 +1,6 @@
 import pickle
 import numpy as np
+from pathlib import Path
 
 
 class CMC:
@@ -8,12 +9,15 @@ class CMC:
 
         if 'MOT17' in vid_name:
             vid_name = vid_name.split('-FRCNN')[0]
+            vid_name = vid_name.split('-DPM')[0]
+            vid_name = vid_name.split('-SDP')[0]
         elif 'dance' in vid_name.lower():
             vid_name = 'dancetrack-' + vid_name.split('dancetrack')[1]
         elif 'v_' in vid_name:  # SportsMOT videos start with v_
             vid_name = 'sportsmot-' + vid_name
 
-        self.gmcFile = open('./trackers/cmc/' + 'GMC-' + vid_name + ".txt", 'r')
+        cmc_dir = Path(__file__).resolve().parent / 'cmc'
+        self.gmcFile = open(cmc_dir / f'GMC-{vid_name}.txt', 'r')
 
     def get_warp_matrix(self):
         line = self.gmcFile.readline()

@@ -7,6 +7,7 @@ import numpy as np
 
 from agentguard.contracts.events import TrackEvent
 from agentguard.contracts.states import (
+    AssociationContext,
     AssociationPairFeatures,
     DetectionObservation,
     TrackStateSnapshot,
@@ -96,6 +97,18 @@ def _association_to_dict(assoc: AssociationPairFeatures) -> dict:
     }
 
 
+def _context_to_dict(ctx: AssociationContext) -> dict:
+    return {
+        "track_cost_row": _to_list(ctx.track_cost_row),
+        "detection_cost_col": _to_list(ctx.detection_cost_col),
+        "detection_overlap_row": _to_list(ctx.detection_overlap_row),
+        "accepted_detection_index": ctx.accepted_detection_index,
+        "num_tracks": ctx.num_tracks,
+        "num_detections": ctx.num_detections,
+        "reid_available": ctx.reid_available,
+    }
+
+
 def serialize_event(event: TrackEvent) -> dict:
     """Convert a ``TrackEvent`` to a JSON-serialisable dictionary.
 
@@ -129,6 +142,11 @@ def serialize_event(event: TrackEvent) -> dict:
         "association": (
             _association_to_dict(event.association)
             if event.association is not None
+            else None
+        ),
+        "association_context": (
+            _context_to_dict(event.association_context)
+            if event.association_context is not None
             else None
         ),
         "warp_matrix": _to_list(event.warp_matrix),
@@ -197,6 +215,18 @@ def _dict_to_association(data: dict) -> AssociationPairFeatures:
     )
 
 
+def _dict_to_context(data: dict) -> AssociationContext:
+    return AssociationContext(
+        track_cost_row=np.asarray(data["track_cost_row"], dtype=np.float64),
+        detection_cost_col=np.asarray(data["detection_cost_col"], dtype=np.float64),
+        detection_overlap_row=np.asarray(data["detection_overlap_row"], dtype=np.float64),
+        accepted_detection_index=data.get("accepted_detection_index"),
+        num_tracks=data["num_tracks"],
+        num_detections=data["num_detections"],
+        reid_available=data.get("reid_available", True),
+    )
+
+
 def deserialize_event(data: dict) -> TrackEvent:
     """Reconstruct a ``TrackEvent`` from a dictionary produced by ``serialize_event``."""
     event = TrackEvent(
@@ -226,6 +256,11 @@ def deserialize_event(data: dict) -> TrackEvent:
         association=(
             _dict_to_association(data["association"])
             if data.get("association") is not None
+            else None
+        ),
+        association_context=(
+            _dict_to_context(data["association_context"])
+            if data.get("association_context") is not None
             else None
         ),
         warp_matrix=np.asarray(data["warp_matrix"], dtype=np.float64),

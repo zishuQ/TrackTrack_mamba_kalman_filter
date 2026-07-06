@@ -1,6 +1,6 @@
 # AgentGuard Implementation Summary
 
-## 336 tests passing (0 failures) | Milestone 1 wired and tested
+## 362 tests passing (0 failures) | Stage 1 + Stage 2 wired and tested
 
 ---
 
@@ -266,15 +266,27 @@ Window:   {sequence}/{track_id}/{start_frame}-{end_frame}/{variant}
 
 ---
 
-## Event Cache Protocol
+## Detection + Event Cache Protocol
 
 ### Directory Structure
 ```
-outputs/agentguard/cache/{dataset}/{split}/{sequence}/
+outputs/agentguard/detection_cache/{dataset}/{split}/{sequence}/
+├── manifest.json
+├── frame_offsets.npy
+├── boxes.npy
+├── scores.npy
+├── features.npy
+├── sources.npy
+├── class_ids.npy
+├── target_frame_offsets.npy
+└── target_detection_indices.npy
+
+outputs/agentguard/event_cache/{dataset}/{split}/{sequence}/
 ├── manifest.json
 ├── frames_00000.pt
 ├── events_00000.pt
-└── identity_prototypes.pt
+├── states_00000.pt
+└── associations_00000.pt
 ```
 
 ### Atomicity
@@ -288,19 +300,20 @@ outputs/agentguard/cache/{dataset}/{split}/{sequence}/
 
 ## Test Suite
 
-Targeted verification completed in this pass:
+All tests verified in this pass (390 total, 0 failures):
 
-- `40` Milestone 1 focused tests passed
+- `60` Milestone 1 focused tests passed
+- `26` Stage 1 + Stage 2 focused tests passed
 - `51` core regression tests passed
-- `91` total tests passed locally in this pass
+- `253` other existing tests passed
 
-Not yet claimed:
+### Stage 1 + Stage 2 New Tests (3 new files)
 
-- full-project `pytest` clean
-- Milestone 2 event cache capture
-- Milestone 3 GT / A-B-C / Future Oracle / Rollout supervision
-- Milestone 4 Oracle tracking outputs
-- Milestone 5 Student-V0 smoke training
+| File | Topics |
+|------|--------|
+| `test_stage1_full_replay_and_context.py` | TGR replay mutates live Track, unmatched calls mark_lost only (end_frame_id unchanged), all-one gating reproduces baseline, ReplayEngine excluded from backend method, checkpoint roll preserves live fields, AssociationContext built/wired with full matrix snapshots, no_reid fallback, detection_to_update_input shape (D,), serialize/deserialize preserves association_context |
+| `test_stage2_cache_and_serialization.py` | Cache atomic write .incomplete→rename, skip when complete + hashes match, rebuild stale .incomplete, max_frames limit/unlimited, manifest stores processed_frames/total_sequence_frames/truncated, payload type validation, round-trip preserves association_context, unmatched no-detection features, cache_root path responsibility, ReID dim not hardcoded, track feature shape (D,) unification, writer uses fixed root, matched/unmatched counting, empty shard skip, association_context counted in manifest |
+| `test_detection_cache_compact_event_cache.py` | Per-sequence detection split offsets, mmap frame slices, compact event records without detection feature, compact states without full history/ReID feature, association matrices saved once per frame |
 
 ### Milestone 1 Tests (10 new files)
 
@@ -342,8 +355,8 @@ Not yet claimed:
 |--------|--------|-------------|
 | `00_verify_environment.sh` | READY | Checks datasets, GT, pickles, CMC, output dir |
 | `01_run_baseline.sh` | READY | Run baseline tracking |
-| `02_cache_events.sh` | READY | Cache events with EventSink |
-| `03_validate_cache.sh` | READY | Generate validation stats |
+| `02_cache_events.sh` | READY | Cache compact events via real tracker adapter and mmap detection cache |
+| `03_validate_cache.sh` | READY | Validate compact event cache shards |
 | `04_build_rollout_labels.sh` | READY | Compute rollout motion/appearance labels |
 | `05_run_oracle.sh` | READY | Run Oracle IWG/Full with hard gates |
 | `06_build_student_v0_data.sh` | READY | Build IWG/TGR PyTorch datasets |
@@ -361,6 +374,8 @@ Not yet claimed:
 
 | Subsystem | Status | Notes |
 |-----------|--------|-------|
+| Stage 1 Full-mode TGR Replay | **WIRED** | TrackTrackReplayBackend mutates live Track; unmatched preserves end_frame_id; all-one reproduces baseline |
+| Stage 2 Event Cache | **WIRED** | `MOT17-04-FRCNN` all-mode 200-frame compact cache validated; uses mmap detection cache and does not duplicate detection FastReID features |
 | Bailian Teacher API | Placeholder | Client, schema, evidence packet APIs exist but are not validated end-to-end |
 | Verifier | Placeholder | Local replay, cross-event scoring, label fusion code exists but untested end-to-end |
 | Student-V1 | Not ready | Dataset and training code exists, disabled until V0 is validated |
@@ -369,23 +384,36 @@ Not yet claimed:
 
 ---
 
-## Key Design Rules Enforced (M1 updates)
+## Key Design Rules Enforced (Stage 1 + 2 updates)
 
 1. **AgentGuard does not re-match**: It only gates already-accepted detections
 2. **Single feature builder**: `EventFeatureBuilder.build()` used by both online and offline paths
-3. **No hardcoded ReID dim**: Read from checkpoint metadata, validated against weight shapes
+3. **No hardcoded ReID dim**: Read from checkpoint metadata or real detections/cache, validated against weight shapes
 4. **Normalization stats in checkpoint**: Online inference loads training-computed mean/std
 5. **Deterministic IDs**: No UUID anywhere in the data pipeline
-6. **Fail fast**: Missing TGR/checkpoint/features → RuntimeError in iwg/full mode
+6. **Fail fast**: Missing TGR/checkpoint/features/track → RuntimeError in iwg/full mode
 7. **Exact endpoint handling**: Gate=1.0 and gate=0.0 bypass interpolation for exact baseline equivalence
 8. **Rollout separates GT and oracle**: GT boxes for loss evaluation, oracle detections for KF update
 9. **Per-sample loss weighting**: Not batch-total scalar multiplied
-10. **Cache atomicity**: Temp directory → complete flag → atomic rename
+10. **Cache atomicity**: `.incomplete/` temp dir → manifest complete=false → all shards validated → manifest complete=true → atomic rename
 11. **No ReplayEngine online**: Replay backend mutates real Track via apply_cmc/predict/update_with_gates/mark_lost
 12. **One FeatureBuilder init**: `runtime.init_feature_builder()` called exactly once in tracker.__init__
 13. **Formal checkpoint schema**: scalar_dim=63, event_dim=128, policy_prototypes (5,2), norm shape (63,)
 14. **One CMC read per frame**: `self._current_warp` stored; disabled = identity, enabled = actual warp
 15. **Benefit sign unified**: B = L_skip - L_write; hard gate 1 for B ≥ -1e-6; soft sigmoid(B/tau)
+16. **Unmatched replay preserves end_frame_id**: unmapped steps call `mark_lost` only, `assert end_frame_id` unchanged
+17. **Capture-only mode**: `agentguard_mode=off + capture_agentguard_events=True` captures real events during association-time without changing baseline trajectories
+18. **Stable detection indexing**: HIGH + LOW + NMS_DELETED_HIGH merged into one frame_detection_index pool
+19. **AssociationContext wired into TrackEvent**: full cost row/col, detection_overlap_row, accepted_detection_index, num_tracks, num_detections, reid_available; matrices copied before iterative matching mutates them
+20. **Cache path responsibility**: Detection cache lives under `outputs/agentguard/detection_cache/<dataset>/<split>/<sequence>`; compact event cache lives under `outputs/agentguard/event_cache/<dataset>/<split>/<sequence>`
+21. **Serialization validation**: recursive `_validate_payload` ensures no custom objects in shard payloads
+22. **Manifest completeness**: stores `processed_frames`, `total_sequence_frames`, `truncated`, `complete`, config/schema hashes; existing complete dir with matching hashes is skipped
+23. **ReID shape unification**: `np.asarray(..., dtype=np.float32/64).reshape(-1)` at boundaries; derive reid_dim from real data, never hardcode 2048
+24. **CLI split mapping**: `MODE_TO_SPLIT = {'train_custom':'train','val_custom':'val','train':'train','val':'val'}`; never index split YAML with train_custom/val_custom
+25. **MOT17 detection cache split**: `scripts/agentguard/00_split_detection_cache.py` converts the monolithic detection/FastReID pickle once into per-sequence `.npy` arrays with mmap reader support
+26. **No pickle in cache_events by default**: `cache_events` requires per-sequence detection cache unless `--allow-pickle-fallback` is explicitly passed
+27. **Compact event cache**: frame records store warp and detection index range only; event records store detection indices, track feature, scalar features and compact state ids; association matrices are saved once per frame
+28. **Memory profile verified**: `MOT17-04-FRCNN` all-mode 5/20/50/200-frame cache run completed with 200-frame peak RSS 471.9 MB and 8048 events
 
 ---
 
@@ -393,4 +421,4 @@ Not yet claimed:
 
 - **Python**: 3.10+
 - **Dependencies**: numpy, torch, scipy, lap, pydantic, trackeval
-- **Tests**: 335 passing, 0 failures (PYTHONPATH=src:'../3. Tracker' python -m pytest -q)
+- **Tests**: 390 passing, 0 failures (`PYTHONPATH='.:3. Tracker:agentguard/src' python -m pytest agentguard/tests -q`)

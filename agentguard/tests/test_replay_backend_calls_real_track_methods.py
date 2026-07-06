@@ -122,6 +122,7 @@ def test_replay_backend_unmatched_preserves_end_frame_id():
     backend = TrackTrackReplayBackend()
 
     snapshot = _make_minimal_snapshot()
+    # snapshot has end_frame_id=10
     steps = [
         ReplayStep(
             frame_id=20,
@@ -138,7 +139,10 @@ def test_replay_backend_unmatched_preserves_end_frame_id():
     backend.replay_into_live_track(spy, plan)
 
     assert spy.state == 2
-    assert spy.end_frame_id == 20
+    # Unmatched step must call mark_lost only; end_frame_id stays at
+    # the checkpoint snapshot value (restore_state copies it), not the
+    # unmatched step's frame_id.
+    assert spy.end_frame_id == 10
 
 
 def test_replay_backend_does_not_import_replay_engine():
