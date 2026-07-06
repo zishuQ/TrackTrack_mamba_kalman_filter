@@ -123,7 +123,13 @@ class Track(BaseTrack):
         from agentguard.contracts.states import TrackStateSnapshot
 
         history_copy = {}
-        for frame_id, hist_list in self.history.items():
+        frame_ids = (
+            sorted(self.history.keys())[-6:]
+            if compact_history
+            else self.history.keys()
+        )
+        for frame_id in frame_ids:
+            hist_list = self.history[frame_id]
             if compact_history:
                 history_copy[frame_id] = [hist_list[0].copy()]
             else:

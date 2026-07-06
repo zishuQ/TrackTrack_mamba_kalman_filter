@@ -314,7 +314,7 @@ def test_cmd_cache_events_requires_mmap_cache_unless_fallback(monkeypatch, tmp_p
         event_cache_root=str(tmp_path / "event_cache"),
         allow_pickle_fallback=False,
     )
-    with pytest.raises(FileNotFoundError, match="Per-sequence detection cache not found"):
+    with pytest.raises(FileNotFoundError, match="Detection cache manifest not found"):
         _cmd_cache_events(args)
 
 

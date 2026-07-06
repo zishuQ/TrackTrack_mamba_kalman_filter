@@ -11,6 +11,7 @@ MAX_FRAMES="${MAX_FRAMES:-0}"
 DETECTION_CACHE_ROOT="${DETECTION_CACHE_ROOT:-${REPO_ROOT}/outputs/agentguard/detection_cache}"
 EVENT_CACHE_ROOT="${EVENT_CACHE_ROOT:-${REPO_ROOT}/outputs/agentguard/event_cache}"
 SEQUENCE="${SEQUENCE:-}"
+DETECTOR="${DETECTOR:-FRCNN}"
 
 echo "=== AgentGuard: Cache Events ==="
 echo "Dataset: $DATASET"
@@ -18,6 +19,7 @@ echo "Mode: $MODE"
 echo "Max frames: $MAX_FRAMES"
 echo "Detection cache root: $DETECTION_CACHE_ROOT"
 echo "Event cache root: $EVENT_CACHE_ROOT"
+echo "Detector: $DETECTOR"
 echo "Repo root: $REPO_ROOT"
 
 cd "${REPO_ROOT}"
@@ -27,7 +29,8 @@ CMD=(
     --mode "${MODE}" \
     --max-frames "${MAX_FRAMES}" \
     --detection-cache-root "${DETECTION_CACHE_ROOT}" \
-    --event-cache-root "${EVENT_CACHE_ROOT}"
+    --event-cache-root "${EVENT_CACHE_ROOT}" \
+    --detector "${DETECTOR}"
 )
 if [[ -n "${SEQUENCE}" ]]; then
     CMD+=(--sequence "${SEQUENCE}")

@@ -611,6 +611,7 @@ class AgentGuardTrackerAdapter:
         return {
             "event_id": event.event_id,
             "frame_id": int(event.frame_id),
+            "frame_index": int(event.frame_id) - 1,
             "track_id": int(event.track_id),
             "has_detection": bool(event.has_detection),
             "accepted_detection_index": (

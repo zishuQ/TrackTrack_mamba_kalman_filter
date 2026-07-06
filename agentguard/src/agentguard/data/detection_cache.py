@@ -59,7 +59,11 @@ class SequenceDetectionCache:
             raise IndexError(
                 f"frame_id={frame_id} outside [0, {self.num_frames}) for {self.sequence_dir}"
             )
-        if view == "target" and self.target_frame_offsets is not None:
+        if view == "target":
+            if self.target_frame_offsets is None or self.target_detection_indices is None:
+                raise FileNotFoundError(
+                    f"Target detection index files are required for target view: {self.sequence_dir}"
+                )
             start = int(self.target_frame_offsets[frame_id])
             end = int(self.target_frame_offsets[frame_id + 1])
             return self.target_detection_indices[start:end]
@@ -102,6 +106,22 @@ class SequenceDetectionCache:
             return (-1, -1)
         return (int(indices[0]), int(indices[-1]) + 1)
 
+    def get_detection(self, detection_index: int) -> Dict[str, Any]:
+        detection_index = int(detection_index)
+        if detection_index < 0 or detection_index >= self.num_detections:
+            raise IndexError(
+                f"detection_index={detection_index} outside [0, {self.num_detections}) "
+                f"for {self.sequence_dir}"
+            )
+        return {
+            "detection_index": detection_index,
+            "box": self.boxes[detection_index],
+            "score": self.scores[detection_index],
+            "feature": self.features[detection_index],
+            "source": self.sources[detection_index],
+            "class_id": self.class_ids[detection_index],
+        }
+
     def close(self) -> None:
         for name in (
             "frame_offsets",
@@ -127,4 +147,3 @@ def sequence_cache_dir(
     sequence: str,
 ) -> Path:
     return Path(root) / dataset / split / sequence
-

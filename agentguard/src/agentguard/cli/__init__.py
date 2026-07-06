@@ -20,6 +20,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -89,6 +90,24 @@ def _cache_dir(dataset: str, mode: str) -> str:
     return os.path.join(_outputs_dir(), "agentguard", "cache", dataset, split)
 
 
+def _event_cache_dir(dataset: str, mode: str, root: Optional[str] = None) -> str:
+    split = _resolve_split(mode)
+    base = root or os.path.join(_outputs_dir(), "agentguard", "event_cache")
+    return os.path.join(base, dataset, split)
+
+
+def _sha256_json(data: Any) -> str:
+    return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _sha256_file(path: str | os.PathLike[str]) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _labels_dir(dataset: str) -> str:
     return os.path.join(_outputs_dir(), "agentguard", "labels", dataset)
 
@@ -141,6 +160,37 @@ def _resolve_sequences(
     return manager.get_sequences(dataset, _resolve_split(mode))
 
 
+def _base_sequence_id(sequence: str) -> str:
+    parts = sequence.split("-")
+    return "-".join(parts[:2]) if len(parts) >= 2 else sequence
+
+
+def _resolve_detection_cache_sequences(
+    dataset: str,
+    mode: str,
+    detection_cache_root: str,
+    explicit: Optional[List[str]] = None,
+    detector: Optional[str] = None,
+) -> List[str]:
+    if explicit:
+        sequences = list(explicit)
+    else:
+        split = _resolve_split(mode)
+        manifest_path = Path(detection_cache_root) / dataset / split / "manifest.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(f"Detection cache manifest not found: {manifest_path}")
+        with manifest_path.open("r") as f:
+            manifest = json.load(f)
+        sequences = sorted((manifest.get("sequences") or {}).keys())
+        if split != "all":
+            base_ids = set(_resolve_sequences(dataset, mode))
+            sequences = [s for s in sequences if _base_sequence_id(s) in base_ids]
+    if detector:
+        suffix = f"-{detector}"
+        sequences = [s for s in sequences if s.endswith(suffix)]
+    return sequences
+
+
 # ===================================================================
 # Subcommand: cache_events
 # ===================================================================
@@ -160,6 +210,12 @@ def _add_cache_events_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     p.add_argument(
         "--sequence", type=str, default=None, help="Single sequence to process."
+    )
+    p.add_argument(
+        "--detector",
+        type=str,
+        default="FRCNN",
+        help="Detector suffix to select from detection-cache manifest (e.g. FRCNN).",
     )
     p.add_argument("--max-frames", type=int, default=0, help="Max frames per seq (0=unlimited).")
     p.add_argument(
@@ -219,14 +275,6 @@ def _cmd_cache_events(args: argparse.Namespace) -> None:
     )
     allow_pickle_fallback = bool(getattr(args, "allow_pickle_fallback", False))
 
-    if args.sequence:
-        sequences = [args.sequence]
-    else:
-        sequences = _resolve_sequences(dataset, mode)
-    if not sequences:
-        print(f"No sequences found for {dataset}/{mode}")
-        return
-
     class _TrackerArgs:
         pass
 
@@ -246,14 +294,6 @@ def _cmd_cache_events(args: argparse.Namespace) -> None:
     tracker_args.capture_agentguard_events = True
     tracker_args.no_reid = False
 
-    # Hash the config for manifest idempotence
-    config_hash = hashlib.sha256(
-        json.dumps({
-            "agentguard_mode": "off",
-            "capture_agentguard_events": True,
-            "schema_version": 2,
-        }, sort_keys=True).encode()
-    ).hexdigest()
     try:
         source_commit = subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
@@ -262,6 +302,18 @@ def _cmd_cache_events(args: argparse.Namespace) -> None:
         ).strip()
     except Exception:
             source_commit = ""
+
+    explicit = [args.sequence] if args.sequence else None
+    sequences = _resolve_detection_cache_sequences(
+        dataset=dataset,
+        mode=mode,
+        detection_cache_root=detection_cache_root,
+        explicit=explicit,
+        detector=getattr(args, "detector", None),
+    )
+    if not sequences:
+        print(f"No sequences found for {dataset}/{mode} in {detection_cache_root}")
+        return
 
     for seq_name in sequences:
         print(f"\n{'='*60}")
@@ -321,6 +373,46 @@ def _cmd_cache_events(args: argparse.Namespace) -> None:
                 "--allow-pickle-fallback explicitly."
             )
 
+        detection_manifest_path = Path(seq_cache_path) / "manifest.json"
+        detection_manifest_sha = (
+            _sha256_file(detection_manifest_path)
+            if detection_manifest_path.is_file()
+            else ""
+        )
+        tracker_config = {
+            "agentguard_mode": "off",
+            "capture_agentguard_events": True,
+            "schema_version": 2,
+            "dataset": dataset,
+            "mode": mode,
+            "sequence": seq_name,
+            "max_frames": int(max_frames),
+            "kf_type": tracker_args.kf_type,
+            "disable_gmc": bool(tracker_args.disable_gmc),
+            "det_thr": float(getattr(tracker_args, "det_thr", 0.0)),
+            "init_thr": float(getattr(tracker_args, "init_thr", 0.0)),
+            "match_thr": float(getattr(tracker_args, "match_thr", 0.0)),
+            "max_time_lost": int(getattr(tracker_args, "max_time_lost", 0)),
+        }
+        tracker_config_hash = _sha256_json(tracker_config)
+        config_hash = tracker_config_hash
+
+        final_event_dir = Path(event_cache_root) / dataset / split / seq_name
+        final_manifest = final_event_dir / "manifest.json"
+        if final_manifest.is_file():
+            with final_manifest.open("r") as f:
+                existing = json.load(f)
+            if (
+                existing.get("complete")
+                and int(existing.get("schema_version", 0)) == 2
+                and existing.get("tracker_config_sha256") == tracker_config_hash
+                and existing.get("detection_cache_manifest_sha256") == detection_manifest_sha
+            ):
+                print(f"  Existing complete compact cache matches config; skipping {seq_name}.")
+                if detection_cache is not None:
+                    detection_cache.close()
+                continue
+
         event_sink = CompactEventCacheSink(
             cache_root=event_cache_root,
             dataset=dataset,
@@ -329,7 +421,16 @@ def _cmd_cache_events(args: argparse.Namespace) -> None:
             reid_dim=reid_dim,
             event_flush_size=256,
             frame_flush_size=32,
+            association_flush_size=32,
             config_hash=config_hash,
+            source_commit=source_commit,
+            feature_schema_sha256="",
+            detection_cache_manifest_sha256=detection_manifest_sha,
+            tracker_config_sha256=tracker_config_hash,
+            total_sequence_frames=total_frames,
+            image_width=img_w,
+            image_height=img_h,
+            tracker_config=tracker_config,
         )
         tracker_args.event_sink = event_sink
         event_sink.on_sequence_start(
@@ -413,10 +514,16 @@ def _add_validate_cache_parser(subparsers: argparse._SubParsersAction) -> None:
         default=os.path.join(PROJECT_ROOT, "outputs", "agentguard", "event_cache"),
         help="Root of compact AgentGuard event caches.",
     )
+    p.add_argument(
+        "--detection-cache-root",
+        default=os.path.join(PROJECT_ROOT, "outputs", "agentguard", "detection_cache"),
+        help="Root of per-sequence mmap detection caches.",
+    )
 
 
 def _cmd_validate_cache(args: argparse.Namespace) -> None:
-    import torch
+    from agentguard.data.cache_reader import CompactEventCacheReader
+    from agentguard.data.detection_cache import sequence_cache_dir
 
     dataset = args.dataset
     mode = args.mode
@@ -452,62 +559,62 @@ def _cmd_validate_cache(args: argparse.Namespace) -> None:
 
     for seq in sequences:
         seq_dir = os.path.join(cache_root, seq)
+        det_dir = sequence_cache_dir(args.detection_cache_root, dataset, split, seq)
         try:
-            with open(os.path.join(seq_dir, "manifest.json"), "r") as f:
-                manifest = json.load(f)
-            events: List[dict] = []
-            frames: List[dict] = []
-            associations: List[dict] = []
-            for path in sorted(Path(seq_dir).glob("events_*.pt")):
-                events.extend(torch.load(path, weights_only=False))
-            for path in sorted(Path(seq_dir).glob("frames_*.pt")):
-                frames.extend(torch.load(path, weights_only=False))
-            for path in sorted(Path(seq_dir).glob("associations_*.pt")):
-                associations.extend(torch.load(path, weights_only=False))
+            reader = CompactEventCacheReader(seq_dir, det_dir)
+            manifest = reader.manifest
         except Exception as e:
             print(f"  FAIL {seq}: {e}")
             incomplete_sequences.append(seq)
             continue
 
-        n_events = len(events)
-        n_matched = sum(1 for ev in events if bool(ev.get("matched", False)))
-        n_unmatched = n_events - n_matched
-        n_assoc = len(associations)
-        assoc_by_id = {
-            int(a["association_record_id"]): a
-            for a in associations
-            if "association_record_id" in a
-        }
-
+        n_events = 0
+        n_matched = 0
+        n_unmatched = 0
+        n_assoc = int(manifest.get("num_association_records", 0))
         seq_feature_nonzero = 0
         seq_feature_total = 0
-        for ev in events:
+        seq_warp_alignment_errors = 0
+        bad_det_idx = 0
+        ids_seen: set[str] = set()
+        dup_count = 0
+        for ev in reader.iter_event_records():
+            n_events += 1
+            event_id = str(ev.get("event_id", ""))
+            if event_id in ids_seen:
+                dup_count += 1
+            ids_seen.add(event_id)
+
             f = np.asarray(ev.get("track_feature", []), dtype=np.float32)
             seq_feature_nonzero += int(np.count_nonzero(f))
             seq_feature_total += int(f.size)
 
-        seq_warp_alignment_errors = 0
-        for fr in frames:
-            wm = fr.get("effective_warp")
+            frame = reader.get_frame_record(ev.get("frame_index", int(ev["frame_id"]) - 1))
+            wm = None if frame is None else frame.get("warp_matrix", frame.get("effective_warp"))
             if wm is not None and np.asarray(wm).shape != (2, 3):
                 seq_warp_alignment_errors += 1
 
-        bad_det_idx = 0
-        for ev in events:
             if not bool(ev.get("matched", False)):
+                n_unmatched += 1
                 continue
+            n_matched += 1
             di = int(ev.get("accepted_detection_index", -1))
-            assoc_id = int(ev.get("association_record_id", -1))
-            assoc = assoc_by_id.get(assoc_id)
+            assoc = reader.get_association(
+                ev.get("association_shard_id", -1),
+                ev.get("association_offset", -1),
+            )
             if di < 0 or assoc is None:
                 bad_det_idx += 1
                 continue
             detection_indices = np.asarray(assoc.get("detection_indices", []), dtype=np.int64)
             if not np.any(detection_indices == di):
                 bad_det_idx += 1
-
-        ids = [str(ev.get("event_id", "")) for ev in events]
-        dup_count = len(ids) - len(set(ids))
+                continue
+            try:
+                reader.get_detection(di)
+            except Exception:
+                bad_det_idx += 1
+        reader.close()
 
         total_events += n_events
         matched_events += n_matched
@@ -530,7 +637,7 @@ def _cmd_validate_cache(args: argparse.Namespace) -> None:
         per_seq.append(
             {
                 "sequence": seq,
-                "processed_frames": len(frames),
+                "processed_frames": int(manifest.get("processed_frames", manifest.get("num_frames", 0))),
                 "total_events": n_events,
                 "matched_events": n_matched,
                 "unmatched_events": n_unmatched,
@@ -593,6 +700,92 @@ def _cmd_validate_cache(args: argparse.Namespace) -> None:
 
 
 # ===================================================================
+# Subcommand: rollout_smoke
+# ===================================================================
+
+
+def _add_rollout_smoke_parser(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "rollout_smoke",
+        help="Materialize compact-cache events through the rollout input path.",
+    )
+    p.add_argument("--dataset", default="MOT17")
+    p.add_argument(
+        "--mode",
+        default="all",
+        choices=["val", "val_custom", "train_custom", "all", "test"],
+    )
+    p.add_argument("--sequence", default=None)
+    p.add_argument("--max-events", type=int, default=100)
+    p.add_argument(
+        "--event-cache-root",
+        default=os.path.join(PROJECT_ROOT, "outputs", "agentguard", "event_cache"),
+    )
+    p.add_argument(
+        "--detection-cache-root",
+        default=os.path.join(PROJECT_ROOT, "outputs", "agentguard", "detection_cache"),
+    )
+
+
+def _cmd_rollout_smoke(args: argparse.Namespace) -> None:
+    from agentguard.data.cache_reader import CompactEventCacheReader
+    from agentguard.data.detection_cache import sequence_cache_dir
+
+    dataset = args.dataset
+    split = _resolve_split(args.mode)
+    cache_root = Path(args.event_cache_root) / dataset / split
+    if args.sequence:
+        sequences = [args.sequence]
+    else:
+        sequences = sorted(
+            p.name
+            for p in cache_root.iterdir()
+            if p.is_dir() and not p.name.startswith("_") and not p.name.endswith(".incomplete")
+        )
+
+    checked = 0
+    matched = 0
+    unmatched = 0
+    for seq in sequences:
+        reader = CompactEventCacheReader(
+            cache_root / seq,
+            sequence_cache_dir(args.detection_cache_root, dataset, split, seq),
+        )
+        try:
+            for record in reader.iter_event_records():
+                event = reader.materialize_training_event(record)
+                assert event.frame_start_state is not None
+                assert event.pre_update_state is not None
+                assert event.track_feature.ndim == 1
+                assert event.warp_matrix.shape == (2, 3)
+                if event.has_detection:
+                    assert event.detection is not None
+                    assert event.detection.feature.reshape(-1).shape[0] == reader.detection_cache.reid_dim
+                    assert event.association_context is not None
+                    matched += 1
+                else:
+                    assert event.detection is None
+                    unmatched += 1
+                checked += 1
+                if checked >= args.max_events:
+                    break
+        finally:
+            reader.close()
+        if checked >= args.max_events:
+            break
+
+    report = {
+        "dataset": dataset,
+        "mode": args.mode,
+        "checked_events": checked,
+        "matched_events": matched,
+        "unmatched_events": unmatched,
+        "status": "ok" if checked == args.max_events else "incomplete",
+    }
+    print(json.dumps(report, indent=2))
+
+
+# ===================================================================
 # Subcommand: build_rollout_labels
 # ===================================================================
 
@@ -611,6 +804,14 @@ def _add_build_rollout_labels_parser(subparsers: argparse._SubParsersAction) -> 
         help="Dataset split mode.",
     )
     p.add_argument("--max-events", type=int, default=0, help="Limit events (0=all).")
+    p.add_argument(
+        "--event-cache-root",
+        default=os.path.join(PROJECT_ROOT, "outputs", "agentguard", "event_cache"),
+    )
+    p.add_argument(
+        "--detection-cache-root",
+        default=os.path.join(PROJECT_ROOT, "outputs", "agentguard", "detection_cache"),
+    )
 
 
 def _cmd_build_rollout_labels(args: argparse.Namespace) -> None:
@@ -630,7 +831,7 @@ def _cmd_build_rollout_labels(args: argparse.Namespace) -> None:
 
     dataset = args.dataset
     mode = args.mode
-    cache_root = _cache_dir(dataset, mode)
+    cache_root = _event_cache_dir(dataset, mode, args.event_cache_root)
     label_dir = _ensure_dir(_labels_dir(dataset))
 
     # Set env var used by compute_dataset_stats
@@ -2313,6 +2514,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     # Register all subcommands
     _add_cache_events_parser(subparsers)
     _add_validate_cache_parser(subparsers)
+    _add_rollout_smoke_parser(subparsers)
     _add_build_rollout_labels_parser(subparsers)
     _add_evaluate_oracle_parser(subparsers)
     _add_build_student_v0_data_parser(subparsers)
@@ -2330,6 +2532,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     dispatch = {
         "cache_events": _cmd_cache_events,
         "validate_cache": _cmd_validate_cache,
+        "rollout_smoke": _cmd_rollout_smoke,
         "build_rollout_labels": _cmd_build_rollout_labels,
         "evaluate_oracle": _cmd_evaluate_oracle,
         "build_student_v0_data": _cmd_build_student_v0_data,

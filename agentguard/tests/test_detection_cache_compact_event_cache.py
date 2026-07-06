@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from agentguard.data.compact_event_cache import CompactEventCacheSink
+from agentguard.data.cache_reader import CompactEventCacheReader
 from agentguard.data.detection_cache import SequenceDetectionCache
 
 
@@ -87,6 +88,111 @@ def test_detection_cache_frame_slice_and_mmap(tmp_path):
         assert arr.shape == (1, 10)
     finally:
         cache.close()
+
+
+def test_target_view_requires_target_indices(tmp_path):
+    split = _load_split_module()
+    split._write_sequence(
+        tmp_path / "seq",
+        "seq",
+        {1: np.stack([_det(1.0)], axis=0)},
+        compact_index=None,
+        dataset="MOT17",
+        split="all",
+        source_pickle=tmp_path / "source.pkl",
+    )
+    cache = SequenceDetectionCache(tmp_path / "seq")
+    try:
+        import pytest
+
+        with pytest.raises(FileNotFoundError):
+            cache.get_frame(0, view="target")
+    finally:
+        cache.close()
+
+
+def test_split_with_target_index_missing_sequence_fails(tmp_path):
+    split = _load_split_module()
+    import pytest
+
+    with pytest.raises(RuntimeError, match="Target compact index does not contain sequence"):
+        split._write_sequence(
+            tmp_path / "seq",
+            "seq",
+            {1: np.stack([_det(1.0)], axis=0)},
+            compact_index={"index": {}},
+            dataset="MOT17",
+            split="all",
+            source_pickle=tmp_path / "source.pkl",
+        )
+
+
+def test_track_compact_snapshot_copies_recent_6_only():
+    from trackers.track import Track
+
+    track = Track.__new__(Track)
+    track.track_id = 1
+    track.box = np.array([0, 1, 2, 3], dtype=np.float64)
+    track.score = 0.9
+    track.mean = np.ones(8, dtype=np.float64)
+    track.covariance = np.eye(8, dtype=np.float64)
+    track.velocity = np.zeros((4, 2), dtype=np.float64)
+    track.feat = np.ones((1, 4), dtype=np.float64)
+    track.end_frame_id = 10
+    track.state = 1
+    track.history = {
+        i: [np.array([i, i, i + 1, i + 1], dtype=np.float64), 0.9, None, None, np.ones((1, 4))]
+        for i in range(10)
+    }
+    snap = track.snapshot_state(compact_history=True)
+    assert sorted(snap.history.keys()) == [4, 5, 6, 7, 8, 9]
+    assert all(len(v) == 1 for v in snap.history.values())
+
+
+def test_sequence_enumeration_from_detection_manifest(tmp_path, monkeypatch):
+    from agentguard import cli
+
+    root = tmp_path / "det"
+    manifest_dir = root / "MOT17" / "all"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "sequences": {
+                    "MOT17-02-FRCNN": {},
+                    "MOT17-02-SDP": {},
+                    "MOT17-04-FRCNN": {},
+                }
+            }
+        )
+    )
+    assert cli._resolve_detection_cache_sequences(
+        "MOT17",
+        "all",
+        str(root),
+        detector="FRCNN",
+    ) == ["MOT17-02-FRCNN", "MOT17-04-FRCNN"]
+
+    train_dir = root / "MOT17" / "train"
+    train_dir.mkdir(parents=True)
+    (train_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "sequences": {
+                    "MOT17-02-FRCNN": {},
+                    "MOT17-04-FRCNN": {},
+                    "MOT17-99-FRCNN": {},
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(cli, "_resolve_sequences", lambda dataset, mode: ["MOT17-02"])
+    assert cli._resolve_detection_cache_sequences(
+        "MOT17",
+        "train_custom",
+        str(root),
+        detector="FRCNN",
+    ) == ["MOT17-02-FRCNN"]
 
 
 def _state(history_len: int = 8) -> dict:
@@ -188,6 +294,14 @@ def test_compact_event_does_not_copy_detection_feature_or_full_history(tmp_path)
     assert states[0]["history_count"] == 8
     assert states[0]["recent_history_boxes"].shape[0] == 6
     assert "detections" not in frames[0]
+    assert events[0]["state_shard_id"] == 0
+    assert events[0]["frame_start_state_offset"] == 0
+    assert events[0]["pre_update_state_offset"] == 1
+    assert events[0]["association_shard_id"] == 0
+    assert events[0]["association_offset"] == 0
+    assert frames[0]["frame_id"] == 1
+    assert frames[0]["frame_index"] == 0
+    assert "warp_matrix" in frames[0]
 
 
 def test_association_saved_once_per_frame_and_manifest_counts(tmp_path):
@@ -216,3 +330,82 @@ def test_association_saved_once_per_frame_and_manifest_counts(tmp_path):
     assert manifest["complete"] is True
     assert manifest["num_events"] == 2
     assert manifest["num_association_records"] == 1
+    assert manifest["schema_version"] == 2
+
+
+def test_association_flushes_every_32_frames(tmp_path):
+    sink = CompactEventCacheSink(
+        cache_root=tmp_path,
+        dataset="MOT17",
+        split="all",
+        sequence="seq",
+        reid_dim=4,
+        association_flush_size=32,
+    )
+    sink.on_sequence_start("seq", reid_dim=4, image_width=1920, image_height=1080)
+    for frame_id in range(64):
+        fr = _frame_record()
+        fr["frame_id"] = frame_id + 1
+        sink.on_frame(fr, [])
+    sink.on_sequence_end()
+    seq_dir = tmp_path / "MOT17" / "all" / "seq"
+    assert len(sorted(seq_dir.glob("associations_*.pt"))) == 2
+
+
+def test_compact_reader_random_access_restores_event_state_detection_and_association(tmp_path):
+    split = _load_split_module()
+    det_dir = tmp_path / "det" / "MOT17" / "all" / "seq"
+    frames = {
+        1: np.stack([_det(1.0), _det(2.0)], axis=0),
+    }
+    split._write_sequence(
+        det_dir,
+        "seq",
+        frames,
+        compact_index={"index": {"seq": {1: np.array([0, 1], dtype=np.int64)}}},
+        dataset="MOT17",
+        split="all",
+        source_pickle=tmp_path / "source.pkl",
+    )
+
+    sink = CompactEventCacheSink(
+        cache_root=tmp_path / "events",
+        dataset="MOT17",
+        split="all",
+        sequence="seq",
+        reid_dim=4,
+        event_flush_size=1,
+        frame_flush_size=1,
+        association_flush_size=32,
+        image_width=1920,
+        image_height=1080,
+    )
+    sink.on_sequence_start("seq", reid_dim=4, image_width=1920, image_height=1080)
+    fr = _frame_record()
+    fr["detections"][0]["detection_index"] = 0
+    fr["detections"][1]["detection_index"] = 1
+    fr["association"]["detection_indices"] = np.array([0, 1], dtype=np.int64)
+    ev = _event()
+    ev["accepted_detection_index"] = 1
+    sink.on_frame(fr, [ev])
+    sink.on_sequence_end()
+
+    reader = CompactEventCacheReader(
+        tmp_path / "events" / "MOT17" / "all" / "seq",
+        det_dir,
+    )
+    try:
+        record = next(reader.iter_event_records())
+        event = reader.materialize_training_event(record)
+        assert event.event_id == ev["event_id"]
+        assert event.frame_start_state is not None
+        assert event.pre_update_state is not None
+        assert event.detection is not None
+        assert event.detection.detection_index == 1
+        assert event.detection.feature.reshape(-1).shape[0] == 4
+        assert event.association_context is not None
+        assert event.association_context.track_cost_row.shape == (2,)
+        assert event.association_context.detection_cost_col.shape == (2,)
+        assert event.warp_matrix.shape == (2, 3)
+    finally:
+        reader.close()

@@ -375,7 +375,7 @@ All tests verified in this pass (390 total, 0 failures):
 | Subsystem | Status | Notes |
 |-----------|--------|-------|
 | Stage 1 Full-mode TGR Replay | **WIRED** | TrackTrackReplayBackend mutates live Track; unmatched preserves end_frame_id; all-one reproduces baseline |
-| Stage 2 Event Cache | **WIRED** | `MOT17-04-FRCNN` all-mode 200-frame compact cache validated; uses mmap detection cache and does not duplicate detection FastReID features |
+| Stage 2 Event Cache | **WIRED** | `MOT17-04-FRCNN` all-mode 200-frame schema-v2 compact cache validated; lazy reader restores state/detection/association from shard offsets |
 | Bailian Teacher API | Placeholder | Client, schema, evidence packet APIs exist but are not validated end-to-end |
 | Verifier | Placeholder | Local replay, cross-event scoring, label fusion code exists but untested end-to-end |
 | Student-V1 | Not ready | Dataset and training code exists, disabled until V0 is validated |
@@ -412,8 +412,11 @@ All tests verified in this pass (390 total, 0 failures):
 24. **CLI split mapping**: `MODE_TO_SPLIT = {'train_custom':'train','val_custom':'val','train':'train','val':'val'}`; never index split YAML with train_custom/val_custom
 25. **MOT17 detection cache split**: `scripts/agentguard/00_split_detection_cache.py` converts the monolithic detection/FastReID pickle once into per-sequence `.npy` arrays with mmap reader support
 26. **No pickle in cache_events by default**: `cache_events` requires per-sequence detection cache unless `--allow-pickle-fallback` is explicitly passed
-27. **Compact event cache**: frame records store warp and detection index range only; event records store detection indices, track feature, scalar features and compact state ids; association matrices are saved once per frame
-28. **Memory profile verified**: `MOT17-04-FRCNN` all-mode 5/20/50/200-frame cache run completed with 200-frame peak RSS 471.9 MB and 8048 events
+27. **Compact event cache schema v2**: frame records store `frame_id`, `frame_index`, `effective_warp` and `warp_matrix`; event records store shard/offset refs for states and association records
+28. **Compact reader**: `CompactEventCacheReader` lazily restores Track states, accepted detections from mmap FastReID cache, and association row/column context without loading the full sequence
+29. **Streaming validation**: `validate_cache` reads compact shards incrementally and validates detection indices through mmap detection cache
+30. **Sequence enumeration**: `cache_events` reads detection-cache manifest for `all`, filters train/val by base video id, and supports detector suffix filtering
+31. **Memory profile verified**: `MOT17-04-FRCNN` all-mode 5/20/50/200-frame cache run completed with 200-frame peak RSS 471.9 MB and 8048 events
 
 ---
 
@@ -421,4 +424,4 @@ All tests verified in this pass (390 total, 0 failures):
 
 - **Python**: 3.10+
 - **Dependencies**: numpy, torch, scipy, lap, pydantic, trackeval
-- **Tests**: 390 passing, 0 failures (`PYTHONPATH='.:3. Tracker:agentguard/src' python -m pytest agentguard/tests -q`)
+- **Tests**: 396 passing, 0 failures (`PYTHONPATH='.:3. Tracker:agentguard/src' python -m pytest agentguard/tests -q`)

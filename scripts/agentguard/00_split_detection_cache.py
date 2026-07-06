@@ -170,6 +170,11 @@ def _write_sequence(
         sequence,
         offsets,
     )
+    if compact_index is not None and (target_offsets is None or target_indices is None):
+        raise RuntimeError(
+            f"Target compact index does not contain sequence {sequence}; refusing to "
+            "write a complete cache that would silently use source detections."
+        )
 
     np.save(temp_dir / "frame_offsets.npy", offsets)
     np.save(temp_dir / "boxes.npy", boxes)
@@ -224,8 +229,11 @@ def main() -> None:
     compact_index = None
     if target_pickle is not None:
         idx_path = Path(compact_index_path(str(target_pickle), str(source_pickle)))
-        if idx_path.is_file():
-            compact_index = _load_pickle_once(idx_path)
+        if not idx_path.is_file():
+            raise SystemExit(
+                f"target compact index not found for {target_pickle}: {idx_path}"
+            )
+        compact_index = _load_pickle_once(idx_path)
 
     sequences = _normalise_sequences(args.sequences, detections.keys())
     out_root = Path(args.output_root) / args.dataset / args.split

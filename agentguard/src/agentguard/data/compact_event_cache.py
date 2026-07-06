@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _np(value: Any, dtype=None) -> np.ndarray:
@@ -83,7 +83,16 @@ class CompactEventCacheSink:
         reid_dim: int = 0,
         event_flush_size: int = 256,
         frame_flush_size: int = 32,
+        association_flush_size: int = 32,
         config_hash: str = "",
+        source_commit: str = "",
+        feature_schema_sha256: str = "",
+        detection_cache_manifest_sha256: str = "",
+        tracker_config_sha256: str = "",
+        total_sequence_frames: int = 0,
+        image_width: int = 0,
+        image_height: int = 0,
+        tracker_config: dict | None = None,
     ) -> None:
         self.cache_root = Path(cache_root)
         self.dataset = dataset
@@ -92,7 +101,16 @@ class CompactEventCacheSink:
         self.reid_dim = int(reid_dim)
         self.event_flush_size = int(event_flush_size)
         self.frame_flush_size = int(frame_flush_size)
+        self.association_flush_size = int(association_flush_size)
         self.config_hash = config_hash
+        self.source_commit = source_commit
+        self.feature_schema_sha256 = feature_schema_sha256
+        self.detection_cache_manifest_sha256 = detection_cache_manifest_sha256
+        self.tracker_config_sha256 = tracker_config_sha256 or config_hash
+        self.total_sequence_frames = int(total_sequence_frames)
+        self.image_width = int(image_width)
+        self.image_height = int(image_height)
+        self.tracker_config = dict(tracker_config or {})
 
         self._frames: list[dict] = []
         self._events: list[dict] = []
@@ -123,6 +141,8 @@ class CompactEventCacheSink:
         image_height: int,
     ) -> None:
         self.reid_dim = int(reid_dim or self.reid_dim)
+        self.image_width = int(image_width or self.image_width)
+        self.image_height = int(image_height or self.image_height)
         self._final_dir = self._seq_dir()
         self._temp_dir = self._final_dir.with_name(self._final_dir.name + ".incomplete")
         if self._temp_dir.exists():
@@ -154,9 +174,13 @@ class CompactEventCacheSink:
         self._num_detections = max(self._num_detections, det_end)
 
         association_record_id = -1
+        association_shard_id = -1
+        association_offset = -1
         association = frame_record.get("association")
         if association is not None:
             association_record_id = self._num_associations
+            association_shard_id = self._association_shard
+            association_offset = len(self._associations)
             self._associations.append(
                 _compact_association(
                     association,
@@ -169,25 +193,30 @@ class CompactEventCacheSink:
         self._frames.append(
             {
                 "frame_id": int(frame_record["frame_id"]),
+                "frame_index": int(frame_record.get("frame_index", int(frame_record["frame_id"]) - 1)),
                 "image_width": int(frame_record.get("image_width", 0)),
                 "image_height": int(frame_record.get("image_height", 0)),
                 "effective_warp": _np(frame_record.get("warp_matrix"), np.float32),
+                "warp_matrix": _np(frame_record.get("warp_matrix"), np.float32),
                 "detection_start_index": int(det_start),
                 "detection_end_index": int(det_end),
                 "association_record_id": int(association_record_id),
+                "association_shard_id": int(association_shard_id),
+                "association_offset": int(association_offset),
             }
         )
         self._num_frames += 1
 
         for event in events:
-            fs_id = len(self._states)
+            state_shard_id = self._state_shard
+            fs_offset = len(self._states)
             self._states.append(_compact_state(event.get("frame_start_state")))
-            pu_id = len(self._states)
+            pu_offset = len(self._states)
             self._states.append(_compact_state(event.get("pre_update_state")))
 
             matched = bool(event.get("has_detection", False))
             accepted = int(event.get("accepted_detection_index", -1) if matched else -1)
-            history_count = int(self._states[pu_id].get("history_count", 0))
+            history_count = int(self._states[pu_offset].get("history_count", 0))
             association_track_row = -1
             if association is not None:
                 track_ids = np.asarray(association.get("track_ids", []), dtype=np.int64)
@@ -196,15 +225,23 @@ class CompactEventCacheSink:
                     association_track_row = int(rows[0])
             self._events.append(
                 {
+                    "event_shard_id": int(self._event_shard),
+                    "event_offset": int(len(self._events)),
                     "event_id": str(event["event_id"]),
                     "frame_id": int(event["frame_id"]),
+                    "frame_index": int(event.get("frame_index", int(event["frame_id"]) - 1)),
                     "track_id": int(event["track_id"]),
                     "matched": matched,
                     "accepted_detection_index": accepted,
                     "association_record_id": int(association_record_id),
+                    "association_shard_id": int(association_shard_id),
+                    "association_offset": int(association_offset),
                     "association_track_row": int(association_track_row),
-                    "frame_start_state_id": int(fs_id),
-                    "pre_update_state_id": int(pu_id),
+                    "state_shard_id": int(state_shard_id),
+                    "frame_start_state_offset": int(fs_offset),
+                    "pre_update_state_offset": int(pu_offset),
+                    "frame_start_state_id": int(fs_offset),
+                    "pre_update_state_id": int(pu_offset),
                     "scalar_features": _np(event.get("scalar_features"), np.float32),
                     "track_feature": _np(event.get("track_feature"), np.float32).reshape(-1),
                     "history_count": history_count,
@@ -221,7 +258,7 @@ class CompactEventCacheSink:
         if len(self._events) >= self.event_flush_size:
             self._flush_events()
             self._flush_states()
-        if self._associations:
+        if len(self._associations) >= self.association_flush_size:
             self._flush_associations()
 
     def on_sequence_end(self) -> dict:
@@ -291,6 +328,18 @@ class CompactEventCacheSink:
             "complete": bool(complete),
             "truncated": self._truncated,
             "config_sha256": self.config_hash,
+            "source_commit": self.source_commit,
+            "feature_schema_sha256": self.feature_schema_sha256,
+            "detection_cache_manifest_sha256": self.detection_cache_manifest_sha256,
+            "tracker_config_sha256": self.tracker_config_sha256,
+            "processed_frames": self._num_frames,
+            "total_sequence_frames": self.total_sequence_frames or self._num_frames,
+            "image_width": self.image_width,
+            "image_height": self.image_height,
+            "kf_type": self.tracker_config.get("kf_type"),
+            "disable_gmc": self.tracker_config.get("disable_gmc"),
+            "det_thr": self.tracker_config.get("det_thr"),
+            "match_thr": self.tracker_config.get("match_thr"),
         }
         with (self._temp_dir / "manifest.json").open("w") as f:
             json.dump(manifest, f, indent=2)
