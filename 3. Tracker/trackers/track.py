@@ -165,12 +165,17 @@ class Track(BaseTrack):
 
         self.history = {}
         for frame_id, hist_list in snapshot.history.items():
+            hist_box = hist_list[0].copy()
+            hist_score = hist_list[1] if len(hist_list) > 1 else snapshot.score
+            hist_mean = hist_list[2] if len(hist_list) > 2 else snapshot.mean
+            hist_covariance = hist_list[3] if len(hist_list) > 3 else snapshot.covariance
+            hist_feat = hist_list[4] if len(hist_list) > 4 else snapshot.feature
             self.history[frame_id] = [
-                hist_list[0].copy(),
-                hist_list[1],
-                hist_list[2].copy() if hist_list[2] is not None else None,
-                hist_list[3].copy() if hist_list[3] is not None else None,
-                hist_list[4].copy(),
+                hist_box,
+                hist_score,
+                hist_mean.copy() if hist_mean is not None else None,
+                hist_covariance.copy() if hist_covariance is not None else None,
+                hist_feat.copy(),
             ]
 
         self.end_frame_id = snapshot.end_frame_id

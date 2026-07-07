@@ -7,6 +7,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from agentguard.contracts.enums import POLICY_PROTOTYPE_MATRIX
+
 
 def save_checkpoint(
     model: nn.Module,
@@ -54,6 +56,11 @@ def save_checkpoint(
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
         "metadata": metadata,
+        "reid_dim": metadata.get("reid_dim", metadata.get("config", {}).get("reid_dim")),
+        "scalar_dim": metadata.get("scalar_dim", metadata.get("config", {}).get("scalar_dim", 63)),
+        "event_dim": metadata.get("event_dim", metadata.get("config", {}).get("event_dim", 128)),
+        "policy_prototypes": metadata.get("policy_prototypes", POLICY_PROTOTYPE_MATRIX),
+        "feature_schema_sha256": metadata.get("feature_schema_sha256", "v0_compact_scalar63_reid"),
     }
 
     if optimizer is not None:

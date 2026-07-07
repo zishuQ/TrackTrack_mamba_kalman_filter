@@ -276,6 +276,29 @@ class CompactEventCacheReader:
             raise RuntimeError("detection_cache_dir is required to read detections")
         return self.detection_cache.get_detection(detection_index)
 
+    def _max_detection_iou(self, frame_index: int, detection_index: int) -> float:
+        if self.detection_cache is None:
+            return 0.0
+        frame = self.detection_cache.get_frame(int(frame_index), view="source")
+        det_indices = np.asarray(frame.get("detection_indices", []), dtype=np.int64)
+        boxes = np.asarray(frame.get("boxes", []), dtype=np.float64)
+        matches = np.flatnonzero(det_indices == int(detection_index))
+        if matches.size == 0 or boxes.shape[0] <= 1:
+            return 0.0
+        box_idx = int(matches[0])
+        box = boxes[box_idx]
+        x1 = np.maximum(box[0], boxes[:, 0])
+        y1 = np.maximum(box[1], boxes[:, 1])
+        x2 = np.minimum(box[2], boxes[:, 2])
+        y2 = np.minimum(box[3], boxes[:, 3])
+        inter = np.maximum(0.0, x2 - x1) * np.maximum(0.0, y2 - y1)
+        area_a = max(0.0, float((box[2] - box[0]) * (box[3] - box[1])))
+        area_b = np.maximum(0.0, boxes[:, 2] - boxes[:, 0]) * np.maximum(0.0, boxes[:, 3] - boxes[:, 1])
+        union = area_a + area_b - inter
+        iou = np.divide(inter, np.maximum(union, 1e-12))
+        iou[box_idx] = 0.0
+        return float(np.max(iou)) if iou.size else 0.0
+
     def _snapshot_from_record(self, record: dict, feature: np.ndarray, track_id: int):
         from agentguard.contracts.states import TrackStateSnapshot
 
@@ -301,7 +324,7 @@ class CompactEventCacheReader:
             state=int(record.get("state", -1)),
         )
 
-    def materialize_training_event(self, record: dict):
+    def materialize_training_event(self, record: dict, candidate_detection_index: int | None = None):
         from agentguard.contracts.events import TrackEvent
         from agentguard.contracts.states import (
             AssociationContext,
@@ -329,13 +352,19 @@ class CompactEventCacheReader:
         pair = None
         ctx = None
         accepted = int(record.get("accepted_detection_index", -1))
+        selected = (
+            int(candidate_detection_index)
+            if candidate_detection_index is not None and int(candidate_detection_index) >= 0
+            else accepted
+        )
         row_idx = int(record.get("association_track_row", -1))
         col_idx = -1
-        if bool(record.get("matched", False)):
-            det = self.get_detection(accepted)
+        has_detection = bool(record.get("matched", False)) or selected >= 0
+        if has_detection and selected >= 0:
+            det = self.get_detection(selected)
             detection_feature = np.asarray(det["feature"], dtype=np.float64).reshape(-1)
             detection = DetectionObservation(
-                detection_index=accepted,
+                detection_index=selected,
                 box=np.asarray(det["box"], dtype=np.float64),
                 score=float(det["score"]),
                 feature=detection_feature.reshape(1, -1),
@@ -345,7 +374,7 @@ class CompactEventCacheReader:
 
         if association is not None and row_idx >= 0:
             det_indices = np.asarray(association.get("detection_indices", []), dtype=np.int64)
-            matches = np.flatnonzero(det_indices == accepted)
+            matches = np.flatnonzero(det_indices == selected)
             col_idx = int(matches[0]) if matches.size else -1
             final_cost = np.asarray(association["final_cost"], dtype=np.float64)
             raw_cost = np.asarray(association.get("raw_cost", final_cost), dtype=np.float64)
@@ -372,8 +401,16 @@ class CompactEventCacheReader:
                 ctx = AssociationContext(
                     track_cost_row=final_cost[row_idx, :].copy(),
                     detection_cost_col=final_cost[:, col_idx].copy(),
-                    detection_overlap_row=iou_similarity[row_idx, :].copy(),
-                    accepted_detection_index=accepted,
+                    detection_overlap_row=np.asarray(
+                        [
+                            self._max_detection_iou(
+                                int(record.get("frame_index", int(record["frame_id"]) - 1)),
+                                selected,
+                            )
+                        ],
+                        dtype=np.float64,
+                    ),
+                    accepted_detection_index=selected,
                     num_tracks=int(final_cost.shape[0]),
                     num_detections=int(final_cost.shape[1]),
                     reid_available=bool(association.get("reid_available", True)),
@@ -387,7 +424,7 @@ class CompactEventCacheReader:
             track_id=int(record["track_id"]),
             image_width=int(self.manifest.get("image_width", 0)),
             image_height=int(self.manifest.get("image_height", 0)),
-            has_detection=bool(record.get("matched", False)),
+            has_detection=has_detection,
             frame_start_state=self._snapshot_from_record(frame_start, track_feature, record["track_id"]),
             pre_update_state=self._snapshot_from_record(pre_update, track_feature, record["track_id"]),
             detection=detection,
@@ -405,4 +442,8 @@ class CompactEventCacheReader:
             track_feature=track_feature,
             detection_feature=detection_feature,
         )
+        if candidate_detection_index is not None and int(candidate_detection_index) >= 0:
+            from agentguard.features.scalar import compute_scalar_features
+
+            event.scalar_features = compute_scalar_features(event)
         return event

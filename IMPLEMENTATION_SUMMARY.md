@@ -357,10 +357,10 @@ All tests verified in this pass (390 total, 0 failures):
 | `01_run_baseline.sh` | READY | Run baseline tracking |
 | `02_cache_events.sh` | READY | Cache compact events via real tracker adapter and mmap detection cache |
 | `03_validate_cache.sh` | READY | Validate compact event cache shards |
-| `04_build_rollout_labels.sh` | READY | Compute rollout motion/appearance labels |
-| `05_run_oracle.sh` | READY | Run Oracle IWG/Full with hard gates |
-| `06_build_student_v0_data.sh` | READY | Build IWG/TGR PyTorch datasets |
-| `07_train_student_v0.sh` | READY | Train IWG → freeze → train TGR |
+| `04_build_rollout_labels.sh` | READY | Builds local GT/Future-Oracle A-only rollout labels from compact event cache (`mode=all`, `candidate-types=A` by default) |
+| `05_run_oracle.sh` | NOT READY | Oracle CLI still needs real gate injection validation |
+| `06_build_student_v0_data.sh` | READY | Builds lazy Student-V0 JSONL indexes and scalar normalization from A-only rollout labels (`mode=all` by default) |
+| `07_train_student_v0.sh` | READY | Trains IWG then TGR for a local V0 smoke/epoch without external model APIs |
 | `08_select_teacher_events.sh` | **DISABLED** | Exits with error until V0 validated |
 | `09_build_evidence_packets.sh` | **DISABLED** | Exits with error |
 | `10_run_bailian_teacher.sh` | **DISABLED** | Exits with error |
@@ -376,10 +376,12 @@ All tests verified in this pass (390 total, 0 failures):
 |-----------|--------|-------|
 | Stage 1 Full-mode TGR Replay | **WIRED** | TrackTrackReplayBackend mutates live Track; unmatched preserves end_frame_id; all-one reproduces baseline |
 | Stage 2 Event Cache | **WIRED** | `MOT17-04-FRCNN` all-mode 200-frame schema-v2 compact cache validated; lazy reader restores state/detection/association from shard offsets |
+| Local Rollout Labels | **WIRED** | 200-frame compact cache produced 7400 labels with GT identity, Future Oracle detections from mmap cache, current+future rollout, non-trivial positive/negative benefits |
+| Student-V0 Smoke | **WIRED** | Lazy indexes built from compact cache; IWG and TGR each completed 1 epoch on `MOT17-04-FRCNN` all-mode 200-frame data |
 | Bailian Teacher API | Placeholder | Client, schema, evidence packet APIs exist but are not validated end-to-end |
 | Verifier | Placeholder | Local replay, cross-event scoring, label fusion code exists but untested end-to-end |
 | Student-V1 | Not ready | Dataset and training code exists, disabled until V0 is validated |
-| Hard events | Not implemented | Requires Student-V1 real failure statistics |
+| Hard events | Not implemented | Placeholder package removed; this stays disabled until Student-V1 failure statistics exist |
 | Oracle real tracker CLI | Partial | `OracleGateProvider` class exists but CLI integration for real tracking is not complete |
 
 ---
@@ -417,6 +419,12 @@ All tests verified in this pass (390 total, 0 failures):
 29. **Streaming validation**: `validate_cache` reads compact shards incrementally and validates detection indices through mmap detection cache
 30. **Sequence enumeration**: `cache_events` reads detection-cache manifest for `all`, filters train/val by base video id, and supports detector suffix filtering
 31. **Memory profile verified**: `MOT17-04-FRCNN` all-mode 5/20/50/200-frame cache run completed with 200-frame peak RSS 471.9 MB and 8048 events
+32. **Single-file packages removed**: `agentguard.labels` was merged into `agentguard.rollout_labels`; `agentguard.evaluation` is now a top-level module; empty `hard_events` placeholder package was removed
+33. **Local V0 labels**: `build_rollout_labels` now uses `CompactEventCacheReader`, MOT GT, mmap detection cache, identity voting, identity prototypes, and current-frame + future rollout; no external model API is involved
+34. **Lazy V0 training**: `build_student_v0_data` writes `train_index.jsonl` / `val_index.jsonl` and `norm_stats.npz`; `train_student_v0` materializes samples on demand from compact event shards and detection mmap arrays
+35. **A-only default supervision**: Student-V0 defaults to accepted-update A labels under `outputs/agentguard/labels/<dataset>/<mode>_a_only`; B/C hard candidates remain available only as explicit TrackTrack-specific ablations
+36. **Checkpoint schema for online loading**: IWG/TGR training checkpoints now include top-level `model_state_dict`, `reid_dim`, `scalar_dim`, `event_dim`, `policy_prototypes`, `normalization_mean`, `normalization_std`, and `feature_schema_sha256`
+37. **Run.py sequence loading fix**: `3. Tracker/run.py` passes `--sequences` into `load_detection_pair()` so a single-sequence run can use sequence shards instead of filtering after monolithic pickle load
 
 ---
 
@@ -425,3 +433,4 @@ All tests verified in this pass (390 total, 0 failures):
 - **Python**: 3.10+
 - **Dependencies**: numpy, torch, scipy, lap, pydantic, trackeval
 - **Tests**: 396 passing, 0 failures (`PYTHONPATH='.:3. Tracker:agentguard/src' python -m pytest agentguard/tests -q`)
+- **Local V0 smoke**: `MOT17-04-FRCNN`, `mode=all`, 200-frame compact cache → 7400 rollout labels → 7400 lazy train/val records → IWG 1 epoch (`val_loss=0.703875`) → TGR 1 epoch (`val_loss=0.237600`) → Full-mode Tracker checkpoint-load/update smoke passed for 20 frames

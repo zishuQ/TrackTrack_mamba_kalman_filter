@@ -46,6 +46,11 @@ DATASET=MOT17 bash scripts/agentguard/09_generate_rollout.sh
 ## Quick Start: Train Models
 
 ```bash
+# Student-V0 default path: accepted-update A-only labels.
+DATASET=MOT17 MODE=all bash scripts/agentguard/04_build_rollout_labels.sh
+DATASET=MOT17 MODE=all bash scripts/agentguard/06_build_student_v0_data.sh
+DATASET=MOT17 MODE=all DEVICE=cuda bash scripts/agentguard/07_train_student_v0.sh
+
 # 10. Train IWG
 DATASET=MOT17 DEVICE=cuda bash scripts/agentguard/10_train_iwg.sh
 
@@ -91,6 +96,12 @@ cd "3. Tracker"
 | `outputs/agentguard/models/iwg/` | IWG model checkpoints |
 | `outputs/agentguard/models/tgr/` | TGR model checkpoints |
 | `outputs/agentguard/models/student_v1/` | Student V1 model checkpoints |
+
+Student-V0 defaults to accepted-update A-only rollout labels in
+`outputs/agentguard/labels/<dataset>/<mode>_a_only/`. B/C hard candidates are
+TrackTrack-specific ablations; enable them explicitly with
+`--candidate-types A,B,C` or derive A-only labels from an existing full label
+directory with `scripts/agentguard/derive_a_only_labels.py`.
 
 ## Configuration
 

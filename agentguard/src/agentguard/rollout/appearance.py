@@ -13,6 +13,7 @@ from agentguard.rollout.losses import appearance_loss
 def compute_appearance_benefit(
     ctx: RolloutContext,
     future_frames: int = 5,
+    include_current: bool = False,
 ) -> Tuple[float, List[float], List[float], List[np.ndarray], List[np.ndarray], np.ndarray]:
     """Compute appearance benefit with proper GT/oracle separation.
 
@@ -89,6 +90,15 @@ def compute_appearance_benefit(
     skip_losses: List[float] = []
     write_features: List[np.ndarray] = []
     skip_features: List[np.ndarray] = []
+    valid_values: List[bool] = []
+
+    if include_current:
+        current_valid = ctx.current_gt_box is not None
+        valid_values.append(bool(current_valid))
+        write_losses.append(appearance_loss(write_feat, identity_prototype) if current_valid else 0.0)
+        skip_losses.append(appearance_loss(skip_feat, identity_prototype) if current_valid else 0.0)
+        write_features.append(write_feat.copy())
+        skip_features.append(skip_feat.copy())
 
     for i in range(num_frames):
         oracle_det = oracle_dets[i]
@@ -112,13 +122,16 @@ def compute_appearance_benefit(
         skip_losses.append(s_loss)
         skip_features.append(s_feat)
         skip_feat = s_feat
+        valid_values.append(bool(valid_mask[i]))
 
     # Only sum over valid frames
     B_a = 0.0
-    for i in range(num_frames):
-        if valid_mask[i]:
+    for i, valid in enumerate(valid_values if include_current else valid_mask.tolist()):
+        if valid:
             B_a += skip_losses[i] - write_losses[i]
 
+    if include_current:
+        valid_mask = np.asarray(valid_values, dtype=bool)
     return B_a, write_losses, skip_losses, write_features, skip_features, valid_mask
 
 

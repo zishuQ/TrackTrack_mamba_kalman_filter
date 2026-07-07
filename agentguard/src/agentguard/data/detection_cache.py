@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, Literal
 
@@ -18,8 +19,10 @@ class SequenceDetectionCache:
     source arrays.
     """
 
-    def __init__(self, sequence_dir: str | Path) -> None:
+    def __init__(self, sequence_dir: str | Path, frame_array_cache_size: int = 4) -> None:
         self.sequence_dir = Path(sequence_dir)
+        self._frame_array_cache_size = max(0, int(frame_array_cache_size))
+        self._frame_array_cache: OrderedDict[tuple[int, DetectionView], np.ndarray | None] = OrderedDict()
         with open(self.sequence_dir / "manifest.json", "r") as f:
             self.manifest = json.load(f)
 
@@ -85,20 +88,33 @@ class SequenceDetectionCache:
         }
 
     def get_frame_array(self, frame_id: int, view: DetectionView = "source") -> np.ndarray | None:
+        key = (int(frame_id), view)
+        if key in self._frame_array_cache:
+            cached = self._frame_array_cache.pop(key)
+            self._frame_array_cache[key] = cached
+            return cached
+
         frame = self.get_frame(frame_id, view=view)
         n = int(frame["boxes"].shape[0])
         if n == 0:
-            return None
-        class_ids = frame["class_ids"].astype(np.float32, copy=False).reshape(n, 1)
-        return np.concatenate(
-            [
-                frame["boxes"].astype(np.float32, copy=False),
-                frame["scores"].astype(np.float32, copy=False).reshape(n, 1),
-                class_ids,
-                frame["features"].astype(np.float32, copy=False),
-            ],
-            axis=1,
-        )
+            arr = None
+        else:
+            class_ids = frame["class_ids"].astype(np.float32, copy=False).reshape(n, 1)
+            arr = np.concatenate(
+                [
+                    frame["boxes"].astype(np.float32, copy=False),
+                    frame["scores"].astype(np.float32, copy=False).reshape(n, 1),
+                    class_ids,
+                    frame["features"].astype(np.float32, copy=False),
+                ],
+                axis=1,
+            )
+
+        if self._frame_array_cache_size > 0:
+            self._frame_array_cache[key] = arr
+            while len(self._frame_array_cache) > self._frame_array_cache_size:
+                self._frame_array_cache.popitem(last=False)
+        return arr
 
     def detection_range(self, frame_id: int, view: DetectionView = "source") -> tuple[int, int]:
         indices = self._slice_indices(frame_id, view)
@@ -123,6 +139,7 @@ class SequenceDetectionCache:
         }
 
     def close(self) -> None:
+        self._frame_array_cache.clear()
         for name in (
             "frame_offsets",
             "boxes",

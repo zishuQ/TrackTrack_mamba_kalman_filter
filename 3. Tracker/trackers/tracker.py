@@ -262,9 +262,7 @@ class Tracker(object):
             rt = self.agentguard_adapter.runtime
             for t in tracked_lost:
                 if rt and rt.is_mature_track(t):
-                    frame_start_snapshots[t.track_id] = t.snapshot_state(
-                        compact_history=self.agentguard_adapter.capture_only
-                    )
+                    frame_start_snapshots[t.track_id] = t.snapshot_state(compact_history=True)
 
         # Camera motion compensation
         if self.disable_gmc:
@@ -287,9 +285,7 @@ class Tracker(object):
             rt = self.agentguard_adapter.runtime
             for t in tracked_lost:
                 if rt and rt.is_mature_track(t):
-                    pre_update_snapshots[t.track_id] = t.snapshot_state(
-                        compact_history=self.agentguard_adapter.capture_only
-                    )
+                    pre_update_snapshots[t.track_id] = t.snapshot_state(compact_history=True)
 
         # ==============================================================================================================
         # Association between (tracked and lost tracks) & (high confidence detections)
@@ -315,6 +311,7 @@ class Tracker(object):
             )
 
         # Process matched tracks
+        agentguard_matched_batch = []
         for t_idx, d_idx in matches:
             track = tracked_lost[t_idx]
             detection = dets_all[d_idx]
@@ -347,11 +344,17 @@ class Tracker(object):
                     gate_decision = GateDecision(1.0, 1.0, np.ones(5, dtype=np.float64) / 5.0, 1.0)
                     self.agentguard_adapter.record_event(track.track_id, event, gate_decision)
                 else:
-                    gate_decision = self.agentguard_adapter.get_iwg_decision(track.track_id, event)
-                    self.agentguard_adapter.apply_gate(track, detection, gate_decision)
-                    self.agentguard_adapter.record_event(track.track_id, event, gate_decision)
+                    agentguard_matched_batch.append((track, detection, event))
             else:
                 track.update(self.frame_id, detection)
+
+        if agentguard_matched_batch:
+            decisions = self.agentguard_adapter.get_iwg_decisions_batch(
+                [(track.track_id, event) for track, _detection, event in agentguard_matched_batch]
+            )
+            for (track, detection, event), gate_decision in zip(agentguard_matched_batch, decisions):
+                self.agentguard_adapter.apply_gate(track, detection, gate_decision)
+                self.agentguard_adapter.record_event(track.track_id, event, gate_decision)
 
         # Mark unmatched tracks
         for t_idx in u_tracks:
@@ -440,9 +443,7 @@ class Tracker(object):
             rt = self.agentguard_adapter.runtime
             for t in self.tracks:
                 if rt and rt.is_mature_track(t):
-                    frame_start_snapshots[t.track_id] = t.snapshot_state(
-                        compact_history=self.agentguard_adapter.capture_only
-                    )
+                    frame_start_snapshots[t.track_id] = t.snapshot_state(compact_history=True)
 
         # Camera motion compensation — read exactly once
         if self.disable_gmc:
@@ -477,9 +478,7 @@ class Tracker(object):
             rt = self.agentguard_adapter.runtime
             for t in self.tracks:
                 if rt and rt.is_mature_track(t):
-                    pre_update_snapshots[t.track_id] = t.snapshot_state(
-                        compact_history=self.agentguard_adapter.capture_only
-                    )
+                    pre_update_snapshots[t.track_id] = t.snapshot_state(compact_history=True)
 
         # Mark all as lost — mature unmatched events enter runtime
         for t in self.tracks:

@@ -21,4 +21,11 @@ def build_runtime_config(args) -> dict:
         "iwg_checkpoint": getattr(args, "iwg_checkpoint", None),
         "tgr_checkpoint": getattr(args, "tgr_checkpoint", None),
         "device": getattr(args, "agentguard_device", "cpu"),
+        "replay_diff_threshold": float(
+            getattr(args, "agentguard_replay_diff_threshold", 0.0) or 0.0
+        ),
+        "tgr_frame_stride": max(
+            int(getattr(args, "agentguard_tgr_frame_stride", 1) or 1),
+            1,
+        ),
     }

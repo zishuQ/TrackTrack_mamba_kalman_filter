@@ -35,7 +35,7 @@ from agentguard.rollout.window import (
     compute_tgr_window_labels,
     generate_window_augmentations,
 )
-from agentguard.labels import (
+from agentguard.rollout_labels import (
     compute_dataset_stats,
     compute_policy_soft_target,
     compute_soft_target,

@@ -34,7 +34,15 @@ class NormalizationStats:
         if len(features_list) == 0:
             return  # keep default (zero mean, unit std)
 
-        features = np.stack(features_list, axis=0)  # (N, 63)
+        clean = [
+            np.asarray(feat, dtype=np.float64).reshape(-1)
+            for feat in features_list
+            if np.asarray(feat).reshape(-1).size == 63
+        ]
+        if len(clean) == 0:
+            return
+
+        features = np.stack(clean, axis=0)  # (N, 63)
         self.mean = np.mean(features, axis=0).astype(np.float64)
         self.std = np.std(features, axis=0).astype(np.float64)
         # Prevent division by zero for constant features.

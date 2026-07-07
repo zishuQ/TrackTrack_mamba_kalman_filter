@@ -25,6 +25,9 @@ def train_tgr(
     val_loader: torch.utils.data.DataLoader,
     config: Dict[str, Any],
     output_dir: str,
+    norm_mean: Optional[np.ndarray] = None,
+    norm_std: Optional[np.ndarray] = None,
+    full_val_loader: Optional[torch.utils.data.DataLoader] = None,
 ) -> Dict[str, Any]:
     """Train a TGR model with a frozen IWG model.
 
@@ -80,6 +83,7 @@ def train_tgr(
         "amp": True,
         "seed": 42,
         "early_stop_patience": 5,
+        "full_val_every": 0,
     }
     cfg.update(config)
 
@@ -134,6 +138,8 @@ def train_tgr(
     # ------------------------------------------------------------------
     best_val_loss = float("inf")
     best_epoch = -1
+    best_metric_source = "val"
+    best_metrics: dict[str, Any] = {}
     epochs_no_improve = 0
     train_metrics_history: list[dict[str, Any]] = []
     val_metrics_history: list[dict[str, Any]] = []
@@ -154,7 +160,6 @@ def train_tgr(
         ])
 
     train_tracker = MetricsTracker()
-    val_tracker = MetricsTracker()
 
     # ------------------------------------------------------------------
     # Training loop.
@@ -175,6 +180,8 @@ def train_tgr(
             target_gate = batch["target_gate"].to(device, non_blocking=True)
             sample_weight = batch["sample_weight"].to(device, non_blocking=True)
             has_detection_mask = batch["has_detection_mask"].to(device, non_blocking=True)
+            valid_motion = batch.get("valid_motion", has_detection_mask).to(device, non_blocking=True)
+            valid_appearance = batch.get("valid_appearance", has_detection_mask).to(device, non_blocking=True)
 
             # Use pre-computed IWG outputs from the data loader.
             # These were stored during data collection (per-event iwg_policy_probs,
@@ -197,7 +204,8 @@ def train_tgr(
                     has_detection_mask, padding_mask=None,
                 )
                 loss, loss_components = _compute_tgr_loss(
-                    g_revised, gate_residual, target_gate, has_detection_mask, sample_weight,
+                    g_revised, gate_residual, target_gate, has_detection_mask,
+                    sample_weight, valid_motion, valid_appearance,
                 )
 
             # Backward.
@@ -226,8 +234,8 @@ def train_tgr(
                 targets={
                     "motion_target": target_gate[..., 0],
                     "appearance_target": target_gate[..., 1],
-                    "valid_motion": has_detection_mask,
-                    "valid_appearance": has_detection_mask,
+                    "valid_motion": valid_motion,
+                    "valid_appearance": valid_appearance,
                     "sample_weight": sample_weight,
                 },
             )
@@ -242,53 +250,25 @@ def train_tgr(
                 )
 
         # ---- Validation ----
-        tgr_model.eval()
-        val_tracker.reset()
-
-        with torch.no_grad():
-            for batch in val_loader:
-                track_feats = batch["track_feats"].to(device, non_blocking=True)
-                det_feats = batch["det_feats"].to(device, non_blocking=True)
-                scalar_feats = batch["scalar_feats"].to(device, non_blocking=True)
-                target_gate = batch["target_gate"].to(device, non_blocking=True)
-                sample_weight = batch["sample_weight"].to(device, non_blocking=True)
-                has_detection_mask = batch["has_detection_mask"].to(device, non_blocking=True)
-
-                # Use pre-computed IWG outputs from the data loader.
-                iwg_policy_probs = batch["iwg_policy_probs"].to(device, non_blocking=True)
-                iwg_gates = batch["iwg_gates"].to(device, non_blocking=True)
-
-                with torch.amp.autocast("cuda", enabled=use_amp):
-                    g_revised, gate_residual = tgr_model(
-                        track_feats, det_feats, scalar_feats,
-                        iwg_policy_probs, iwg_gates,
-                        has_detection_mask, padding_mask=None,
-                    )
-                    _, loss_components = _compute_tgr_loss(
-                        g_revised, gate_residual, target_gate, has_detection_mask, sample_weight,
-                    )
-
-                val_tracker.update(
-                    loss_dict=loss_components,
-                    preds={"gate": g_revised},
-                    targets={
-                        "motion_target": target_gate[..., 0],
-                        "appearance_target": target_gate[..., 1],
-                        "valid_motion": has_detection_mask,
-                        "valid_appearance": has_detection_mask,
-                        "sample_weight": sample_weight,
-                    },
-                )
+        val_metrics = _evaluate_tgr_loader(tgr_model, val_loader, device, use_amp)
+        full_val_metrics = None
+        if (
+            full_val_loader is not None
+            and int(cfg.get("full_val_every", 0)) > 0
+            and (epoch + 1) % int(cfg["full_val_every"]) == 0
+        ):
+            full_val_metrics = _evaluate_tgr_loader(tgr_model, full_val_loader, device, use_amp)
 
         # ---- Epoch summary ----
         epoch_time = time.time() - epoch_start
         epoch_times.append(epoch_time)
 
         train_metrics = train_tracker.compute()
-        val_metrics = val_tracker.compute()
 
         train_metrics["epoch"] = epoch + 1
         val_metrics["epoch"] = epoch + 1
+        if full_val_metrics is not None:
+            full_val_metrics["epoch"] = epoch + 1
 
         train_metrics_history.append(train_metrics)
         val_metrics_history.append(val_metrics)
@@ -305,6 +285,14 @@ def train_tgr(
             f"lr={current_lr:.2e}  "
             f"time={epoch_time:.1f}s"
         )
+        if full_val_metrics is not None:
+            logger.info(
+                f"Epoch {epoch + 1:2d} full-val — "
+                f"loss={full_val_metrics.get('loss', 0):.4f}  "
+                f"gate_acc={full_val_metrics.get('gate_accuracy', 0):.3f}  "
+                f"motion_mae={full_val_metrics.get('motion_mae', 0):.4f}  "
+                f"app_mae={full_val_metrics.get('appearance_mae', 0):.4f}"
+            )
 
         # Write metrics.jsonl.
         metrics_line = {
@@ -314,6 +302,11 @@ def train_tgr(
             "learning_rate": current_lr,
             "epoch_time_s": round(epoch_time, 2),
         }
+        if full_val_metrics is not None:
+            metrics_line["full_val"] = {
+                k: round(v, 6) if isinstance(v, float) else v
+                for k, v in full_val_metrics.items()
+            }
         metrics_fh.write(json.dumps(metrics_line) + "\n")
         metrics_fh.flush()
 
@@ -332,7 +325,17 @@ def train_tgr(
             ])
 
         # ---- Checkpointing & early stopping ----
-        val_loss = val_metrics.get("loss", float("inf"))
+        if full_val_loader is not None and int(cfg.get("full_val_every", 0)) > 0:
+            selection_metrics = full_val_metrics
+            selection_source = "full_val"
+        else:
+            selection_metrics = val_metrics
+            selection_source = "val"
+        selection_loss = (
+            selection_metrics.get("loss", float("inf"))
+            if selection_metrics is not None
+            else None
+        )
 
         # Save last checkpoint.
         last_ckpt_path = os.path.join(output_dir, "tgr_last.pt")
@@ -342,14 +345,21 @@ def train_tgr(
                 "config": cfg,
                 "val_metrics": val_metrics,
                 "train_metrics": train_metrics,
+                "reid_dim": cfg.get("reid_dim"),
+                "scalar_dim": cfg.get("scalar_dim", 63),
+                "event_dim": cfg.get("event_dim", 128),
             },
             path=last_ckpt_path,
+            norm_mean=norm_mean,
+            norm_std=norm_std,
         )
 
         # Save best checkpoint.
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if selection_loss is not None and selection_loss < best_val_loss:
+            best_val_loss = selection_loss
             best_epoch = epoch + 1
+            best_metric_source = selection_source
+            best_metrics = dict(selection_metrics)
             epochs_no_improve = 0
             best_ckpt_path = os.path.join(output_dir, "tgr_best.pt")
             save_checkpoint(
@@ -357,23 +367,39 @@ def train_tgr(
                 metadata={
                     "config": cfg,
                     "val_metrics": val_metrics,
+                    "full_val_metrics": full_val_metrics,
+                    "best_metric_source": best_metric_source,
+                    "best_selection_metrics": best_metrics,
                     "train_metrics": train_metrics,
                     "is_best": True,
+                    "reid_dim": cfg.get("reid_dim"),
+                    "scalar_dim": cfg.get("scalar_dim", 63),
+                    "event_dim": cfg.get("event_dim", 128),
                 },
                 path=best_ckpt_path,
+                norm_mean=norm_mean,
+                norm_std=norm_std,
             )
-            logger.info(f"New best model (val_loss={val_loss:.6f}) — saved to {best_ckpt_path}")
+            logger.info(
+                f"New best model ({selection_source}_loss={selection_loss:.6f}) "
+                f"— saved to {best_ckpt_path}"
+            )
+        elif selection_loss is None:
+            logger.info(
+                "Best model selection skipped this epoch; waiting for full-val "
+                f"every {int(cfg.get('full_val_every', 0))} epoch(s)."
+            )
         else:
             epochs_no_improve += 1
             logger.info(
                 f"No improvement for {epochs_no_improve} epoch(s) "
-                f"(best val_loss={best_val_loss:.6f} @ epoch {best_epoch})"
+                f"(best {best_metric_source}_loss={best_val_loss:.6f} @ epoch {best_epoch})"
             )
 
         if epochs_no_improve >= cfg["early_stop_patience"]:
             logger.info(
                 f"Early stopping triggered after {epoch + 1} epochs. "
-                f"Best epoch: {best_epoch} (val_loss={best_val_loss:.6f})"
+                f"Best epoch: {best_epoch} ({best_metric_source}_loss={best_val_loss:.6f})"
             )
             break
 
@@ -390,11 +416,12 @@ def train_tgr(
     training_summary = {
         "best_epoch": best_epoch,
         "best_val_loss": best_val_loss,
+        "best_metric_source": best_metric_source,
         "total_epochs": len(train_metrics_history),
         "total_steps": global_step,
         "avg_epoch_time_s": float(np.mean(epoch_times)) if epoch_times else 0.0,
         "config": cfg,
-        "best_metrics": val_metrics_history[best_epoch - 1] if best_epoch > 0 and best_epoch <= len(val_metrics_history) else {},
+        "best_metrics": best_metrics,
         "output_dir": output_dir,
         "checkpoints": {
             "best": os.path.join(output_dir, "tgr_best.pt"),
@@ -419,6 +446,62 @@ def train_tgr(
     return training_summary
 
 
+def _evaluate_tgr_loader(
+    tgr_model: TGR,
+    loader: torch.utils.data.DataLoader,
+    device: torch.device,
+    use_amp: bool,
+) -> Dict[str, Any]:
+    tgr_model.eval()
+    tracker = MetricsTracker()
+    tracker.reset()
+    with torch.no_grad():
+        for batch in loader:
+            track_feats = batch["track_feats"].to(device, non_blocking=True)
+            det_feats = batch["det_feats"].to(device, non_blocking=True)
+            scalar_feats = batch["scalar_feats"].to(device, non_blocking=True)
+            target_gate = batch["target_gate"].to(device, non_blocking=True)
+            sample_weight = batch["sample_weight"].to(device, non_blocking=True)
+            has_detection_mask = batch["has_detection_mask"].to(device, non_blocking=True)
+            valid_motion = batch.get("valid_motion", has_detection_mask).to(device, non_blocking=True)
+            valid_appearance = batch.get("valid_appearance", has_detection_mask).to(device, non_blocking=True)
+            iwg_policy_probs = batch["iwg_policy_probs"].to(device, non_blocking=True)
+            iwg_gates = batch["iwg_gates"].to(device, non_blocking=True)
+
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                g_revised, gate_residual = tgr_model(
+                    track_feats,
+                    det_feats,
+                    scalar_feats,
+                    iwg_policy_probs,
+                    iwg_gates,
+                    has_detection_mask,
+                    padding_mask=None,
+                )
+                _, loss_components = _compute_tgr_loss(
+                    g_revised,
+                    gate_residual,
+                    target_gate,
+                    has_detection_mask,
+                    sample_weight,
+                    valid_motion,
+                    valid_appearance,
+                )
+
+            tracker.update(
+                loss_dict=loss_components,
+                preds={"gate": g_revised},
+                targets={
+                    "motion_target": target_gate[..., 0],
+                    "appearance_target": target_gate[..., 1],
+                    "valid_motion": valid_motion,
+                    "valid_appearance": valid_appearance,
+                    "sample_weight": sample_weight,
+                },
+            )
+    return tracker.compute()
+
+
 # ------------------------------------------------------------------
 # Loss computation
 # ------------------------------------------------------------------
@@ -429,6 +512,8 @@ def _compute_tgr_loss(
     target_gate: torch.Tensor,
     has_detection_mask: torch.Tensor,
     sample_weight: torch.Tensor,
+    valid_motion: torch.Tensor | None = None,
+    valid_appearance: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     """Compute the TGR training loss.
 
@@ -448,10 +533,15 @@ def _compute_tgr_loss(
     g_clipped = torch.clamp(g_revised, 1e-6, 1.0 - 1e-6)
 
     # Masked BCE.
+    if valid_motion is None:
+        valid_motion = has_detection_mask
+    if valid_appearance is None:
+        valid_appearance = has_detection_mask
+    gate_valid = torch.stack([valid_motion, valid_appearance], dim=-1).float()
+    gate_valid = gate_valid * has_detection_mask.unsqueeze(-1).float()
     bce = F.binary_cross_entropy(g_clipped, target_gate, reduction="none")  # (B, seq_len, 2)
-    # Average over gate components, then mask.
-    bce = bce.mean(dim=-1)  # (B, seq_len)
-    mask = has_detection_mask.float()  # (B, seq_len)
+    bce = (bce * gate_valid).sum(dim=-1) / gate_valid.sum(dim=-1).clamp(min=1.0)
+    mask = (gate_valid.sum(dim=-1) > 0).float()
     masked_bce = (bce * mask * sample_weight).sum() / (mask * sample_weight).sum().clamp(min=1.0)
     # Avoid NaN when mask is all-zero.
     if torch.isnan(masked_bce) or torch.isinf(masked_bce):

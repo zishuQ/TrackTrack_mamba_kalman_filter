@@ -26,6 +26,7 @@ def train_iwg(
     output_dir: str,
     norm_mean: Optional[np.ndarray] = None,
     norm_std: Optional[np.ndarray] = None,
+    full_val_loader: Optional[torch.utils.data.DataLoader] = None,
 ) -> Dict[str, Any]:
     """Train an IWG model.
 
@@ -58,6 +59,8 @@ def train_iwg(
         ``reid_dim``            (req)   ReID feature dimensionality.
         ``scalar_dim``          63      Scalar feature dimensionality.
         ``event_dim``           128     Event embedding dimensionality.
+        ``full_val_every``      0       Evaluate full validation loader every
+                                        N epochs when provided. 0 disables it.
         ======================  ======  =====================================
 
     output_dir : str
@@ -84,6 +87,7 @@ def train_iwg(
         "reid_dim": model.encoder.reid_dim,
         "scalar_dim": 63,
         "event_dim": 128,
+        "full_val_every": 0,
     }
     cfg.update(config)
 
@@ -125,6 +129,8 @@ def train_iwg(
     # ------------------------------------------------------------------
     best_val_loss = float("inf")
     best_epoch = -1
+    best_metric_source = "val"
+    best_metrics: dict[str, Any] = {}
     epochs_no_improve = 0
     train_metrics_history: list[dict[str, Any]] = []
     val_metrics_history: list[dict[str, Any]] = []
@@ -147,7 +153,6 @@ def train_iwg(
         ])
 
     train_tracker = MetricsTracker()
-    val_tracker = MetricsTracker()
 
     # ------------------------------------------------------------------
     # Training loop.
@@ -215,36 +220,25 @@ def train_iwg(
                 )
 
         # ---- Validation ----
-        model.eval()
-        val_tracker.reset()
-
-        with torch.no_grad():
-            for batch in val_loader:
-                track_feats = batch["track_feats"].to(device, non_blocking=True)
-                det_feats = batch["det_feats"].to(device, non_blocking=True)
-                scalar_feats = batch["scalar_feats"].to(device, non_blocking=True)
-                mask = batch["mask"].to(device, non_blocking=True)
-                targets = {k: v.to(device, non_blocking=True) for k, v in batch["targets"].items()}
-
-                with torch.amp.autocast("cuda", enabled=use_amp):
-                    outputs = model(track_feats, det_feats, scalar_feats, mask)
-                    _, loss_components = _compute_iwg_loss(outputs, targets)
-
-                val_tracker.update(
-                    loss_dict=loss_components,
-                    preds={"gate": outputs["gate"], "policy_probs": outputs["policy_probs"]},
-                    targets=targets,
-                )
+        val_metrics = _evaluate_iwg_loader(model, val_loader, device, use_amp)
+        full_val_metrics = None
+        if (
+            full_val_loader is not None
+            and int(cfg.get("full_val_every", 0)) > 0
+            and (epoch + 1) % int(cfg["full_val_every"]) == 0
+        ):
+            full_val_metrics = _evaluate_iwg_loader(model, full_val_loader, device, use_amp)
 
         # ---- Epoch summary ----
         epoch_time = time.time() - epoch_start
         epoch_times.append(epoch_time)
 
         train_metrics = train_tracker.compute()
-        val_metrics = val_tracker.compute()
 
         train_metrics["epoch"] = epoch + 1
         val_metrics["epoch"] = epoch + 1
+        if full_val_metrics is not None:
+            full_val_metrics["epoch"] = epoch + 1
 
         train_metrics_history.append(train_metrics)
         val_metrics_history.append(val_metrics)
@@ -262,6 +256,14 @@ def train_iwg(
             f"lr={current_lr:.2e}  "
             f"time={epoch_time:.1f}s"
         )
+        if full_val_metrics is not None:
+            logger.info(
+                f"Epoch {epoch + 1:2d} full-val — "
+                f"loss={full_val_metrics.get('loss', 0):.4f}  "
+                f"gate_acc={full_val_metrics.get('gate_accuracy', 0):.3f}  "
+                f"motion_mae={full_val_metrics.get('motion_mae', 0):.4f}  "
+                f"app_mae={full_val_metrics.get('appearance_mae', 0):.4f}"
+            )
 
         # Write metrics.jsonl.
         metrics_line = {
@@ -271,6 +273,11 @@ def train_iwg(
             "learning_rate": current_lr,
             "epoch_time_s": round(epoch_time, 2),
         }
+        if full_val_metrics is not None:
+            metrics_line["full_val"] = {
+                k: round(v, 6) if isinstance(v, float) else v
+                for k, v in full_val_metrics.items()
+            }
         metrics_fh.write(json.dumps(metrics_line) + "\n")
         metrics_fh.flush()
 
@@ -290,7 +297,17 @@ def train_iwg(
             ])
 
         # ---- Checkpointing & early stopping ----
-        val_loss = val_metrics.get("loss", float("inf"))
+        if full_val_loader is not None and int(cfg.get("full_val_every", 0)) > 0:
+            selection_metrics = full_val_metrics
+            selection_source = "full_val"
+        else:
+            selection_metrics = val_metrics
+            selection_source = "val"
+        selection_loss = (
+            selection_metrics.get("loss", float("inf"))
+            if selection_metrics is not None
+            else None
+        )
 
         # Save last checkpoint.
         last_ckpt_path = os.path.join(output_dir, "iwg_last.pt")
@@ -309,9 +326,11 @@ def train_iwg(
         )
 
         # Save best checkpoint.
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if selection_loss is not None and selection_loss < best_val_loss:
+            best_val_loss = selection_loss
             best_epoch = epoch + 1
+            best_metric_source = selection_source
+            best_metrics = dict(selection_metrics)
             epochs_no_improve = 0
             best_ckpt_path = os.path.join(output_dir, "iwg_best.pt")
             save_checkpoint(
@@ -319,6 +338,9 @@ def train_iwg(
                 metadata={
                     "config": cfg,
                     "val_metrics": val_metrics,
+                    "full_val_metrics": full_val_metrics,
+                    "best_metric_source": best_metric_source,
+                    "best_selection_metrics": best_metrics,
                     "train_metrics": train_metrics,
                     "reid_dim": cfg["reid_dim"],
                     "scalar_dim": cfg["scalar_dim"],
@@ -328,19 +350,27 @@ def train_iwg(
                 path=best_ckpt_path,
                 norm_mean=norm_mean, norm_std=norm_std,
             )
-            logger.info(f"New best model (val_loss={val_loss:.6f}) — saved to {best_ckpt_path}")
+            logger.info(
+                f"New best model ({selection_source}_loss={selection_loss:.6f}) "
+                f"— saved to {best_ckpt_path}"
+            )
+        elif selection_loss is None:
+            logger.info(
+                "Best model selection skipped this epoch; waiting for full-val "
+                f"every {int(cfg.get('full_val_every', 0))} epoch(s)."
+            )
         else:
             epochs_no_improve += 1
             logger.info(
                 f"No improvement for {epochs_no_improve} epoch(s) "
-                f"(best val_loss={best_val_loss:.6f} @ epoch {best_epoch})"
+                f"(best {best_metric_source}_loss={best_val_loss:.6f} @ epoch {best_epoch})"
             )
 
         # Early stopping.
         if epochs_no_improve >= cfg["early_stop_patience"]:
             logger.info(
                 f"Early stopping triggered after {epoch + 1} epochs. "
-                f"Best epoch: {best_epoch} (val_loss={best_val_loss:.6f})"
+                f"Best epoch: {best_epoch} ({best_metric_source}_loss={best_val_loss:.6f})"
             )
             break
 
@@ -361,11 +391,12 @@ def train_iwg(
     training_summary = {
         "best_epoch": best_epoch,
         "best_val_loss": best_val_loss,
+        "best_metric_source": best_metric_source,
         "total_epochs": len(train_metrics_history),
         "total_steps": global_step,
         "avg_epoch_time_s": float(np.mean(epoch_times)) if epoch_times else 0.0,
         "config": cfg,
-        "best_metrics": val_metrics_history[best_epoch - 1] if best_epoch > 0 and best_epoch <= len(val_metrics_history) else {},
+        "best_metrics": best_metrics,
         "output_dir": output_dir,
         "checkpoints": {
             "best": best_ckpt_path,
@@ -389,6 +420,35 @@ def train_iwg(
     logger.info("IWG training complete.")
     logger.info("=" * 60)
     return training_summary
+
+
+def _evaluate_iwg_loader(
+    model: IWG,
+    loader: torch.utils.data.DataLoader,
+    device: torch.device,
+    use_amp: bool,
+) -> Dict[str, Any]:
+    model.eval()
+    tracker = MetricsTracker()
+    tracker.reset()
+    with torch.no_grad():
+        for batch in loader:
+            track_feats = batch["track_feats"].to(device, non_blocking=True)
+            det_feats = batch["det_feats"].to(device, non_blocking=True)
+            scalar_feats = batch["scalar_feats"].to(device, non_blocking=True)
+            mask = batch["mask"].to(device, non_blocking=True)
+            targets = {k: v.to(device, non_blocking=True) for k, v in batch["targets"].items()}
+
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                outputs = model(track_feats, det_feats, scalar_feats, mask)
+                _, loss_components = _compute_iwg_loss(outputs, targets)
+
+            tracker.update(
+                loss_dict=loss_components,
+                preds={"gate": outputs["gate"], "policy_probs": outputs["policy_probs"]},
+                targets=targets,
+            )
+    return tracker.compute()
 
 
 # ------------------------------------------------------------------
@@ -421,28 +481,39 @@ def _compute_iwg_loss(
     )                                               # (B, 2)
     target_policy = targets["policy_soft_target"]    # (B, 5)
 
-    # Per-sample losses
-    gate_loss_per_sample = F.binary_cross_entropy(
-        pred_gate.clamp(1e-6, 1-1e-6), target_gate, reduction='none'
-    ).mean(dim=-1)  # (B,)
+    valid_motion = targets.get("valid_motion", torch.ones_like(targets["motion_target"], dtype=torch.bool))
+    valid_appearance = targets.get("valid_appearance", torch.ones_like(targets["appearance_target"], dtype=torch.bool))
+    gate_valid = torch.stack([valid_motion, valid_appearance], dim=-1).float()
+    gate_bce = F.binary_cross_entropy(
+        pred_gate.clamp(1e-6, 1 - 1e-6), target_gate, reduction="none"
+    )
+    gate_loss_per_sample = (
+        (gate_bce * gate_valid).sum(dim=-1)
+        / gate_valid.sum(dim=-1).clamp(min=1.0)
+    )
+    valid_any = gate_valid.sum(dim=-1) > 0
 
     pred_log_policy = torch.clamp(pred_policy, min=1e-8).log()
     target_policy_dist = torch.clamp(target_policy, min=1e-8)
     policy_kl_per_sample = F.kl_div(
         pred_log_policy, target_policy_dist, reduction='none'
     ).sum(dim=-1)  # (B,)
+    policy_valid = (valid_motion & valid_appearance).float()
 
-    brier_per_sample = ((pred_gate - target_gate) ** 2).sum(dim=-1)  # (B,)
+    brier_per_sample = (
+        ((pred_gate - target_gate) ** 2 * gate_valid).sum(dim=-1)
+        / gate_valid.sum(dim=-1).clamp(min=1.0)
+    )
 
-    loss_per_sample = gate_loss_per_sample + 0.1 * policy_kl_per_sample + 0.1 * brier_per_sample
+    loss_per_sample = gate_loss_per_sample + 0.1 * policy_kl_per_sample * policy_valid + 0.1 * brier_per_sample
 
     # Apply sample weights
-    sample_weight = targets.get("sample_weight", torch.ones_like(loss_per_sample))
+    sample_weight = targets.get("sample_weight", torch.ones_like(loss_per_sample)) * valid_any.float()
     weighted_loss = (loss_per_sample * sample_weight).sum() / sample_weight.sum().clamp(min=1e-8)
 
     return weighted_loss, {
         "loss": weighted_loss.detach(),
         "gate_loss": (gate_loss_per_sample * sample_weight).sum() / sample_weight.sum().clamp(min=1).detach(),
-        "policy_loss": policy_kl_per_sample.detach().mean(),
-        "brier_loss": brier_per_sample.detach().mean(),
+        "policy_loss": (policy_kl_per_sample * policy_valid).sum().detach() / policy_valid.sum().clamp(min=1.0),
+        "brier_loss": (brier_per_sample * sample_weight).sum().detach() / sample_weight.sum().clamp(min=1.0),
     }

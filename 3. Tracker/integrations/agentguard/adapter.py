@@ -390,14 +390,24 @@ class AgentGuardTrackerAdapter:
         if roll is None:
             return
 
-        live_snapshot = export_track_state(live_track)
+        live_snapshot = (
+            live_track.snapshot_state(compact_history=True)
+            if hasattr(live_track, "snapshot_state")
+            else export_track_state(live_track)
+        )
         oldest_step = roll["oldest_step"]
         roll_plan = type("CheckpointRollPlan", (), {
             "checkpoint": roll["checkpoint"],
             "steps": [oldest_step],
         })()
         backend.replay_into_live_track(live_track, roll_plan)
-        new_checkpoint = export_track_state(live_track)
+        new_checkpoint = (
+            live_track.snapshot_state(compact_history=True)
+            if hasattr(live_track, "snapshot_state")
+            else export_track_state(live_track)
+        )
+        if getattr(self.runtime, "stats", None) is not None:
+            self.runtime.stats.record_checkpoint_roll(len(roll_plan.steps))
 
         next_event_id = roll["next_event_id"]
         if next_event_id is not None:
@@ -466,6 +476,60 @@ class AgentGuardTrackerAdapter:
             confidence=float(np.mean(result["cue"])),
         )
 
+    def get_iwg_decisions_batch(
+        self,
+        items: List[Tuple[int, TrackEvent]],
+    ) -> List[GateDecision]:
+        """Run IWG once for many matched events from the same frame."""
+        if not items:
+            return []
+        if self.runtime is None or self.runtime.iwg is None:
+            return [
+                GateDecision(1.0, 1.0, np.ones(5, dtype=np.float64) / 5.0, 1.0)
+                for _ in items
+            ]
+
+        fb = self.runtime.feature_builder
+        rd = self.reid_dim
+        sequences = []
+        for track_id, event in items:
+            src_state = event.pre_update_state or event.frame_start_state
+            if src_state is not None and src_state.feature.size > 0:
+                event.track_feature = np.asarray(
+                    src_state.feature, dtype=np.float64
+                ).reshape(-1)
+            else:
+                event.track_feature = np.zeros(rd, dtype=np.float64)
+
+            if event.has_detection and event.detection is not None:
+                event.detection_feature = np.asarray(
+                    event.detection.feature, dtype=np.float64
+                ).reshape(-1)
+            else:
+                event.detection_feature = np.zeros(rd, dtype=np.float64)
+
+            event.scalar_features = fb.compute_scalar(event)
+
+            seq_len = 6
+            buffer = self.runtime.event_buffers.get(track_id)
+            if buffer is None:
+                seq = [None] * (seq_len - 1) + [event]
+            else:
+                hist = buffer.get_sequence()
+                seq = hist[-(seq_len - 1):] + [event]
+            sequences.append(seq)
+
+        results = self.runtime.run_iwg_batch_inference(sequences)
+        return [
+            GateDecision(
+                motion_gate=float(result["gate"][0]),
+                appearance_gate=float(result["gate"][1]),
+                policy_probs=result["policy_probs"],
+                confidence=float(np.mean(result["cue"])),
+            )
+            for result in results
+        ]
+
     # ------------------------------------------------------------------
     # Event recording (buffer management)
     # ------------------------------------------------------------------
@@ -491,8 +555,6 @@ class AgentGuardTrackerAdapter:
         if not is_capture:
             self.runtime.stats.record_event()
             event_buffer, window_buffer = self.runtime.get_or_create_buffer(track_id)
-            event_buffer.push(event)
-            window_buffer.push(event)
 
         # Attach IWG outputs
         event.iwg_policy_probs = gate_decision.policy_probs.copy()
@@ -503,10 +565,13 @@ class AgentGuardTrackerAdapter:
 
         if not is_capture:
             # Save checkpoint for TGR (full mode)
+            event_buffer.push(self._lightweight_runtime_event(event, keep_detection=False))
+            self.runtime.stats.record_iwg(event.iwg_gate)
             if self.runtime.mode == "full" and event.frame_start_state is not None:
                 self.runtime.checkpoints.save_checkpoint(
                     track_id, event.event_id, event.frame_start_state
                 )
+                window_buffer.push(self._lightweight_runtime_event(event, keep_detection=True))
 
         # Accumulate for EventSink
         self._accumulate_event_for_sink(event)
@@ -532,16 +597,16 @@ class AgentGuardTrackerAdapter:
         if not is_capture:
             self.runtime.stats.record_event()
             event_buffer, window_buffer = self.runtime.get_or_create_buffer(track_id)
-            event_buffer.push(event)
-            window_buffer.push(event)
 
         event.iwg_gate = np.array([0.0, 0.0], dtype=np.float64)
 
         if not is_capture:
+            event_buffer.push(self._lightweight_runtime_event(event, keep_detection=False))
             if self.runtime.mode == "full" and event.frame_start_state is not None:
                 self.runtime.checkpoints.save_checkpoint(
                     track_id, event.event_id, event.frame_start_state
                 )
+                window_buffer.push(self._lightweight_runtime_event(event, keep_detection=True))
 
         # Accumulate for EventSink
         self._accumulate_event_for_sink(event)
@@ -549,6 +614,52 @@ class AgentGuardTrackerAdapter:
     # ------------------------------------------------------------------
     # EventSink accumulation helper
     # ------------------------------------------------------------------
+
+    def _lightweight_runtime_event(
+        self,
+        event: TrackEvent,
+        *,
+        keep_detection: bool,
+    ) -> TrackEvent:
+        """Return a runtime-buffer event without heavy snapshots/context.
+
+        IWG history only needs pre-computed features/scalars and masks. Full
+        mode TGR additionally needs the accepted detection and warp for replay.
+        Checkpoints keep the original pre-event state separately.
+        """
+        return TrackEvent(
+            event_id=event.event_id,
+            dataset=event.dataset,
+            sequence=event.sequence,
+            frame_id=event.frame_id,
+            track_id=event.track_id,
+            image_width=event.image_width,
+            image_height=event.image_height,
+            has_detection=event.has_detection,
+            frame_start_state=None,
+            pre_update_state=None,
+            detection=event.detection if keep_detection else None,
+            association=None,
+            association_context=None,
+            warp_matrix=np.asarray(event.warp_matrix, dtype=np.float64).copy(),
+            scalar_features=(
+                None
+                if event.scalar_features is None
+                else np.asarray(event.scalar_features, dtype=np.float32).copy()
+            ),
+            track_feature=np.asarray(event.track_feature, dtype=np.float32).reshape(-1).copy(),
+            detection_feature=np.asarray(event.detection_feature, dtype=np.float32).reshape(-1).copy(),
+            iwg_policy_probs=(
+                None
+                if event.iwg_policy_probs is None
+                else np.asarray(event.iwg_policy_probs, dtype=np.float32).copy()
+            ),
+            iwg_gate=(
+                None
+                if event.iwg_gate is None
+                else np.asarray(event.iwg_gate, dtype=np.float32).copy()
+            ),
+        )
 
     def _accumulate_event_for_sink(self, event: TrackEvent) -> None:
         """Serialise *event* and append to the pending frame events list."""

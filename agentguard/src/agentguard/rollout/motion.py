@@ -15,6 +15,7 @@ def compute_motion_benefit(
     ctx: RolloutContext,
     motion_model: NSAKalmanFilter,
     future_frames: int = 5,
+    include_current: bool = False,
 ) -> Tuple[float, List[float], List[float], np.ndarray]:
     """Compute motion benefit with proper GT/oracle separation.
 
@@ -87,6 +88,19 @@ def compute_motion_benefit(
 
     write_losses: List[float] = []
     skip_losses: List[float] = []
+    valid_values: List[bool] = []
+
+    if include_current:
+        current_valid = ctx.current_gt_box is not None
+        valid_values.append(bool(current_valid))
+        if current_valid and write_mean is not None and skip_mean is not None:
+            write_box = motion_model.mean_to_bbox(write_mean)
+            skip_box = motion_model.mean_to_bbox(skip_mean)
+            write_losses.append(motion_frame_loss(ctx.current_gt_box, write_box))
+            skip_losses.append(motion_frame_loss(ctx.current_gt_box, skip_box))
+        else:
+            write_losses.append(0.0)
+            skip_losses.append(0.0)
 
     for i in range(num_frames):
         gt_box = gt_boxes[i]
@@ -106,13 +120,16 @@ def compute_motion_benefit(
         )
         skip_mean, skip_cov = s_mean, s_cov
         skip_losses.append(s_loss)
+        valid_values.append(bool(valid_mask[i]))
 
     # Only sum over valid frames
     B_m = 0.0
-    for i in range(num_frames):
-        if valid_mask[i]:
+    for i, valid in enumerate(valid_values if include_current else valid_mask.tolist()):
+        if valid:
             B_m += skip_losses[i] - write_losses[i]
 
+    if include_current:
+        valid_mask = np.asarray(valid_values, dtype=bool)
     return B_m, write_losses, skip_losses, valid_mask
 
 
@@ -120,6 +137,7 @@ def compute_motion_rollout(
     ctx: RolloutContext,
     motion_model: NSAKalmanFilter,
     future_frames: int = 5,
+    include_current: bool = False,
 ) -> Dict[str, Any]:
     """Full motion rollout returning detailed results for labeling.
 
@@ -135,7 +153,7 @@ def compute_motion_rollout(
         Keys: ``benefit``, ``write_losses``, ``skip_losses``, ``valid_mask``.
     """
     B_m, write_losses, skip_losses, valid_mask = compute_motion_benefit(
-        ctx, motion_model, future_frames
+        ctx, motion_model, future_frames, include_current=include_current
     )
     return {
         "benefit": B_m,

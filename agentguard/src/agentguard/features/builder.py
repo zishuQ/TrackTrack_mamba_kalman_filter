@@ -35,6 +35,26 @@ class EventFeatureBuilder:
         # The scalar feature vector is known to be 63-dimensional.
         self._scalar_dim: int = 63
 
+    def _fit_reid(self, value: np.ndarray) -> np.ndarray:
+        arr = np.asarray(value, dtype=np.float64).reshape(-1)
+        if arr.size == self.reid_dim:
+            return arr
+        if arr.size == 0:
+            return np.zeros(self.reid_dim, dtype=np.float64)
+        if arr.size > self.reid_dim:
+            return arr[: self.reid_dim]
+        return np.pad(arr, (0, self.reid_dim - arr.size))
+
+    def _fit_scalar(self, value: np.ndarray) -> np.ndarray:
+        arr = np.asarray(value, dtype=np.float64).reshape(-1)
+        if arr.size == self._scalar_dim:
+            return arr
+        if arr.size == 0:
+            return np.zeros(self._scalar_dim, dtype=np.float64)
+        if arr.size > self._scalar_dim:
+            return arr[: self._scalar_dim]
+        return np.pad(arr, (0, self._scalar_dim - arr.size))
+
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
@@ -92,13 +112,13 @@ class EventFeatureBuilder:
                 mask[i] = True
                 continue
 
-            track_feats[i] = evt.track_feature.ravel()
+            track_feats[i] = self._fit_reid(evt.track_feature)
 
             if evt.has_detection and evt.detection_feature.size > 0:
-                det_feats[i] = evt.detection_feature.ravel()
+                det_feats[i] = self._fit_reid(evt.detection_feature)
             # else stays zero
 
-            scalar_feats[i] = evt.scalar_features.ravel() if evt.scalar_features is not None else np.zeros(self._scalar_dim, dtype=np.float64)
+            scalar_feats[i] = self._fit_scalar(evt.scalar_features) if evt.scalar_features is not None else np.zeros(self._scalar_dim, dtype=np.float64)
 
         # Optional normalisation
         scalar_feats = self.normalize_scalars(scalar_feats)
@@ -108,6 +128,56 @@ class EventFeatureBuilder:
             "det_feats": torch.from_numpy(det_feats).unsqueeze(0).float(),
             "scalar_feats": torch.from_numpy(scalar_feats).unsqueeze(0).float(),
             "mask": torch.from_numpy(mask).unsqueeze(0),
+        }
+
+    def build_iwg_batch_input(
+        self,
+        event_sequences: List[List[Optional[TrackEvent]]],
+    ) -> Dict[str, torch.Tensor]:
+        """Build IWG tensors for many per-track sequences in one pass.
+
+        This is equivalent to calling :meth:`build_iwg_input` for each
+        sequence and concatenating on the batch dimension, but avoids creating
+        many small tensors in the online tracker path.
+        """
+        if not event_sequences:
+            return {
+                "track_feats": torch.empty((0, 0, self.reid_dim), dtype=torch.float32),
+                "det_feats": torch.empty((0, 0, self.reid_dim), dtype=torch.float32),
+                "scalar_feats": torch.empty((0, 0, self._scalar_dim), dtype=torch.float32),
+                "mask": torch.empty((0, 0), dtype=torch.bool),
+            }
+
+        batch_size = len(event_sequences)
+        seq_len = len(event_sequences[0])
+        track_feats = np.zeros((batch_size, seq_len, self.reid_dim), dtype=np.float32)
+        det_feats = np.zeros((batch_size, seq_len, self.reid_dim), dtype=np.float32)
+        scalar_feats = np.zeros((batch_size, seq_len, self._scalar_dim), dtype=np.float32)
+        mask = np.zeros((batch_size, seq_len), dtype=np.bool_)
+
+        for b, events_sequence in enumerate(event_sequences):
+            if len(events_sequence) != seq_len:
+                raise ValueError("All IWG event sequences in a batch must have the same length")
+            for i, evt in enumerate(events_sequence):
+                if evt is None:
+                    mask[b, i] = True
+                    continue
+
+                track_feats[b, i] = self._fit_reid(evt.track_feature)
+
+                if evt.has_detection and evt.detection_feature.size > 0:
+                    det_feats[b, i] = self._fit_reid(evt.detection_feature)
+
+                if evt.scalar_features is not None:
+                    scalar_feats[b, i] = self._fit_scalar(evt.scalar_features)
+
+        scalar_feats = self.normalize_scalars(scalar_feats).astype(np.float32, copy=False)
+
+        return {
+            "track_feats": torch.from_numpy(track_feats),
+            "det_feats": torch.from_numpy(det_feats),
+            "scalar_feats": torch.from_numpy(scalar_feats),
+            "mask": torch.from_numpy(mask),
         }
 
     # ------------------------------------------------------------------
@@ -142,13 +212,14 @@ class EventFeatureBuilder:
         has_detection_mask = np.zeros(seq_len, dtype=np.bool_)
 
         for i, evt in enumerate(window_events):
-            track_feats[i] = evt.track_feature.ravel()
+            track_feats[i] = self._fit_reid(evt.track_feature)
 
-            if evt.has_detection and evt.detection_feature.size > 0:
-                det_feats[i] = evt.detection_feature.ravel()
+            if evt.has_detection:
                 has_detection_mask[i] = True
+            if evt.has_detection and evt.detection_feature.size > 0:
+                det_feats[i] = self._fit_reid(evt.detection_feature)
 
-            scalar_feats[i] = evt.scalar_features.ravel()
+            scalar_feats[i] = self._fit_scalar(evt.scalar_features)
 
             if evt.iwg_policy_probs is not None:
                 iwg_policy_probs[i] = evt.iwg_policy_probs.ravel()
@@ -167,6 +238,60 @@ class EventFeatureBuilder:
             "iwg_policy_probs": torch.from_numpy(iwg_policy_probs).unsqueeze(0).float(),
             "iwg_gates": torch.from_numpy(iwg_gates).unsqueeze(0).float(),
             "has_detection_mask": torch.from_numpy(has_detection_mask).unsqueeze(0),
+        }
+
+    def build_tgr_batch_input(
+        self,
+        windows: List[List[TrackEvent]],
+    ) -> Dict[str, torch.Tensor]:
+        """Build TGR tensors for many track windows in one pass."""
+        if not windows:
+            return {
+                "track_feats": torch.empty((0, 0, self.reid_dim), dtype=torch.float32),
+                "det_feats": torch.empty((0, 0, self.reid_dim), dtype=torch.float32),
+                "scalar_feats": torch.empty((0, 0, self._scalar_dim), dtype=torch.float32),
+                "iwg_policy_probs": torch.empty((0, 0, 5), dtype=torch.float32),
+                "iwg_gates": torch.empty((0, 0, 2), dtype=torch.float32),
+                "has_detection_mask": torch.empty((0, 0), dtype=torch.bool),
+            }
+
+        batch_size = len(windows)
+        seq_len = len(windows[0])
+        track_feats = np.zeros((batch_size, seq_len, self.reid_dim), dtype=np.float32)
+        det_feats = np.zeros((batch_size, seq_len, self.reid_dim), dtype=np.float32)
+        scalar_feats = np.zeros((batch_size, seq_len, self._scalar_dim), dtype=np.float32)
+        iwg_policy_probs = np.full((batch_size, seq_len, 5), 0.2, dtype=np.float32)
+        iwg_gates = np.ones((batch_size, seq_len, 2), dtype=np.float32)
+        has_detection_mask = np.zeros((batch_size, seq_len), dtype=np.bool_)
+
+        for b, window_events in enumerate(windows):
+            if len(window_events) != seq_len:
+                raise ValueError("All TGR windows in a batch must have the same length")
+            for i, evt in enumerate(window_events):
+                track_feats[b, i] = self._fit_reid(evt.track_feature)
+
+                if evt.has_detection:
+                    has_detection_mask[b, i] = True
+                if evt.has_detection and evt.detection_feature.size > 0:
+                    det_feats[b, i] = self._fit_reid(evt.detection_feature)
+
+                scalar_feats[b, i] = self._fit_scalar(evt.scalar_features)
+
+                if evt.iwg_policy_probs is not None:
+                    iwg_policy_probs[b, i] = np.asarray(evt.iwg_policy_probs).reshape(-1)
+
+                if evt.iwg_gate is not None:
+                    iwg_gates[b, i] = np.asarray(evt.iwg_gate).reshape(-1)
+
+        scalar_feats = self.normalize_scalars(scalar_feats).astype(np.float32, copy=False)
+
+        return {
+            "track_feats": torch.from_numpy(track_feats),
+            "det_feats": torch.from_numpy(det_feats),
+            "scalar_feats": torch.from_numpy(scalar_feats),
+            "iwg_policy_probs": torch.from_numpy(iwg_policy_probs),
+            "iwg_gates": torch.from_numpy(iwg_gates),
+            "has_detection_mask": torch.from_numpy(has_detection_mask),
         }
 
     # ------------------------------------------------------------------

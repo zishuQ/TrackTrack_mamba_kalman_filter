@@ -3,8 +3,12 @@ import shutil
 import torch
 import pickle
 import argparse
+import gc
+import json
 import numpy as np
 import trackeval
+import time
+from pathlib import Path
 from tqdm import tqdm
 from utils.etc import *
 from AFLink.AppFreeLink import *
@@ -125,8 +129,239 @@ def make_parser():
                        help="Path to TGR model checkpoint (.pt)")
     parser.add_argument("--agentguard-device", type=str, default="cpu",
                        help="Device for AgentGuard inference (cpu or cuda)")
+    parser.add_argument(
+        "--agentguard-replay-diff-threshold",
+        type=float,
+        default=0.0,
+        help=(
+            "Full mode speed knob. If the max absolute TGR gate revision "
+            "within a window is <= this threshold, skip live replay and "
+            "checkpoint roll for that window. 0.0 preserves the exact path "
+            "except for numerically identical gates."
+        ),
+    )
+    parser.add_argument(
+        "--agentguard-tgr-frame-stride",
+        type=int,
+        default=1,
+        help=(
+            "Full mode speed knob. Run TGR/replay only every N tracker frames; "
+            "full windows on skipped frames are slid forward without revision. "
+            "1 preserves the exact full path."
+        ),
+    )
+    parser.add_argument(
+        "--detection-cache-root",
+        type=str,
+        default="../outputs/agentguard/detection_cache",
+        help="Root of per-sequence mmap detection caches. Used before legacy pickle loading.",
+    )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=0,
+        help="Limit frames for profiling/debugging. 0 means full sequence.",
+    )
+    parser.add_argument(
+        "--resource-log",
+        type=str,
+        default="",
+        help="Optional JSONL path for RSS/read_bytes progress samples.",
+    )
+    parser.add_argument(
+        "--profile-every",
+        type=int,
+        default=100,
+        help="Write a resource sample every N frames when --resource-log is set.",
+    )
+    parser.add_argument(
+        "--skip-eval",
+        action="store_true",
+        help="Run tracking only and skip TrackEval. Useful for short profiling runs.",
+    )
+    parser.add_argument(
+        "--torch-num-threads",
+        type=int,
+        default=1,
+        help="PyTorch intra-op threads. AgentGuard uses many small CPU forwards; 1 keeps the desktop responsive.",
+    )
+    parser.add_argument(
+        "--torch-num-interop-threads",
+        type=int,
+        default=1,
+        help="PyTorch inter-op threads for AgentGuard CPU inference.",
+    )
 
     return parser
+
+
+def _proc_io_read_bytes():
+    try:
+        with open('/proc/self/io', 'r') as f:
+            for line in f:
+                if line.startswith('read_bytes:'):
+                    return int(line.split(':', 1)[1].strip())
+    except OSError:
+        return None
+    return None
+
+
+def _proc_rss_bytes():
+    try:
+        with open('/proc/self/status', 'r') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        return None
+    return None
+
+
+def _write_resource_sample(args, sample):
+    if not getattr(args, 'resource_log', ''):
+        return
+    path = Path(args.resource_log)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a') as f:
+        f.write(json.dumps(sample, sort_keys=True) + '\n')
+
+
+def _agentguard_stats(tracker):
+    adapter = getattr(tracker, 'agentguard_adapter', None)
+    runtime = getattr(adapter, 'runtime', None) if adapter is not None else None
+    stats = getattr(runtime, 'stats', None) if runtime is not None else None
+    if stats is None:
+        return {}
+    return {f"agentguard_{key}": value for key, value in stats.summary().items()}
+
+
+def _detection_cache_split(mode):
+    if mode in ('val', 'val_custom', 'train', 'train_custom', 'all'):
+        return 'all' if mode == 'all' else 'train'
+    return mode
+
+
+def _sequence_detection_cache_dir(args, vid_name):
+    return (
+        Path(args.detection_cache_root)
+        / args.dataset
+        / _detection_cache_split(args.mode)
+        / vid_name
+    )
+
+
+def _has_sequence_detection_cache(args):
+    if not getattr(args, 'sequences', None):
+        return False
+    return all((_sequence_detection_cache_dir(args, seq) / 'manifest.json').is_file() for seq in args.sequences)
+
+
+def _collect_frame_results(args, data_path, track_results):
+    x1y1whs, track_ids, scores = [], [], []
+    for t in track_results:
+        if 'MOT' in data_path and t.x1y1wh[2] / t.x1y1wh[3] > 1.6:
+            continue
+        if t.track_id > 0 and t.x1y1wh[2] * t.x1y1wh[3] > args.min_box_area:
+            x1y1whs.append(t.x1y1wh)
+            track_ids.append(t.track_id)
+            scores.append(t.score)
+    return x1y1whs, track_ids, scores
+
+
+def track_mmap_sequences(data_path, result_folder, mode):
+    from agentguard.data.detection_cache import SequenceDetectionCache
+
+    total_time, total_count = 0, 0
+    for vid_name in tqdm(args.sequences, desc="Processing videos", unit="video"):
+        set_parameters(args, vid_name, mode)
+        with open(data_path + vid_name + '/seqinfo.ini', mode='r') as seq_info:
+            for s_i in seq_info.readlines():
+                if 'frameRate' in s_i:
+                    args.max_time_lost = int(s_i.split('=')[-1]) * 2
+                if 'imWidth' in s_i:
+                    args.img_w = int(s_i.split('=')[-1])
+                if 'imHeight' in s_i:
+                    args.img_h = int(s_i.split('=')[-1])
+
+        seq_cache_dir = _sequence_detection_cache_dir(args, vid_name)
+        det_cache = SequenceDetectionCache(seq_cache_dir, frame_array_cache_size=4)
+        tracker = Tracker(args, vid_name)
+        results = []
+        start_read = _proc_io_read_bytes()
+        start_rss = _proc_rss_bytes()
+        sequence_start = time.time()
+        try:
+            frame_count = det_cache.num_frames
+            if args.max_frames and args.max_frames > 0:
+                frame_count = min(frame_count, int(args.max_frames))
+            _write_resource_sample(args, {
+                'event': 'sequence_start',
+                'sequence': vid_name,
+                'mode': args.agentguard_mode,
+                'frame': 0,
+                'rss_bytes': start_rss,
+                'read_bytes': start_read,
+                'num_frames': frame_count,
+            })
+            for frame_index in tqdm(range(frame_count), desc=f"  {vid_name}", leave=False, unit="frame"):
+                frame_id = frame_index + 1
+                target = det_cache.get_frame(frame_index, view='target')
+                source = det_cache.get_frame(frame_index, view='source')
+                args.agentguard_target_detection_indices = target['detection_indices']
+                args.agentguard_source_detection_indices = source['detection_indices']
+                det_frame = det_cache.get_frame_array(frame_index, view='target')
+                det_frame_95 = det_cache.get_frame_array(frame_index, view='source')
+
+                start = time.time()
+                if det_frame is not None and len(det_frame) > 0:
+                    det_frame = inject_detection_noise(
+                        det_frame,
+                        noise_pos_std=args.noise_pos_std,
+                        noise_size_std=args.noise_size_std,
+                        drop_rate=args.drop_rate,
+                    )
+                    track_results = tracker.update(det_frame, det_frame_95)
+                else:
+                    track_results = tracker.update_without_detections()
+                total_time += time.time() - start
+                total_count += 1
+
+                x1y1whs, track_ids, scores = _collect_frame_results(args, data_path, track_results)
+                results.append([frame_id, track_ids, x1y1whs, scores])
+
+                if (
+                    getattr(args, 'resource_log', '')
+                    and args.profile_every > 0
+                    and (frame_id == 1 or frame_id % args.profile_every == 0 or frame_id == frame_count)
+                ):
+                    read_now = _proc_io_read_bytes()
+                    rss_now = _proc_rss_bytes()
+                    _write_resource_sample(args, {
+                        'event': 'frame',
+                        'sequence': vid_name,
+                        'mode': args.agentguard_mode,
+                        'frame': frame_id,
+                        'elapsed_sec': time.time() - sequence_start,
+                        'rss_bytes': rss_now,
+                        'rss_delta_bytes': None if start_rss is None or rss_now is None else rss_now - start_rss,
+                        'read_bytes': read_now,
+                        'read_delta_bytes': None if start_read is None or read_now is None else read_now - start_read,
+                        'active_tracks': len(getattr(tracker, 'tracks', [])),
+                        'outputs': len(track_results),
+                        **_agentguard_stats(tracker),
+                    })
+
+            result_filename = os.path.join(result_folder, '{}.txt'.format(vid_name))
+            write_results(result_filename, results)
+        finally:
+            args.agentguard_target_detection_indices = None
+            args.agentguard_source_detection_indices = None
+            det_cache.close()
+            del tracker
+            del det_cache
+            gc.collect()
+
+    return total_time, total_count
 
 
 def track(detections, detections_95, data_path, result_folder, mode):
@@ -174,17 +409,7 @@ def track(detections, detections_95, data_path, result_folder, mode):
             total_count += 1
 
             # Filter out the results
-            x1y1whs, track_ids, scores = [], [], []
-            for t in track_results:
-                # Check aspect ratio
-                if 'MOT' in data_path and t.x1y1wh[2] / t.x1y1wh[3] > 1.6:
-                    continue
-
-                # Check track id, minimum box area
-                if t.track_id > 0 and t.x1y1wh[2] * t.x1y1wh[3] > args.min_box_area:
-                    x1y1whs.append(t.x1y1wh)
-                    track_ids.append(t.track_id)
-                    scores.append(t.score)
+            x1y1whs, track_ids, scores = _collect_frame_results(args, data_path, track_results)
 
             # Merge
             results.append([frame_id, track_ids, x1y1whs, scores])
@@ -221,17 +446,27 @@ def run():
     os.makedirs(result_folder, exist_ok=True)
     os.makedirs(result_folder_base + '_post/', exist_ok=True)
 
-    # Read detection result
-    detections, detections_95 = load_detection_pair(args.target_pickle_path, args.pickle_path_95)
+    if _has_sequence_detection_cache(args):
+        print(f"Using per-sequence mmap detection cache from {args.detection_cache_root}")
+        total_time, total_count = track_mmap_sequences(args.data_path, result_folder, args.mode)
+    else:
+        # Read detection result.  This legacy path may load large pickle files.
+        # Single-sequence AgentGuard experiments should use the mmap detection
+        # cache path above to avoid desktop stalls from repeated monolithic IO.
+        detections, detections_95 = load_detection_pair(
+            args.target_pickle_path,
+            args.pickle_path_95,
+            sequence_names=args.sequences,
+        )
 
-    # Filter sequences if specified
-    if args.sequences:
-        detections = {k: v for k, v in detections.items() if k in args.sequences}
-        detections_95 = {k: v for k, v in detections_95.items() if k in args.sequences}
-        print(f"Filtered to sequences: {list(detections.keys())}")
+        # Filter sequences if specified
+        if args.sequences:
+            detections = {k: v for k, v in detections.items() if k in args.sequences}
+            detections_95 = {k: v for k, v in detections_95.items() if k in args.sequences}
+            print(f"Filtered to sequences: {list(detections.keys())}")
 
-    # Track
-    total_time, total_count = track(detections, detections_95, args.data_path, result_folder, args.mode)
+        # Track
+        total_time, total_count = track(detections, detections_95, args.data_path, result_folder, args.mode)
 
     # Post-processing
     if args.use_post:
@@ -264,7 +499,7 @@ def run():
                 shutil.copy(path_in, path_out)
 
     # Evaluation
-    if args.mode != "test":
+    if args.mode != "test" and not getattr(args, 'skip_eval', False):
         print('Evaluating...')
         eval_tracker = trackers_to_eval + '_post' if args.use_post else trackers_to_eval
         if args.sequences:
@@ -295,6 +530,10 @@ if __name__ == "__main__":
     random.seed(args.seed)
     np.random.seed(args.seed)
     os.environ["PYTHONHASHSEED"] = str(args.seed)
+    if args.torch_num_threads and args.torch_num_threads > 0:
+        torch.set_num_threads(args.torch_num_threads)
+    if args.torch_num_interop_threads and args.torch_num_interop_threads > 0:
+        torch.set_num_interop_threads(args.torch_num_interop_threads)
 
     # Run
     run()

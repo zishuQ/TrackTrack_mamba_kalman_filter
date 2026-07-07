@@ -46,3 +46,12 @@ def test_cache_dir_uses_resolved_split():
     path = _cache_dir("MOT17", "val")
     assert "val" in path
     assert "MOT17" in path
+
+
+def test_candidate_type_defaults_are_a_only():
+    from agentguard.cli import _label_mode_name, _parse_candidate_types
+
+    assert _parse_candidate_types("") == {"A"}
+    assert _parse_candidate_types("A") == {"A"}
+    assert _label_mode_name("all", "A") == "all_a_only"
+    assert _label_mode_name("all", "A,B,C") == "all"

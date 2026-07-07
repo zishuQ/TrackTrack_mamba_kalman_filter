@@ -23,6 +23,7 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -120,6 +121,132 @@ def _datasets_dir(dataset: str) -> str:
     return os.path.join(_outputs_dir(), "agentguard", "datasets", dataset)
 
 
+def _parse_candidate_types(value: str) -> set[str]:
+    types = {item.strip().upper() for item in str(value).split(",") if item.strip()}
+    invalid = types.difference({"A", "B", "C"})
+    if invalid:
+        raise ValueError(f"Unknown candidate type(s): {sorted(invalid)}")
+    return types or {"A"}
+
+
+def _parse_candidate_weights(value: str) -> dict[str, float]:
+    weights = {"A": 1.0, "B": 1.0, "C": 1.0}
+    for part in str(value).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise ValueError(f"Invalid candidate weight {part!r}; expected A:1,B:0.5,C:0.5")
+        key, raw_weight = part.split(":", 1)
+        key = key.strip().upper()
+        if key not in weights:
+            raise ValueError(f"Unknown candidate type in weight: {key!r}")
+        weights[key] = float(raw_weight)
+    return weights
+
+
+def _label_mode_name(mode: str, candidate_types: str) -> str:
+    allowed = _parse_candidate_types(candidate_types)
+    return f"{mode}_a_only" if allowed == {"A"} else mode
+
+
+def _stable_record_key(record: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(record.get("sequence", "")),
+            str(record.get("event_id", "")),
+            str(record.get("candidate_type", "A")),
+            str(record.get("candidate_detection_index", -1)),
+        ]
+    )
+
+
+def _filter_and_weight_student_records(
+    records: list[dict[str, Any]],
+    *,
+    candidate_types: str,
+    candidate_weights: str,
+    max_per_candidate_type: int,
+) -> list[dict[str, Any]]:
+    allowed = _parse_candidate_types(candidate_types)
+    weights = _parse_candidate_weights(candidate_weights)
+    grouped: dict[str, list[dict[str, Any]]] = {"A": [], "B": [], "C": []}
+    for record in records:
+        ctype = str(record.get("candidate_type", "A")).upper()
+        if ctype not in allowed:
+            continue
+        weight = float(weights.get(ctype, 1.0))
+        if weight <= 0:
+            continue
+        copied = dict(record)
+        copied["candidate_type"] = ctype
+        copied["sample_weight"] = float(copied.get("sample_weight", 1.0)) * weight
+        grouped.setdefault(ctype, []).append(copied)
+
+    selected: list[dict[str, Any]] = []
+    for ctype in sorted(grouped):
+        bucket = grouped[ctype]
+        if max_per_candidate_type > 0 and len(bucket) > max_per_candidate_type:
+            bucket = sorted(
+                bucket,
+                key=lambda r: hashlib.sha256(_stable_record_key(r).encode()).hexdigest(),
+            )[:max_per_candidate_type]
+        selected.extend(bucket)
+    selected.sort(key=_stable_record_key)
+    return selected
+
+
+def _stratified_record_sample(records: list[dict[str, Any]], max_samples: int) -> list[dict[str, Any]]:
+    if max_samples <= 0 or len(records) <= max_samples:
+        return records
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for record in records:
+        key = (str(record.get("sequence", "")), str(record.get("candidate_type", "A")).upper())
+        groups.setdefault(key, []).append(record)
+    selected: list[dict[str, Any]] = []
+    remaining = int(max_samples)
+    sorted_groups = sorted(groups.items(), key=lambda item: item[0])
+    for idx, (_, bucket) in enumerate(sorted_groups):
+        groups_left = len(sorted_groups) - idx
+        take = min(len(bucket), max(1, remaining // max(groups_left, 1)))
+        ordered = sorted(
+            bucket,
+            key=lambda r: hashlib.sha256(_stable_record_key(r).encode()).hexdigest(),
+        )
+        selected.extend(ordered[:take])
+        remaining -= take
+        if remaining <= 0:
+            break
+    selected = selected[:max_samples]
+    selected.sort(key=_stable_record_key)
+    return selected
+
+
+def _seed_training(seed: int) -> None:
+    random.seed(int(seed))
+    np.random.seed(int(seed))
+    try:
+        import torch
+
+        torch.manual_seed(int(seed))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(int(seed))
+    except Exception:
+        pass
+
+
+def _gt_root_for_dataset_mode(data_dir: str, dataset: str, mode: str) -> str:
+    split = _resolve_split(mode)
+    lowered = dataset.lower()
+    if "dance" in lowered:
+        if split in {"val", "test", "train"}:
+            return os.path.join(data_dir, dataset, split)
+        return os.path.join(data_dir, dataset, "train")
+    if "mot" in lowered:
+        return os.path.join(data_dir, dataset, "train")
+    return os.path.join(data_dir, dataset, split)
+
+
 def _teacher_dir(dataset: str) -> str:
     return os.path.join(_outputs_dir(), "agentguard", "teacher_outputs", dataset)
 
@@ -183,11 +310,17 @@ def _resolve_detection_cache_sequences(
             manifest = json.load(f)
         sequences = sorted((manifest.get("sequences") or {}).keys())
         if split != "all":
-            base_ids = set(_resolve_sequences(dataset, mode))
-            sequences = [s for s in sequences if _base_sequence_id(s) in base_ids]
+            try:
+                base_ids = set(_resolve_sequences(dataset, mode))
+            except FileNotFoundError:
+                base_ids = set()
+            if base_ids:
+                sequences = [s for s in sequences if _base_sequence_id(s) in base_ids]
     if detector:
         suffix = f"-{detector}"
-        sequences = [s for s in sequences if s.endswith(suffix)]
+        filtered = [s for s in sequences if s.endswith(suffix)]
+        if filtered:
+            sequences = filtered
     return sequences
 
 
@@ -803,7 +936,14 @@ def _add_build_rollout_labels_parser(subparsers: argparse._SubParsersAction) -> 
         choices=["val", "val_custom", "train_custom", "all", "test"],
         help="Dataset split mode.",
     )
-    p.add_argument("--max-events", type=int, default=0, help="Limit events (0=all).")
+    p.add_argument("--sequence", type=str, default=None, help="Single sequence to process.")
+    p.add_argument("--max-events", type=int, default=0, help="Limit labels per run (0=all).")
+    p.add_argument("--future-frames", type=int, default=5, help="Future rollout frames.")
+    p.add_argument(
+        "--data-dir",
+        default=os.environ.get("TRACKTRACK_DATA_DIR", "/home/shang/datasets/"),
+        help="Root directory containing MOT datasets.",
+    )
     p.add_argument(
         "--event-cache-root",
         default=os.path.join(PROJECT_ROOT, "outputs", "agentguard", "event_cache"),
@@ -812,242 +952,87 @@ def _add_build_rollout_labels_parser(subparsers: argparse._SubParsersAction) -> 
         "--detection-cache-root",
         default=os.path.join(PROJECT_ROOT, "outputs", "agentguard", "detection_cache"),
     )
+    p.add_argument("--label-dir", default=None, help="Override rollout label directory.")
+    p.add_argument("--output-dir", default=None, help="Override Student-V0 dataset index directory.")
+    p.add_argument(
+        "--candidate-types",
+        default="A",
+        help="Comma-separated candidate types to include. Default A; pass A,B,C for TrackTrack-specific ablations.",
+    )
+    p.add_argument(
+        "--candidate-weights",
+        default="A:1",
+        help="Per-candidate sample weights, e.g. A:1,B:0.5,C:0.25.",
+    )
+    p.add_argument(
+        "--max-per-candidate-type",
+        type=int,
+        default=0,
+        help="Deterministically cap each candidate type before splitting (0=all).",
+    )
 
 
 def _cmd_build_rollout_labels(args: argparse.Namespace) -> None:
-    from agentguard.contracts.events import TrackEvent
-    from agentguard.data.cache_reader import EventCacheReader
-    from agentguard.data.gt_reader import GTReader
-    from agentguard.data.future_oracle import FutureOracleBuilder
-    from agentguard.data.identity_prototype import IdentityPrototypeBuilder
-    from agentguard.motion.nsa_numpy import NSAKalmanFilter
-    from agentguard.rollout.motion import compute_motion_benefit
-    from agentguard.rollout.appearance import compute_appearance_benefit
-    from agentguard.labels import (
-        compute_dataset_stats,
-        compute_soft_targets,
-        build_rollout_labels as _build_rollout_labels,
-    )
+    from agentguard.v0_pipeline import build_compact_rollout_labels_for_sequence
 
     dataset = args.dataset
     mode = args.mode
+    split = _resolve_split(mode)
     cache_root = _event_cache_dir(dataset, mode, args.event_cache_root)
     label_dir = _ensure_dir(_labels_dir(dataset))
-
-    # Set env var used by compute_dataset_stats
     os.environ["AG_GUARD_DATASET"] = dataset
+    candidate_types = _parse_candidate_types(args.candidate_types)
 
-    sequences = sorted(
-        d
-        for d in os.listdir(cache_root)
-        if os.path.isdir(os.path.join(cache_root, d))
+    if not os.path.isdir(cache_root):
+        raise FileNotFoundError(f"Event cache split directory not found: {cache_root}")
+
+    sequences = [args.sequence] if args.sequence else sorted(
+        d for d in os.listdir(cache_root)
+        if os.path.isdir(os.path.join(cache_root, d)) and not d.startswith("_")
     )
-
-    all_events: List[TrackEvent] = []
-    all_motion_benefits: List[float] = []
-    all_appearance_benefits: List[float] = []
-    all_identity_prototypes: Dict[Any, np.ndarray] = {}
-
-    motion_model = NSAKalmanFilter()
-
-    total_processed = 0
+    label_mode = _label_mode_name(mode, args.candidate_types)
+    labels_out = _ensure_dir(args.label_dir or os.path.join(label_dir, label_mode))
+    gt_root = _gt_root_for_dataset_mode(args.data_dir, dataset, mode)
+    total_labels = 0
+    sequence_summaries: Dict[str, Dict[str, Any]] = {}
+    remaining = int(args.max_events)
 
     for seq in sequences:
-        seq_dir = os.path.join(cache_root, seq)
-        try:
-            reader = EventCacheReader(seq_dir)
-            manifest = reader.read_manifest()
-            events = reader.read_events()
-            frames_list = reader.read_frames()
-            prototypes = reader.read_identity_prototypes()
-        except Exception as e:
-            print(f"  SKIP {seq}: {e}")
-            continue
-
-        if not events:
-            continue
-
-        # Convert frames list to dict keyed by frame_id
-        frame_data: Dict[int, Any] = {}
-        if isinstance(frames_list, list):
-            for fr in frames_list:
-                if isinstance(fr, dict):
-                    frame_data[fr.get("frame_id", -1)] = fr
-        else:
-            frame_data = frames_list
-
-        # Build future oracle data
-        try:
-            gt_reader = GTReader(manifest.dataset, seq)
-        except Exception:
-            gt_reader = None
-
-        # Identity vote state for resolving target_gt_id
-        from agentguard.data.identity_vote import TrackIdentityVoteState
-        identity_vote = TrackIdentityVoteState()
-
-        all_frame_detections: Dict[int, List[Tuple[np.ndarray, float, int]]] = {}
-        for fid, fdata in frame_data.items():
-            all_frame_detections[fid] = []
-
-        warp_by_frame: Dict[int, np.ndarray] = {}
-        for fid, fdata in frame_data.items():
-            wm = fdata.get("warp_matrix")
-            if wm is not None:
-                warp_by_frame[fid] = np.asarray(wm, dtype=np.float64)
-            else:
-                warp_by_frame[fid] = np.eye(2, 3, dtype=np.float64)
-
-        oracle_builder = FutureOracleBuilder(warp_by_frame)
-        frame_ids = sorted(frame_data.keys())
-
-        all_identity_prototypes.update(prototypes)
-
-        # Helper to compute IoU between two boxes
-        def _box_iou(a, b):
-            x1 = max(float(a[0]), float(b[0]))
-            y1 = max(float(a[1]), float(b[1]))
-            x2 = min(float(a[2]), float(b[2]))
-            y2 = min(float(a[3]), float(b[3]))
-            inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
-            area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
-            area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
-            union = area_a + area_b - inter
-            return 0.0 if union <= 0.0 else inter / union
-
-        for evt in events:
-            if args.max_events > 0 and total_processed >= args.max_events:
+        seq_event_dir = os.path.join(cache_root, seq)
+        seq_det_dir = os.path.join(args.detection_cache_root, dataset, split, seq)
+        if not os.path.isdir(seq_det_dir):
+            raise FileNotFoundError(f"Detection cache for {seq} not found: {seq_det_dir}")
+        limit = remaining if remaining > 0 else 0
+        labels, seq_summary = build_compact_rollout_labels_for_sequence(
+            seq_event_dir,
+            seq_det_dir,
+            gt_root,
+            max_events=limit,
+            future_frames=args.future_frames,
+            candidate_types=candidate_types,
+        )
+        if labels:
+            seq_path = os.path.join(labels_out, f"{seq}_labels.json")
+            with open(seq_path, "w") as f:
+                json.dump(labels, f, indent=2, default=str)
+        sequence_summaries[seq] = seq_summary
+        total_labels += len(labels)
+        if remaining > 0:
+            remaining -= len(labels)
+            if remaining <= 0:
                 break
 
-            # Resolve target_gt_id from identity vote state
-            target_gt_id = None
-            if gt_reader is not None:
-                target_gt_id = identity_vote.resolve_before_current(evt.sequence, evt.track_id)
-
-                # Determine detection GT ID for current event to feed vote state
-                detection_gt_id = -1
-                if evt.has_detection and evt.detection is not None:
-                    det_box = evt.detection.box
-                    gt_entries = gt_reader.get_gt_for_frame(evt.frame_id)
-                    best_iou = 0.5  # threshold
-                    for gt_box, gt_id in gt_entries:
-                        iou = _box_iou(det_box, gt_box)
-                        if iou > best_iou:
-                            best_iou = iou
-                            detection_gt_id = gt_id
-                identity_vote.add_current_observation(evt.sequence, evt.track_id, detection_gt_id)
-
-            # Get identity prototype by (seq, target_gt_id)
-            proto = None
-            identity_key = (seq, target_gt_id) if target_gt_id is not None else None
-            if identity_key is not None:
-                proto = all_identity_prototypes.get(identity_key)
-
-            # Build oracle data with target_gt_id
-            if gt_reader is not None and target_gt_id is not None:
-                oracle_data = oracle_builder.build(
-                    evt, gt_reader, all_frame_detections, frame_ids,
-                    target_gt_id=target_gt_id,
-                )
-            else:
-                oracle_data = None
-
-            if oracle_data is None:
-                oracle_data = {
-                    "current_gt_box": None,
-                    "future_gt_boxes": [],
-                    "future_oracle_detections": [],
-                    "future_warp_matrices": [],
-                }
-
-            # Build RolloutContext for benefit computation
-            from agentguard.rollout.context import RolloutContext
-
-            ctx = RolloutContext(
-                frame_id=evt.frame_id,
-                target_gt_id=target_gt_id if target_gt_id is not None else -1,
-                pre_update_state=evt.pre_update_state if evt.pre_update_state is not None
-                else evt.frame_start_state,
-                current_candidate=evt.detection,
-                current_gt_box=oracle_data.get("current_gt_box"),
-                future_gt_boxes=oracle_data.get("future_gt_boxes", []),
-                future_oracle_detections=oracle_data.get("future_oracle_detections", []),
-                future_warp_matrices=oracle_data.get("future_warp_matrices", []),
-                identity_prototype=proto,
-            )
-
-            # Compute benefits
-            try:
-                B_m, write_losses, skip_losses, valid_m = compute_motion_benefit(
-                    ctx, motion_model
-                )
-                B_a, _, _, _, _, valid_a = compute_appearance_benefit(ctx)
-            except Exception as e:
-                print(f"  WARN: benefit computation failed for {evt.event_id}: {e}")
-                total_processed += 1
-                continue
-
-            all_events.append(evt)
-            all_motion_benefits.append(B_m)
-            all_appearance_benefits.append(B_a)
-
-            # Attach future oracle data to event for downstream use
-            evt.motion_rollout_target = float(compute_soft_targets(B_m, 0.01))
-            evt.appearance_rollout_target = float(compute_soft_targets(B_a, 0.01))
-            oracle_boxes = oracle_data.get("future_oracle_detections", [])
-            evt.future_oracle_coverage = (
-                sum(1 for b in oracle_boxes if b is not None) / max(len(oracle_boxes), 1)
-            )
-
-            total_processed += 1
-
-        if args.max_events > 0 and total_processed >= args.max_events:
-            break
-
-    print(f"Processed {total_processed} events total.")
-
-    if not all_events:
-        print("No events processed. Nothing to save.")
-        return
-
-    # Compute dataset stats
-    all_benefits = {
-        "motion_benefits": all_motion_benefits,
-        "appearance_benefits": all_appearance_benefits,
-    }
-    dataset_stats = compute_dataset_stats(all_benefits)
-
-    # Build labels
-    labels = _build_rollout_labels(
-        all_events,
-        all_motion_benefits,
-        all_appearance_benefits,
-        dataset_stats,
-        all_identity_prototypes,
-    )
-
-    # Save labels per sequence
-    seq_labels: Dict[str, List[Dict[str, Any]]] = {}
-    for evt, label in zip(all_events, labels):
-        seq_labels.setdefault(evt.sequence, []).append(label)
-
-    labels_out = _ensure_dir(os.path.join(label_dir, mode))
-    for seq, seq_lbls in seq_labels.items():
-        seq_path = os.path.join(labels_out, f"{seq}_labels.json")
-        with open(seq_path, "w") as f:
-            json.dump(seq_lbls, f, indent=2, default=str)
-
-    # Save summary
     summary = {
         "dataset": dataset,
         "mode": mode,
-        "num_events": len(all_events),
-        "num_sequences": len(seq_labels),
-        "dataset_stats": dataset_stats,
-        "mean_motion_benefit": float(np.mean(all_motion_benefits)),
-        "mean_appearance_benefit": float(np.mean(all_appearance_benefits)),
+        "split": split,
+        "label_mode": label_mode,
+        "candidate_types": sorted(candidate_types),
+        "num_labels": total_labels,
+        "num_sequences": len(sequence_summaries),
+        "sequences": sequence_summaries,
     }
-    summary_path = os.path.join(label_dir, f"{mode}_summary.json")
+    summary_path = os.path.join(label_dir, f"{label_mode}_summary.json")
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2, default=str)
 
@@ -1326,156 +1311,139 @@ def _add_build_student_v0_data_parser(subparsers: argparse._SubParsersAction) ->
     p.add_argument("--dataset", default="MOT17", help="Dataset name.")
     p.add_argument(
         "--mode",
-        default="train_custom",
+        default="all",
         help="Mode used for label loading.",
+    )
+    p.add_argument("--max-samples", type=int, default=0, help="Limit indexed labels (0=all).")
+    p.add_argument(
+        "--split-policy",
+        choices=["sequence_holdout", "train_all"],
+        default="sequence_holdout",
+        help=(
+            "Student-V0 split policy. sequence_holdout keeps a deterministic "
+            "sequence-level validation split; train_all puts every record in "
+            "train and mirrors it to val for upper-bound experiments."
+        ),
+    )
+    p.add_argument(
+        "--event-cache-root",
+        default=os.path.join(PROJECT_ROOT, "outputs", "agentguard", "event_cache"),
+    )
+    p.add_argument(
+        "--detection-cache-root",
+        default=os.path.join(PROJECT_ROOT, "outputs", "agentguard", "detection_cache"),
+    )
+    p.add_argument("--label-dir", default=None, help="Override rollout label directory.")
+    p.add_argument("--output-dir", default=None, help="Override Student-V0 dataset index directory.")
+    p.add_argument(
+        "--candidate-types",
+        default="A",
+        help="Comma-separated candidate types to include. Default A; pass A,B,C for TrackTrack-specific ablations.",
+    )
+    p.add_argument(
+        "--candidate-weights",
+        default="A:1",
+        help="Per-candidate sample weights, e.g. A:1,B:0.5,C:0.25.",
+    )
+    p.add_argument(
+        "--max-per-candidate-type",
+        type=int,
+        default=0,
+        help="Deterministically cap each candidate type before splitting (0=all).",
     )
 
 
 def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
-    from agentguard.contracts.events import TrackEvent
-    from agentguard.data.cache_reader import EventCacheReader
-    from agentguard.features.builder import EventFeatureBuilder
-    from agentguard.features.normalization import NormalizationStats
-    from agentguard.datasets.iwg_dataset import IWGDataset
-    from agentguard.datasets.tgr_dataset import TGRDataset
-    from agentguard.datasets.split_validation import validate_splits
+    import numpy as np
+
+    from agentguard.v0_pipeline import (
+        fit_norm_stats_from_records,
+        load_label_records,
+        write_jsonl,
+    )
 
     dataset = args.dataset
     mode = args.mode
-    cache_root = _cache_dir(dataset, mode)
-    label_dir = os.path.join(_labels_dir(dataset), mode)
-    datasets_dir = _ensure_dir(_datasets_dir(dataset))
+    split = _resolve_split(mode)
+    label_mode = _label_mode_name(mode, args.candidate_types)
+    label_dir = args.label_dir or os.path.join(_labels_dir(dataset), label_mode)
+    datasets_dir = _ensure_dir(args.output_dir or os.path.join(_datasets_dir(dataset), mode))
+    if not os.path.isdir(label_dir):
+        raise FileNotFoundError(f"Label directory not found: {label_dir}. Run build_rollout_labels first.")
 
-    # Read all events and labels
-    sequences = sorted(
-        d
-        for d in os.listdir(cache_root)
-        if os.path.isdir(os.path.join(cache_root, d))
+    records = load_label_records(label_dir, max_samples=args.max_samples)
+    records = [r for r in records if r.get("valid_motion") or r.get("valid_appearance")]
+    records = _filter_and_weight_student_records(
+        records,
+        candidate_types=args.candidate_types,
+        candidate_weights=args.candidate_weights,
+        max_per_candidate_type=args.max_per_candidate_type,
+    )
+    if not records:
+        raise RuntimeError("No valid rollout labels loaded.")
+
+    seq_names = sorted({r["sequence"] for r in records})
+    if args.split_policy == "train_all":
+        train_seqs = set(seq_names)
+        val_seqs = set(seq_names)
+        train_records = list(records)
+        val_records = list(records)
+    else:
+        rng = np.random.default_rng(42)
+        shuffled = list(seq_names)
+        rng.shuffle(shuffled)
+        if len(shuffled) == 1:
+            train_seqs = set(shuffled)
+            val_seqs = set(shuffled)
+        else:
+            split_idx = max(1, int(len(shuffled) * 0.8))
+            train_seqs = set(shuffled[:split_idx])
+            val_seqs = set(shuffled[split_idx:])
+        train_records = [r for r in records if r["sequence"] in train_seqs]
+        val_records = [r for r in records if r["sequence"] in val_seqs]
+    norm_stats = fit_norm_stats_from_records(
+        train_records,
+        args.event_cache_root,
+        args.detection_cache_root,
+        dataset,
+        split,
     )
 
-    all_events: List[TrackEvent] = []
-    all_labels: List[Dict[str, Any]] = []
+    write_jsonl(os.path.join(datasets_dir, "train_index.jsonl"), train_records)
+    write_jsonl(os.path.join(datasets_dir, "val_index.jsonl"), val_records)
+    norm_path = os.path.join(datasets_dir, "norm_stats.npz")
+    norm_stats.save(norm_path)
 
-    for seq in sequences:
-        seq_dir = os.path.join(cache_root, seq)
-        try:
-            reader = EventCacheReader(seq_dir)
-            events = reader.read_events()
-        except Exception as e:
-            print(f"  SKIP {seq}: {e}")
-            continue
-
-        # Load labels for this sequence
-        seq_label_path = os.path.join(label_dir, f"{seq}_labels.json")
-        if os.path.isfile(seq_label_path):
-            with open(seq_label_path) as f:
-                seq_labels = json.load(f)
-        else:
-            print(f"  WARN: no labels for {seq}, skipping.")
-            continue
-
-        # Build label lookup by (event_id, candidate_type)
-        label_by_key = {}
-        for lbl in seq_labels:
-            key = (lbl.get("event_id", ""), lbl.get("candidate_type", "A"))
-            label_by_key[key] = lbl
-
-        for evt in events:
-            key = (evt.event_id, getattr(evt, 'candidate_type', 'A'))
-            if key not in label_by_key:
-                raise ValueError(f"Missing label for event {key}")
-            all_events.append(evt)
-            all_labels.append(label_by_key[key])
-
-    if not all_events:
-        print("No events/labels loaded.")
-        return
-
-    print(f"Loaded {len(all_events)} events with labels.")
-
-    # Build feature builder
-    reid_dim = 2048
-    norm_stats = NormalizationStats()
-    scalar_list = [evt.scalar_features for evt in all_events if evt.scalar_features is not None]
-    if scalar_list:
-        norm_stats.fit(scalar_list)
-    feature_builder = EventFeatureBuilder(reid_dim, norm_stats)
-
-    # Split sequences into train/val (80/20 by sequence)
-    seq_names = list({evt.sequence for evt in all_events})
-    np.random.shuffle(seq_names)
-    split_idx = max(1, int(len(seq_names) * 0.8))
-    train_seqs = set(seq_names[:split_idx])
-    val_seqs = set(seq_names[split_idx:])
-
-    train_events = [evt for evt in all_events if evt.sequence in train_seqs]
-    val_events = [evt for evt in all_events if evt.sequence in val_seqs]
-    train_labels = [lbl for evt, lbl in zip(all_events, all_labels) if evt.sequence in train_seqs]
-    val_labels = [lbl for evt, lbl in zip(all_events, all_labels) if evt.sequence in val_seqs]
-
-    # Validate split
-    try:
-        validate_splits(train_events, val_events)
-        print("Split validation passed.")
-    except ValueError as e:
-        print(f"Split validation warning: {e}")
-
-    # Build IWG datasets
-    print("Building IWG datasets...")
-    train_iwg = IWGDataset(train_events, train_labels, feature_builder)
-    val_iwg = IWGDataset(val_events, val_labels, feature_builder)
-
-    # Build TGR datasets
-    print("Building TGR datasets...")
-    train_tgr = TGRDataset(train_events, train_labels, feature_builder)
-    val_tgr = TGRDataset(val_events, val_labels, feature_builder)
-
-    # Save datasets as sharded torch files
-    def _save_dataset(ds: Any, path: str, name: str) -> None:
-        out_dir = _ensure_dir(os.path.join(path, name))
-        # Save feature builder config
-        import torch
-
-        # Save events and labels indices
-        indices = list(range(len(ds)))
-        torch.save(indices, os.path.join(out_dir, "indices.pt"))
-
-        # Save metadata
-        meta = {
-            "type": ds.__class__.__name__,
-            "size": len(ds),
-            "window_size": getattr(ds, "window_size", None),
-            "max_history": getattr(ds, "max_history", None),
-        }
-        with open(os.path.join(out_dir, "metadata.json"), "w") as f:
-            json.dump(meta, f, indent=2)
-        print(f"  Saved {name} ({len(ds)} samples) to {out_dir}")
-
-    iwg_dir = os.path.join(datasets_dir, "iwg")
-    _save_dataset(train_iwg, iwg_dir, "train")
-    _save_dataset(val_iwg, iwg_dir, "val")
-
-    tgr_dir = os.path.join(datasets_dir, "tgr")
-    _save_dataset(train_tgr, tgr_dir, "train")
-    _save_dataset(val_tgr, tgr_dir, "val")
-
-    # Save normalization stats
-    import torch
-
-    stats_path = os.path.join(datasets_dir, "norm_stats.pt")
-    torch.save({"mean": norm_stats.mean, "std": norm_stats.std}, stats_path)
-    print(f"Saved normalization stats to {stats_path}")
-
-    # Save split config
-    split_cfg = {
+    # Read reid_dim from the first sequence manifest.
+    first_seq = records[0]["sequence"]
+    with open(os.path.join(args.detection_cache_root, dataset, split, first_seq, "manifest.json")) as f:
+        det_manifest = json.load(f)
+    metadata = {
+        "dataset": dataset,
+        "mode": mode,
+        "split": split,
+        "label_mode": label_mode,
+        "event_cache_root": args.event_cache_root,
+        "detection_cache_root": args.detection_cache_root,
+        "label_dir": label_dir,
+        "reid_dim": int(det_manifest["reid_dim"]),
+        "scalar_dim": 63,
+        "event_dim": 128,
+        "num_records": len(records),
+        "num_train": len(train_records),
+        "num_val": len(val_records),
+        "split_policy": args.split_policy,
+        "candidate_types": sorted({str(r.get("candidate_type", "A")) for r in records}),
+        "candidate_weights": args.candidate_weights,
+        "max_per_candidate_type": int(args.max_per_candidate_type),
         "train_sequences": sorted(train_seqs),
         "val_sequences": sorted(val_seqs),
     }
-    with open(os.path.join(datasets_dir, "split.json"), "w") as f:
-        json.dump(split_cfg, f, indent=2)
+    with open(os.path.join(datasets_dir, "metadata.json"), "w") as f:
+        json.dump(metadata, f, indent=2, default=str)
 
-    print(f"IWG: {len(train_iwg)} train / {len(val_iwg)} val samples")
-    print(f"TGR: {len(train_tgr)} train / {len(val_tgr)} val samples")
+    print(json.dumps(metadata, indent=2))
+    print(f"Saved Student-V0 lazy indexes to {datasets_dir}")
 
 
 # ===================================================================
@@ -1489,10 +1457,34 @@ def _add_train_student_v0_parser(subparsers: argparse._SubParsersAction) -> None
         help="Train Student-V0 models (IWG first, then TGR).",
     )
     p.add_argument("--dataset", default="MOT17", help="Dataset name.")
+    p.add_argument("--mode", default="all", help="Dataset mode used by build_student_v0_data.")
     p.add_argument("--device", default="cuda", help="Device (cpu or cuda).")
-    p.add_argument("--epochs", type=int, default=30, help="Training epochs.")
-    p.add_argument("--batch-size", type=int, default=256, help="Batch size.")
+    p.add_argument("--epochs", type=int, default=1, help="Training epochs.")
+    p.add_argument("--batch-size", type=int, default=32, help="Batch size.")
     p.add_argument("--lr", type=float, default=3e-4, help="Learning rate.")
+    p.add_argument("--tgr-lr", type=float, default=None, help="TGR learning rate (defaults to --lr).")
+    p.add_argument("--num-workers", type=int, default=0, help="DataLoader worker count.")
+    p.add_argument("--seed", type=int, default=42, help="Random seed used before model initialisation.")
+    p.add_argument(
+        "--tgr-window-stride",
+        type=int,
+        default=1,
+        help="Stride between TGR training windows. 1 uses sliding windows; 4 uses non-overlapping 4-frame windows.",
+    )
+    p.add_argument(
+        "--val-max-samples",
+        type=int,
+        default=0,
+        help="Deterministically cap validation records for fast train_all experiments (0=all).",
+    )
+    p.add_argument("--dataset-dir", default=None, help="Override Student-V0 dataset index directory.")
+    p.add_argument("--checkpoint-dir", default=None, help="Override checkpoint output directory.")
+    p.add_argument(
+        "--full-val-every",
+        type=int,
+        default=0,
+        help="Run full validation every N epochs in addition to sampled validation (0=disabled).",
+    )
 
 
 def _cmd_train_student_v0(args: argparse.Namespace) -> None:
@@ -1504,121 +1496,131 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
     from agentguard.training.train_iwg import train_iwg
     from agentguard.training.train_tgr import train_tgr
     from agentguard.training.checkpointing import load_checkpoint
-    from agentguard.datasets.iwg_dataset import IWGDataset
-    from agentguard.datasets.tgr_dataset import TGRDataset
+    from agentguard.features.builder import EventFeatureBuilder
+    from agentguard.features.normalization import NormalizationStats
+    from agentguard.v0_pipeline import (
+        CompactV0IWGDataset,
+        CompactV0TGRDataset,
+        read_jsonl,
+    )
 
     dataset = args.dataset
+    mode = args.mode
     device = args.device if torch.cuda.is_available() and args.device == "cuda" else "cpu"
-    checkpoints_dir = _ensure_dir(_checkpoints_dir(dataset))
-    datasets_dir = _datasets_dir(dataset)
+    _seed_training(args.seed)
+    checkpoints_dir = _ensure_dir(args.checkpoint_dir or os.path.join(_checkpoints_dir(dataset), mode))
+    datasets_dir = args.dataset_dir or os.path.join(_datasets_dir(dataset), mode)
+    metadata_path = os.path.join(datasets_dir, "metadata.json")
+    if not os.path.isfile(metadata_path):
+        print(f"Student-V0 metadata not found at {metadata_path}. Run build_student_v0_data first.")
+        return
+    with open(metadata_path) as f:
+        metadata = json.load(f)
+
+    train_records = read_jsonl(os.path.join(datasets_dir, "train_index.jsonl"))
+    full_val_records = read_jsonl(os.path.join(datasets_dir, "val_index.jsonl"))
+    val_records = list(full_val_records)
+    if not train_records:
+        print("No Student-V0 training records.")
+        return
+    if not val_records:
+        full_val_records = train_records[: min(len(train_records), max(1, args.batch_size))]
+        val_records = list(full_val_records)
+    if args.val_max_samples and args.val_max_samples > 0 and len(val_records) > args.val_max_samples:
+        val_records = _stratified_record_sample(val_records, int(args.val_max_samples))
+
+    norm_stats = NormalizationStats.load(os.path.join(datasets_dir, "norm_stats.npz"))
+    reid_dim = int(metadata["reid_dim"])
+    feature_builder = EventFeatureBuilder(reid_dim, norm_stats)
 
     config = {
         "epochs": args.epochs,
         "batch_size": args.batch_size,
         "learning_rate": args.lr,
-        "reid_dim": 2048,
+        "reid_dim": reid_dim,
         "scalar_dim": 63,
         "event_dim": 128,
+        "amp": False,
+        "seed": int(args.seed),
+        "tgr_window_stride": max(int(args.tgr_window_stride), 1),
+        "early_stop_patience": max(2, args.epochs + 1),
+        "full_val_every": max(0, int(args.full_val_every)),
     }
-
-    # ---- Phase 1: Train IWG ----
     print("=" * 60)
     print("Phase 1: Training IWG")
     print("=" * 60)
 
-    # Load IWG datasets from saved indices
-    iwg_train_path = os.path.join(datasets_dir, "iwg", "train")
-    iwg_val_path = os.path.join(datasets_dir, "iwg", "val")
-
-    # In a full pipeline we'd reconstruct datasets from saved metadata.
-    # Here we build a fresh IWG model and use simulated training.
-    iwg_model = IWG(reid_dim=2048).to(device)
-
-    # Create dummy DataLoaders (real pipeline would load saved datasets)
-    from agentguard.features.builder import EventFeatureBuilder
-    from agentguard.features.normalization import NormalizationStats
-
-    norm_stats = NormalizationStats()
-    feature_builder = EventFeatureBuilder(2048, norm_stats)
-
-    # Try to load saved datasets
-    iwg_train_ds_path = os.path.join(iwg_train_path, "metadata.json")
-    iwg_val_ds_path = os.path.join(iwg_val_path, "metadata.json")
-
-    if not (os.path.isfile(iwg_train_ds_path) and os.path.isfile(iwg_val_ds_path)):
-        print("IWG dataset metadata not found. Run build_student_v0_data first.")
-        return
-
-    # Build datasets from cached events and labels
-    from agentguard.contracts.events import TrackEvent
-    from agentguard.data.cache_reader import EventCacheReader
-
-    cache_root = _cache_dir(dataset, "train_custom")
-    label_dir = os.path.join(_labels_dir(dataset), "train_custom")
-
-    with open(os.path.join(datasets_dir, "split.json")) as f:
-        split_cfg = json.load(f)
-    train_seqs = set(split_cfg.get("train_sequences", []))
-    val_seqs = set(split_cfg.get("val_sequences", []))
-
-    all_events: List[TrackEvent] = []
-    all_labels: List[Dict[str, Any]] = []
-
-    for seq in sorted(os.listdir(cache_root)):
-        if not os.path.isdir(os.path.join(cache_root, seq)):
-            continue
-        seq_label_path = os.path.join(label_dir, f"{seq}_labels.json")
-        if not os.path.isfile(seq_label_path):
-            continue
-        try:
-            reader = EventCacheReader(os.path.join(cache_root, seq))
-            events = reader.read_events()
-        except Exception:
-            continue
-        with open(seq_label_path) as f:
-            seq_labels = json.load(f)
-        # Build label lookup by (event_id, candidate_type)
-        label_by_key = {}
-        for lbl in seq_labels:
-            key = (lbl.get("event_id", ""), lbl.get("candidate_type", "A"))
-            label_by_key[key] = lbl
-        for evt in events:
-            key = (evt.event_id, getattr(evt, 'candidate_type', 'A'))
-            if key not in label_by_key:
-                raise ValueError(f"Missing label for event {key}")
-            all_events.append(evt)
-            all_labels.append(label_by_key[key])
-
-    train_evts = [evt for evt in all_events if evt.sequence in train_seqs]
-    val_evts = [evt for evt in all_events if evt.sequence in val_seqs]
-    train_lbls = [lbl for evt, lbl in zip(all_events, all_labels) if evt.sequence in train_seqs]
-    val_lbls = [lbl for evt, lbl in zip(all_events, all_labels) if evt.sequence in val_seqs]
-
-    if not train_evts:
-        print("No training data available.")
-        return
-
-    # Build datasets
-    iwg_train_ds = IWGDataset(train_evts, train_lbls, feature_builder)
-    iwg_val_ds = IWGDataset(val_evts, val_lbls, feature_builder)
+    iwg_model = IWG(reid_dim=reid_dim).to(device)
+    iwg_train_ds = CompactV0IWGDataset(
+        train_records,
+        metadata["event_cache_root"],
+        metadata["detection_cache_root"],
+        dataset,
+        metadata["split"],
+        feature_builder,
+    )
+    iwg_val_ds = CompactV0IWGDataset(
+        val_records,
+        metadata["event_cache_root"],
+        metadata["detection_cache_root"],
+        dataset,
+        metadata["split"],
+        feature_builder,
+    )
+    iwg_full_val_ds = None
+    if args.full_val_every and len(full_val_records) > len(val_records):
+        iwg_full_val_ds = CompactV0IWGDataset(
+            full_val_records,
+            metadata["event_cache_root"],
+            metadata["detection_cache_root"],
+            dataset,
+            metadata["split"],
+            feature_builder,
+        )
+    loader_kwargs = {
+        "num_workers": max(0, int(args.num_workers)),
+        "pin_memory": device.startswith("cuda"),
+    }
+    if loader_kwargs["num_workers"] > 0:
+        loader_kwargs["prefetch_factor"] = 2
+        loader_kwargs["persistent_workers"] = False
 
     iwg_train_loader = DataLoader(
         iwg_train_ds,
         batch_size=config["batch_size"],
         shuffle=True,
-        collate_fn=IWGDataset.collate_fn,
-        num_workers=0,
+        collate_fn=CompactV0IWGDataset.collate_fn,
+        generator=torch.Generator().manual_seed(int(args.seed)),
+        **loader_kwargs,
     )
     iwg_val_loader = DataLoader(
         iwg_val_ds,
         batch_size=config["batch_size"],
         shuffle=False,
-        collate_fn=IWGDataset.collate_fn,
-        num_workers=0,
+        collate_fn=CompactV0IWGDataset.collate_fn,
+        **loader_kwargs,
     )
+    iwg_full_val_loader = None
+    if iwg_full_val_ds is not None:
+        iwg_full_val_loader = DataLoader(
+            iwg_full_val_ds,
+            batch_size=config["batch_size"],
+            shuffle=False,
+            collate_fn=CompactV0IWGDataset.collate_fn,
+            **loader_kwargs,
+        )
 
     iwg_output_dir = _ensure_dir(os.path.join(checkpoints_dir, "iwg"))
-    iwg_summary = train_iwg(iwg_model, iwg_train_loader, iwg_val_loader, config, iwg_output_dir)
+    iwg_summary = train_iwg(
+        iwg_model,
+        iwg_train_loader,
+        iwg_val_loader,
+        config,
+        iwg_output_dir,
+        norm_mean=norm_stats.mean,
+        norm_std=norm_stats.std,
+        full_val_loader=iwg_full_val_loader,
+    )
     print(f"IWG training complete. Best epoch: {iwg_summary.get('best_epoch')}")
 
     # ---- Phase 2: Train TGR ----
@@ -1626,7 +1628,7 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
     print("Phase 2: Training TGR")
     print("=" * 60)
 
-    tgr_model = TGR(reid_dim=2048).to(device)
+    tgr_model = TGR(reid_dim=reid_dim).to(device)
 
     # Load best IWG checkpoint
     best_iwg_path = os.path.join(iwg_output_dir, "iwg_best.pt")
@@ -1637,29 +1639,94 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
     else:
         print("No best IWG checkpoint found, using freshly initialised model.")
 
-    # Build TGR datasets
-    tgr_train_ds = TGRDataset(train_evts, train_lbls, feature_builder)
-    tgr_val_ds = TGRDataset(val_evts, val_lbls, feature_builder)
-
-    tgr_train_loader = DataLoader(
-        tgr_train_ds,
-        batch_size=config["batch_size"] // 2,
-        shuffle=True,
-        collate_fn=TGRDataset.collate_fn,
-        num_workers=0,
+    tgr_train_records = [r for r in train_records if str(r.get("candidate_type", "A")).upper() == "A"]
+    tgr_val_records = [r for r in val_records if str(r.get("candidate_type", "A")).upper() == "A"] or val_records
+    tgr_full_val_records = [r for r in full_val_records if str(r.get("candidate_type", "A")).upper() == "A"]
+    tgr_train_ds = CompactV0TGRDataset(
+        tgr_train_records,
+        metadata["event_cache_root"],
+        metadata["detection_cache_root"],
+        dataset,
+        metadata["split"],
+        feature_builder,
+        window_stride=max(int(args.tgr_window_stride), 1),
     )
-    tgr_val_loader = DataLoader(
-        tgr_val_ds,
-        batch_size=config["batch_size"] // 2,
-        shuffle=False,
-        collate_fn=TGRDataset.collate_fn,
-        num_workers=0,
+    tgr_val_ds = CompactV0TGRDataset(
+        tgr_val_records,
+        metadata["event_cache_root"],
+        metadata["detection_cache_root"],
+        dataset,
+        metadata["split"],
+        feature_builder,
+        window_stride=max(int(args.tgr_window_stride), 1),
     )
+    tgr_full_val_ds = None
+    if args.full_val_every and len(tgr_full_val_records) > len(tgr_val_records):
+        tgr_full_val_ds = CompactV0TGRDataset(
+            tgr_full_val_records,
+            metadata["event_cache_root"],
+            metadata["detection_cache_root"],
+            dataset,
+            metadata["split"],
+            feature_builder,
+            window_stride=max(int(args.tgr_window_stride), 1),
+        )
+    if len(tgr_train_ds) == 0:
+        print("No TGR windows available; skipping TGR training.")
+        tgr_summary = {"skipped": True, "reason": "no_windows"}
+    else:
+        tgr_batch_size = max(1, config["batch_size"] // 2)
+        tgr_train_loader = DataLoader(
+            tgr_train_ds,
+            batch_size=tgr_batch_size,
+            shuffle=True,
+            collate_fn=CompactV0TGRDataset.collate_fn,
+            generator=torch.Generator().manual_seed(int(args.seed) + 1),
+            **loader_kwargs,
+        )
+        tgr_val_loader = DataLoader(
+            tgr_val_ds if len(tgr_val_ds) else tgr_train_ds,
+            batch_size=tgr_batch_size,
+            shuffle=False,
+            collate_fn=CompactV0TGRDataset.collate_fn,
+            **loader_kwargs,
+        )
+        tgr_full_val_loader = None
+        if tgr_full_val_ds is not None and len(tgr_full_val_ds):
+            tgr_full_val_loader = DataLoader(
+                tgr_full_val_ds,
+                batch_size=tgr_batch_size,
+                shuffle=False,
+                collate_fn=CompactV0TGRDataset.collate_fn,
+                **loader_kwargs,
+            )
 
-    tgr_config = {**config, "batch_size": config["batch_size"] // 2, "learning_rate": 2e-4}
-    tgr_output_dir = _ensure_dir(os.path.join(checkpoints_dir, "tgr"))
-    tgr_summary = train_tgr(tgr_model, iwg_model, tgr_train_loader, tgr_val_loader, tgr_config, tgr_output_dir)
-    print(f"TGR training complete. Best epoch: {tgr_summary.get('best_epoch')}")
+        tgr_config = {
+            **config,
+            "batch_size": tgr_batch_size,
+            "learning_rate": args.tgr_lr if args.tgr_lr is not None else args.lr,
+        }
+        tgr_output_dir = _ensure_dir(os.path.join(checkpoints_dir, "tgr"))
+        tgr_summary = train_tgr(
+            tgr_model,
+            iwg_model,
+            tgr_train_loader,
+            tgr_val_loader,
+            tgr_config,
+            tgr_output_dir,
+            norm_mean=norm_stats.mean,
+            norm_std=norm_stats.std,
+            full_val_loader=tgr_full_val_loader,
+        )
+        print(f"TGR training complete. Best epoch: {tgr_summary.get('best_epoch')}")
+    iwg_train_ds.close()
+    iwg_val_ds.close()
+    if iwg_full_val_ds is not None:
+        iwg_full_val_ds.close()
+    tgr_train_ds.close()
+    tgr_val_ds.close()
+    if tgr_full_val_ds is not None:
+        tgr_full_val_ds.close()
 
     # Save combined summary
     summary = {

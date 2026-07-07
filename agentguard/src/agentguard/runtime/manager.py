@@ -60,6 +60,11 @@ class AgentGuardRuntime:
         # EventSink (set by external caller if needed)
         self.event_sink: Any = None
         self.pending_checkpoint_rolls: Dict[int, Any] = {}
+        self.gate_revision_skip_threshold = float(
+            config.get("replay_diff_threshold", 0.0) or 0.0
+        )
+        self.tgr_frame_stride = max(int(config.get("tgr_frame_stride", 1) or 1), 1)
+        self._finalize_frame_index = 0
 
         # Statistics
         self.stats = RuntimeStatistics()
@@ -223,19 +228,56 @@ class AgentGuardRuntime:
 
         plans: Dict[int, Any] = {}
         self.pending_checkpoint_rolls = {}
+        self._finalize_frame_index += 1
 
+        ready_windows = []
         for track_id, window_buffer in list(self.window_buffers.items()):
             if not window_buffer.is_full:
                 continue
+            ready_windows.append((track_id, window_buffer.get_window()))
 
-            window_events = window_buffer.get_window()
-            revised_gates = self._run_tgr_inference(window_events)
-            self.stats.record_tgr()
+        if not ready_windows:
+            return plans
+
+        if self.tgr_frame_stride > 1 and self._finalize_frame_index % self.tgr_frame_stride != 0:
+            skipped = 0
+            for track_id, window_events in ready_windows:
+                oldest_event = window_events[0]
+                self.window_buffers[track_id].pop_oldest()
+                self.checkpoints.remove_checkpoint(track_id, oldest_event.event_id)
+                skipped += 1
+            self.stats.record_skipped_tgr(skipped)
+            return plans
+
+        revised_by_track = self._run_tgr_batch_inference(
+            [window_events for _, window_events in ready_windows]
+        )
+        self.stats.record_tgr(len(ready_windows))
+
+        for (track_id, window_events), revised_gates in zip(ready_windows, revised_by_track):
 
             for evt, gate in zip(window_events, revised_gates):
                 evt.revised_gate = gate.copy()
 
             oldest_event = window_events[0]
+            original_gates = np.stack(
+                [
+                    np.asarray(
+                        evt.iwg_gate if evt.iwg_gate is not None else np.zeros(2),
+                        dtype=np.float64,
+                    )
+                    for evt in window_events
+                ],
+                axis=0,
+            )
+            max_abs_diff = float(np.max(np.abs(revised_gates - original_gates)))
+            self.stats.record_revision_diff(max_abs_diff)
+            if max_abs_diff <= self.gate_revision_skip_threshold:
+                self.window_buffers[track_id].pop_oldest()
+                self.checkpoints.remove_checkpoint(track_id, oldest_event.event_id)
+                self.stats.record_skipped_replay()
+                continue
+
             checkpoint_snapshot = self.checkpoints.get_checkpoint(
                 track_id, oldest_event.event_id
             )
@@ -265,7 +307,7 @@ class AgentGuardRuntime:
                 oldest_event_id=oldest_event.event_id,
                 next_event_id=window_events[1].event_id if len(window_events) > 1 else None,
             )
-            self.stats.record_replay()
+            self.stats.record_replay(len(steps))
             self.pending_checkpoint_rolls[track_id] = {
                 "oldest_event_id": oldest_event.event_id,
                 "next_event_id": window_events[1].event_id if len(window_events) > 1 else None,
@@ -274,6 +316,40 @@ class AgentGuardRuntime:
             }
 
         return plans
+
+    def _run_tgr_batch_inference(
+        self,
+        windows: List[List[TrackEvent]],
+    ) -> np.ndarray:
+        """Run TGR for many track windows in one model call.
+
+        Full mode may have tens of mature tracks per frame. Calling the small
+        transformer once per track is dominated by Python and dispatcher
+        overhead on CPU; batching keeps semantics identical while making the
+        online path usable for experiments.
+        """
+        if not windows:
+            return np.zeros((0, 4, 2), dtype=np.float64)
+        if self.tgr is None:
+            raise RuntimeError("TGR model is not loaded but full mode was requested")
+        if self.feature_builder is None:
+            raise RuntimeError("Feature builder is not initialized but full mode was requested")
+
+        device = next(self.tgr.parameters()).device
+        inputs = self.feature_builder.build_tgr_batch_input(windows)
+        track_t = inputs["track_feats"].to(device, non_blocking=True)
+        det_t = inputs["det_feats"].to(device, non_blocking=True)
+        scalar_t = inputs["scalar_feats"].to(device, non_blocking=True)
+        policy_t = inputs["iwg_policy_probs"].to(device, non_blocking=True)
+        gate_t = inputs["iwg_gates"].to(device, non_blocking=True)
+        has_det_t = inputs["has_detection_mask"].to(device, non_blocking=True)
+
+        with torch.inference_mode():
+            g_revised: torch.Tensor = self.tgr(
+                track_t, det_t, scalar_t, policy_t, gate_t, has_det_t
+            )[0]
+
+        return g_revised.cpu().numpy()
 
     def _run_tgr_inference(
         self,
@@ -307,7 +383,7 @@ class AgentGuardRuntime:
         gate_t = inputs["iwg_gates"].to(device)
         has_det_t = inputs["has_detection_mask"].to(device)
 
-        with torch.no_grad():
+        with torch.inference_mode():
             g_revised: torch.Tensor = self.tgr(
                 track_t, det_t, scalar_t, policy_t, gate_t, has_det_t
             )[0]
@@ -365,7 +441,7 @@ class AgentGuardRuntime:
         scalar_t = inputs["scalar_feats"].to(device)
         mask_t = inputs["mask"].to(device)
 
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = self.iwg(track_t, det_t, scalar_t, mask_t)
 
         # Squeeze batch dimension
@@ -376,6 +452,51 @@ class AgentGuardRuntime:
             "cue": outputs["cue"].squeeze(0).cpu().numpy(),
             "gate_residual": outputs["gate_residual"].squeeze(0).cpu().numpy(),
         }
+
+    def run_iwg_batch_inference(
+        self,
+        event_sequences: List[List[Optional[TrackEvent]]],
+    ) -> List[Dict[str, np.ndarray]]:
+        """Run IWG for many per-track sequences in one model call."""
+        if not event_sequences:
+            return []
+        if self.iwg is None or self.feature_builder is None:
+            if self.mode in ("iwg", "full"):
+                raise RuntimeError(
+                    f"IWG model or feature builder is None in {self.mode} mode"
+                )
+            return [
+                {
+                    "policy_probs": np.ones(5, dtype=np.float64) / 5.0,
+                    "gate": np.ones(2, dtype=np.float64),
+                    "event_logits": np.zeros(10, dtype=np.float64),
+                    "cue": np.ones(3, dtype=np.float64),
+                    "gate_residual": np.zeros(2, dtype=np.float64),
+                }
+                for _ in event_sequences
+            ]
+
+        device = next(self.iwg.parameters()).device
+        inputs = self.feature_builder.build_iwg_batch_input(event_sequences)
+        track_t = inputs["track_feats"].to(device, non_blocking=True)
+        det_t = inputs["det_feats"].to(device, non_blocking=True)
+        scalar_t = inputs["scalar_feats"].to(device, non_blocking=True)
+        mask_t = inputs["mask"].to(device, non_blocking=True)
+
+        with torch.inference_mode():
+            outputs = self.iwg(track_t, det_t, scalar_t, mask_t)
+
+        policy = outputs["policy_probs"].cpu().numpy()
+        gate = outputs["gate"].cpu().numpy()
+        cue = outputs["cue"].cpu().numpy()
+        return [
+            {
+                "policy_probs": policy[i],
+                "gate": gate[i],
+                "cue": cue[i],
+            }
+            for i in range(len(event_sequences))
+        ]
 
     # ------------------------------------------------------------------
     # Cleanup

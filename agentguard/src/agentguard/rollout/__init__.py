@@ -17,9 +17,9 @@ from agentguard.rollout.losses import (
     appearance_loss,
     sigmoid,
 )
-from agentguard.labels import (
+from agentguard.rollout_labels import (
     compute_dataset_stats,
-    compute_soft_target as compute_soft_targets,
+    compute_soft_targets,
 )
 
 __all__ = [
