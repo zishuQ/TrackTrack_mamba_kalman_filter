@@ -222,64 +222,6 @@ def _parse_strides(value: str) -> list[int]:
     return strides or [1]
 
 
-def _dataset_cache_name(exp: Experiment, *, dataset: str, mode: str, split_policy: str) -> str:
-    type_key = exp.candidate_types.replace(",", "")
-    weight_key = (
-        exp.candidate_weights.replace(":", "")
-        .replace(",", "_")
-        .replace(".", "p")
-    )
-    return f"{dataset}_{mode}_{split_policy}_{exp.name}_{type_key}_{weight_key}"
-
-
-def _student_dataset_ready(
-    dataset_dir: Path,
-    *,
-    dataset: str,
-    mode: str,
-    label_dir: str,
-    candidate_types: str,
-    candidate_weights: str,
-    max_per_candidate_type: int,
-    split_policy: str,
-) -> bool:
-    metadata_path = dataset_dir / "metadata.json"
-    norm_path = dataset_dir / "norm_stats.npz"
-    if not (metadata_path.is_file() and metadata_path.stat().st_size > 0 and norm_path.is_file()):
-        return False
-    try:
-        metadata = json.loads(metadata_path.read_text())
-    except Exception:
-        return False
-    train_index_file = metadata.get("train_index_file")
-    val_index_file = metadata.get("val_index_file")
-    if split_policy == "train_all" and (
-        not train_index_file or not val_index_file or str(train_index_file) != str(val_index_file)
-    ):
-        return False
-    train_index = dataset_dir / str(train_index_file or "train_index.jsonl")
-    val_index = dataset_dir / str(val_index_file or "val_index.jsonl")
-    if not (train_index.is_file() and train_index.stat().st_size > 0):
-        return False
-    if not (val_index.is_file() and val_index.stat().st_size > 0):
-        return False
-    expected_types = sorted(
-        part.strip().upper()
-        for part in candidate_types.split(",")
-        if part.strip()
-    )
-    actual_types = sorted(str(t).upper() for t in metadata.get("candidate_types", []))
-    return (
-        metadata.get("dataset") == dataset
-        and metadata.get("mode") == mode
-        and str(metadata.get("label_dir")) == str(label_dir)
-        and actual_types == expected_types
-        and str(metadata.get("candidate_weights")) == candidate_weights
-        and int(metadata.get("max_per_candidate_type", 0)) == int(max_per_candidate_type)
-        and str(metadata.get("split_policy")) == split_policy
-    )
-
-
 def _write_summary(summary_path: Path, rows: list[dict[str, Any]]) -> None:
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     json_path = summary_path.with_suffix(".json")
@@ -368,7 +310,6 @@ def main() -> int:
     parser.add_argument("--sequences", nargs="+", default=None)
     parser.add_argument("--detector", default="FRCNN", help="Filter inferred MOT17 detector sequences; empty disables.")
     parser.add_argument("--sweep-root", default="outputs/agentguard/sweeps")
-    parser.add_argument("--dataset-root", default="outputs/agentguard/datasets_v0")
     parser.add_argument("--detection-cache-root", default="outputs/agentguard/detection_cache")
     parser.add_argument("--event-cache-root", default="outputs/agentguard/event_cache")
     parser.add_argument("--label-dir", default="", help="Default: outputs/agentguard/labels/<dataset>/<mode>_a_only")
@@ -389,7 +330,6 @@ def main() -> int:
     py = _python(str(repo / ".venv" / "bin" / "python"))
     env = _env(repo)
     sweep_root = (repo / args.sweep_root).resolve()
-    dataset_root = (repo / args.dataset_root).resolve()
     label_dir = args.label_dir or str(repo / "outputs" / "agentguard" / "labels" / args.dataset / f"{args.mode}_a_only")
     if not args.label_dir:
         _ensure_default_a_only_labels(
@@ -427,14 +367,9 @@ def main() -> int:
             raise ValueError(f"Duplicate experiment name: {spec.name}")
         seen_names.add(spec.name)
         exp_dir = sweep_root / spec.name
-        dataset_dir = dataset_root / _dataset_cache_name(
-            exp,
-            dataset=args.dataset,
-            mode=args.mode,
-            split_policy=args.split_policy,
-        )
+        dataset_dir = exp_dir / "dataset"
         checkpoint_dir = exp_dir / "checkpoints"
-        tracking_dir = repo / "outputs" / "3. track" / "agentguard" / sweep_root.name / spec.name
+        tracking_dir = exp_dir / "tracking_results"
         logs_dir = exp_dir / "logs"
         tracking_log = logs_dir / "tracktrack_full.log"
         metrics_json = exp_dir / "metrics.json"
@@ -468,23 +403,7 @@ def main() -> int:
             "--max-per-candidate-type",
             str(args.max_per_candidate_type or exp.max_per_candidate_type),
         ]
-        effective_max_per_type = args.max_per_candidate_type or exp.max_per_candidate_type
-        if _student_dataset_ready(
-            dataset_dir,
-            dataset=args.dataset,
-            mode=args.mode,
-            label_dir=label_dir,
-            candidate_types=exp.candidate_types,
-            candidate_weights=exp.candidate_weights,
-            max_per_candidate_type=effective_max_per_type,
-            split_policy=args.split_policy,
-        ):
-            logs_dir.mkdir(parents=True, exist_ok=True)
-            reuse_line = f"Reusing existing Student-V0 dataset at {dataset_dir}\n"
-            (logs_dir / "build_data.log").write_text(reuse_line)
-            print(reuse_line.strip(), flush=True)
-        else:
-            _run(build_cmd, cwd=repo, env=env, log_path=logs_dir / "build_data.log", dry_run=args.dry_run)
+        _run(build_cmd, cwd=repo, env=env, log_path=logs_dir / "build_data.log", dry_run=args.dry_run)
 
         train_cmd = [
             py,

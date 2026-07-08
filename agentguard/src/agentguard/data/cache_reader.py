@@ -197,7 +197,6 @@ class CompactEventCacheReader:
         self.association_shards = self._glob("associations", required=False)
         self.frame_shards = self._glob("frames", required=False)
         self._loaded: dict[tuple[str, int], list[dict]] = {}
-        self.max_cached_shards = int(os.environ.get("AGENTGUARD_MAX_CACHED_SHARDS", "32"))
         self._frame_by_index: dict[int, dict] | None = None
 
         self.detection_cache = None
@@ -234,11 +233,7 @@ class CompactEventCacheReader:
         data = torch.load(paths[shard_id], weights_only=False)
         if not isinstance(data, list):
             raise TypeError(f"{paths[shard_id]} must contain a list, got {type(data).__name__}")
-        if self.max_cached_shards == 0:
-            return data
         self._loaded[key] = data
-        while self.max_cached_shards > 0 and len(self._loaded) > self.max_cached_shards:
-            self._loaded.pop(next(iter(self._loaded)))
         return data
 
     def iter_event_records(self, limit: int | None = None):

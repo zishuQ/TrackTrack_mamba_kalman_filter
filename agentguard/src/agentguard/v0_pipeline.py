@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -590,67 +589,6 @@ def load_label_records(label_dir: str | os.PathLike[str], max_samples: int = 0) 
     return records
 
 
-def iter_label_records(label_dir: str | os.PathLike[str], max_samples: int = 0) -> Iterator[Dict[str, Any]]:
-    emitted = 0
-    for path in sorted(Path(label_dir).glob("*_labels.json")):
-        remaining = max(0, max_samples - emitted) if max_samples > 0 else 0
-        for record in _iter_json_array(path, max_samples=remaining):
-            yield record
-            emitted += 1
-            if max_samples > 0 and emitted >= max_samples:
-                return
-
-
-def _iter_json_array(path: str | os.PathLike[str], max_samples: int = 0) -> Iterator[Dict[str, Any]]:
-    decoder = json.JSONDecoder()
-    buf = ""
-    pos = 0
-    started = False
-    yielded = 0
-    done = False
-    with Path(path).open("r") as f:
-        while not done:
-            chunk = f.read(1024 * 1024)
-            if chunk:
-                buf += chunk
-            while True:
-                n = len(buf)
-                while pos < n and buf[pos].isspace():
-                    pos += 1
-                if not started:
-                    if pos >= n:
-                        break
-                    if buf[pos] != "[":
-                        raise ValueError(f"Expected JSON array in {path}")
-                    started = True
-                    pos += 1
-                    continue
-                while pos < n and (buf[pos].isspace() or buf[pos] == ","):
-                    pos += 1
-                if pos < n and buf[pos] == "]":
-                    done = True
-                    pos += 1
-                    break
-                if pos >= n:
-                    break
-                try:
-                    obj, end = decoder.raw_decode(buf, pos)
-                except json.JSONDecodeError:
-                    if not chunk:
-                        raise
-                    break
-                yield obj
-                yielded += 1
-                if max_samples > 0 and yielded >= max_samples:
-                    return
-                pos = end
-            if pos > 0:
-                buf = buf[pos:]
-                pos = 0
-            if not chunk:
-                break
-
-
 def write_jsonl(path: str | os.PathLike[str], records: Iterable[Dict[str, Any]]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -662,13 +600,6 @@ def write_jsonl(path: str | os.PathLike[str], records: Iterable[Dict[str, Any]])
 def read_jsonl(path: str | os.PathLike[str]) -> List[Dict[str, Any]]:
     with Path(path).open("r") as f:
         return [json.loads(line) for line in f if line.strip()]
-
-
-def iter_jsonl(path: str | os.PathLike[str]) -> Iterator[Dict[str, Any]]:
-    with Path(path).open("r") as f:
-        for line in f:
-            if line.strip():
-                yield json.loads(line)
 
 
 def fit_norm_stats_from_records(
@@ -704,76 +635,6 @@ def fit_norm_stats_from_records(
             reader.close()
     stats = NormalizationStats()
     stats.fit(scalars)
-    return stats
-
-
-def fit_norm_stats_from_record_iter(
-    records: Iterable[Dict[str, Any]],
-    event_cache_root: str | os.PathLike[str],
-    detection_cache_root: str | os.PathLike[str],
-    dataset: str,
-    split: str,
-    *,
-    max_samples: int = 0,
-    total_records: int = 0,
-    max_cached_shards: int = 4,
-    sleep_every: int = 0,
-    sleep_seconds: float = 0.0,
-):
-    from agentguard.features.normalization import NormalizationStats
-
-    readers: Dict[str, CompactEventCacheReader] = {}
-    count = 0
-    seen = 0
-    mean = np.zeros(63, dtype=np.float64)
-    m2 = np.zeros(63, dtype=np.float64)
-    max_samples = int(max_samples)
-    total_records = int(total_records)
-    next_sample = 0.0
-    sample_step = float(total_records) / float(max_samples) if max_samples > 0 and total_records > max_samples else 1.0
-    try:
-        for record in records:
-            if max_samples > 0 and total_records > max_samples:
-                if seen + 1 < next_sample:
-                    seen += 1
-                    continue
-                next_sample += sample_step
-            seen += 1
-            seq = record["sequence"]
-            if seq not in readers:
-                readers[seq] = CompactEventCacheReader(
-                    Path(event_cache_root) / dataset / split / seq,
-                    Path(detection_cache_root) / dataset / split / seq,
-                )
-            event_record = readers[seq].get_event_record(
-                int(record["event_shard_id"]),
-                int(record["event_offset"]),
-            )
-            scalar_features = event_record.get("scalar_features")
-            if scalar_features is None:
-                continue
-            scalar = np.asarray(scalar_features, dtype=np.float64).reshape(-1)
-            if scalar.size != 63:
-                continue
-            count += 1
-            delta = scalar - mean
-            mean += delta / count
-            m2 += delta * (scalar - mean)
-            if max_cached_shards >= 0 and len(readers[seq]._loaded) > max_cached_shards:
-                readers[seq]._loaded.clear()
-            if sleep_every > 0 and sleep_seconds > 0 and count % sleep_every == 0:
-                time.sleep(float(sleep_seconds))
-            if max_samples > 0 and count >= max_samples:
-                break
-    finally:
-        for reader in readers.values():
-            reader.close()
-
-    stats = NormalizationStats()
-    if count > 0:
-        stats.mean = mean.astype(np.float64)
-        stats.std = np.sqrt(m2 / count).astype(np.float64)
-        stats.std[stats.std < 1e-8] = 1.0
     return stats
 
 

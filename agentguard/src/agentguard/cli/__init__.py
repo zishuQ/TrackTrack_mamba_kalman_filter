@@ -971,6 +971,7 @@ def _add_build_rollout_labels_parser(subparsers: argparse._SubParsersAction) -> 
         help="Deterministically cap each candidate type before splitting (0=all).",
     )
 
+
 def _cmd_build_rollout_labels(args: argparse.Namespace) -> None:
     from agentguard.v0_pipeline import build_compact_rollout_labels_for_sequence
 
@@ -1350,33 +1351,13 @@ def _add_build_student_v0_data_parser(subparsers: argparse._SubParsersAction) ->
         default=0,
         help="Deterministically cap each candidate type before splitting (0=all).",
     )
-    p.add_argument(
-        "--norm-max-samples",
-        type=int,
-        default=0,
-        help="Use at most this many evenly spaced records to fit scalar normalization stats (0=all).",
-    )
-    p.add_argument(
-        "--norm-sleep-every",
-        type=int,
-        default=0,
-        help="Sleep after this many norm samples to reduce IO/CPU pressure (0=disabled).",
-    )
-    p.add_argument(
-        "--norm-sleep-seconds",
-        type=float,
-        default=0.0,
-        help="Seconds to sleep when --norm-sleep-every triggers.",
-    )
+
 
 def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
     import numpy as np
 
     from agentguard.v0_pipeline import (
-        fit_norm_stats_from_record_iter,
         fit_norm_stats_from_records,
-        iter_jsonl,
-        iter_label_records,
         load_label_records,
         write_jsonl,
     )
@@ -1389,96 +1370,6 @@ def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
     datasets_dir = _ensure_dir(args.output_dir or os.path.join(_datasets_dir(dataset), mode))
     if not os.path.isdir(label_dir):
         raise FileNotFoundError(f"Label directory not found: {label_dir}. Run build_rollout_labels first.")
-
-    if args.split_policy == "train_all" and int(args.max_per_candidate_type) == 0:
-        allowed = _parse_candidate_types(args.candidate_types)
-        weights = _parse_candidate_weights(args.candidate_weights)
-        index_file = "index.jsonl"
-        index_path = os.path.join(datasets_dir, index_file)
-        seq_names: set[str] = set()
-        candidate_type_set: set[str] = set()
-        num_records = 0
-        metadata_path = os.path.join(datasets_dir, "metadata.json")
-        norm_path = os.path.join(datasets_dir, "norm_stats.npz")
-
-        if os.path.exists(index_path):
-            print(f"Reusing existing Student-V0 index at {index_path}")
-            for record in iter_jsonl(index_path):
-                seq_names.add(str(record["sequence"]))
-                candidate_type_set.add(str(record.get("candidate_type", "A")).upper())
-                num_records += 1
-            if os.path.exists(metadata_path) and os.path.exists(norm_path):
-                with open(metadata_path) as f:
-                    metadata = json.load(f)
-                print(json.dumps(metadata, indent=2))
-                print(f"Student-V0 lazy indexes already ready at {datasets_dir}")
-                return
-        else:
-            with open(index_path, "w") as f:
-                for record in iter_label_records(label_dir, max_samples=args.max_samples):
-                    if not (record.get("valid_motion") or record.get("valid_appearance")):
-                        continue
-                    ctype = str(record.get("candidate_type", "A")).upper()
-                    if ctype not in allowed:
-                        continue
-                    weight = float(weights.get(ctype, 1.0))
-                    if weight <= 0:
-                        continue
-                    copied = dict(record)
-                    copied["candidate_type"] = ctype
-                    copied["sample_weight"] = float(copied.get("sample_weight", 1.0)) * weight
-                    f.write(json.dumps(copied, default=str) + "\n")
-                    seq_names.add(str(copied["sequence"]))
-                    candidate_type_set.add(ctype)
-                    num_records += 1
-        if num_records == 0:
-            raise RuntimeError("No valid rollout labels loaded.")
-
-        if not os.path.exists(norm_path):
-            norm_stats = fit_norm_stats_from_record_iter(
-                iter_jsonl(index_path),
-                args.event_cache_root,
-                args.detection_cache_root,
-                dataset,
-                split,
-                max_samples=int(args.norm_max_samples),
-                total_records=num_records,
-                sleep_every=int(args.norm_sleep_every),
-                sleep_seconds=float(args.norm_sleep_seconds),
-            )
-            norm_stats.save(norm_path)
-
-        first_seq = sorted(seq_names)[0]
-        with open(os.path.join(args.detection_cache_root, dataset, split, first_seq, "manifest.json")) as f:
-            det_manifest = json.load(f)
-        metadata = {
-            "dataset": dataset,
-            "mode": mode,
-            "split": split,
-            "label_mode": label_mode,
-            "event_cache_root": args.event_cache_root,
-            "detection_cache_root": args.detection_cache_root,
-            "label_dir": label_dir,
-            "reid_dim": int(det_manifest["reid_dim"]),
-            "scalar_dim": 63,
-            "event_dim": 128,
-            "num_records": num_records,
-            "num_train": num_records,
-            "num_val": num_records,
-            "split_policy": args.split_policy,
-            "train_index_file": index_file,
-            "val_index_file": index_file,
-            "candidate_types": sorted(candidate_type_set),
-            "candidate_weights": args.candidate_weights,
-            "max_per_candidate_type": int(args.max_per_candidate_type),
-            "train_sequences": sorted(seq_names),
-            "val_sequences": sorted(seq_names),
-        }
-        with open(metadata_path, "w") as f:
-            json.dump(metadata, f, indent=2, default=str)
-        print(json.dumps(metadata, indent=2))
-        print(f"Saved Student-V0 lazy indexes to {datasets_dir}")
-        return
 
     records = load_label_records(label_dir, max_samples=args.max_samples)
     records = [r for r in records if r.get("valid_motion") or r.get("valid_appearance")]
@@ -1496,7 +1387,7 @@ def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
         train_seqs = set(seq_names)
         val_seqs = set(seq_names)
         train_records = list(records)
-        val_records = train_records
+        val_records = list(records)
     else:
         rng = np.random.default_rng(42)
         shuffled = list(seq_names)
@@ -1518,16 +1409,8 @@ def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
         split,
     )
 
-    if args.split_policy == "train_all":
-        shared_index_name = "index.jsonl"
-        write_jsonl(os.path.join(datasets_dir, shared_index_name), train_records)
-        train_index_file = shared_index_name
-        val_index_file = shared_index_name
-    else:
-        train_index_file = "train_index.jsonl"
-        val_index_file = "val_index.jsonl"
-        write_jsonl(os.path.join(datasets_dir, train_index_file), train_records)
-        write_jsonl(os.path.join(datasets_dir, val_index_file), val_records)
+    write_jsonl(os.path.join(datasets_dir, "train_index.jsonl"), train_records)
+    write_jsonl(os.path.join(datasets_dir, "val_index.jsonl"), val_records)
     norm_path = os.path.join(datasets_dir, "norm_stats.npz")
     norm_stats.save(norm_path)
 
@@ -1550,8 +1433,6 @@ def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
         "num_train": len(train_records),
         "num_val": len(val_records),
         "split_policy": args.split_policy,
-        "train_index_file": train_index_file,
-        "val_index_file": val_index_file,
         "candidate_types": sorted({str(r.get("candidate_type", "A")) for r in records}),
         "candidate_weights": args.candidate_weights,
         "max_per_candidate_type": int(args.max_per_candidate_type),
@@ -1619,6 +1500,11 @@ def _add_train_student_v0_parser(subparsers: argparse._SubParsersAction) -> None
         "--skip-iwg-training",
         action="store_true",
         help="Skip IWG training and load an existing IWG checkpoint before TGR training.",
+    )
+    p.add_argument(
+        "--skip-tgr-training",
+        action="store_true",
+        help="Skip TGR training after IWG training.",
     )
     p.add_argument(
         "--iwg-checkpoint",
@@ -1785,6 +1671,23 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
             full_val_loader=iwg_full_val_loader,
         )
         print(f"IWG training complete. Best epoch: {iwg_summary.get('best_epoch')}")
+
+    if args.skip_tgr_training:
+        if iwg_train_ds is not None:
+            iwg_train_ds.close()
+        if iwg_val_ds is not None:
+            iwg_val_ds.close()
+        if iwg_full_val_ds is not None:
+            iwg_full_val_ds.close()
+        tgr_summary = {"skipped": True, "reason": "skip_tgr_training"}
+        summary = {
+            "iwg": iwg_summary,
+            "tgr": tgr_summary,
+        }
+        with open(os.path.join(checkpoints_dir, "training_summary.json"), "w") as f:
+            json.dump(summary, f, indent=2, default=str)
+        print("Skipped TGR training.")
+        return
 
     # ---- Phase 2: Train TGR ----
     print("\n" + "=" * 60)

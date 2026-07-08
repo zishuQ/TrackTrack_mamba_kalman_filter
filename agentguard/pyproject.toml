@@ -12,5 +12,8 @@ dependencies = [
     "scipy",
 ]
 
+[project.scripts]
+agentguard = "agentguard.cli:main"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
