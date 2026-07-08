@@ -84,6 +84,8 @@ def train_tgr(
         "seed": 42,
         "early_stop_patience": 5,
         "full_val_every": 0,
+        "full_val_device": "",
+        "resume_from": "",
     }
     cfg.update(config)
 
@@ -145,26 +147,61 @@ def train_tgr(
     val_metrics_history: list[dict[str, Any]] = []
     epoch_times: list[float] = []
     global_step = 0
+    start_epoch = 0
+
+    resume_from = str(cfg.get("resume_from") or "")
+    if resume_from:
+        resume_metadata = load_checkpoint(resume_from, tgr_model, optimizer, scheduler)
+        start_epoch = int(resume_metadata.get("epoch", -1)) + 1
+        global_step = start_epoch * steps_per_epoch
+        logger.info(
+            f"Resumed TGR from {resume_from} at epoch {start_epoch} "
+            f"(continuing to {cfg['epochs']})."
+        )
+
+        best_ckpt_path = os.path.join(output_dir, "tgr_best.pt")
+        if os.path.isfile(best_ckpt_path):
+            best_ckpt = torch.load(best_ckpt_path, map_location="cpu", weights_only=False)
+            best_meta = best_ckpt.get("metadata", {})
+            best_selection = best_meta.get("best_selection_metrics") or {}
+            best_val_loss = float(
+                best_selection.get(
+                    "loss",
+                    best_meta.get("full_val_metrics", best_meta.get("val_metrics", {})).get(
+                        "loss",
+                        float("inf"),
+                    ),
+                )
+            )
+            best_epoch = int(best_ckpt.get("epoch", -1)) + 1
+            best_metric_source = str(best_meta.get("best_metric_source", "val"))
+            best_metrics = dict(best_selection or best_meta.get("val_metrics", {}))
+            logger.info(
+                f"Existing best checkpoint: epoch {best_epoch} "
+                f"({best_metric_source}_loss={best_val_loss:.6f})."
+            )
 
     metrics_file = os.path.join(output_dir, "metrics.jsonl")
     csv_path = os.path.join(output_dir, "epoch_metrics.csv")
 
-    metrics_fh = open(metrics_file, "w")
+    resume_mode = start_epoch > 0
+    metrics_fh = open(metrics_file, "a" if resume_mode else "w")
 
     import csv
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "epoch", "train_loss", "val_loss", "gate_accuracy",
-            "motion_mae", "appearance_mae", "learning_rate", "epoch_time_s",
-        ])
+    if not resume_mode or not os.path.isfile(csv_path):
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "epoch", "train_loss", "val_loss", "gate_accuracy",
+                "motion_mae", "appearance_mae", "learning_rate", "epoch_time_s",
+            ])
 
     train_tracker = MetricsTracker()
 
     # ------------------------------------------------------------------
     # Training loop.
     # ------------------------------------------------------------------
-    for epoch in range(cfg["epochs"]):
+    for epoch in range(start_epoch, cfg["epochs"]):
         epoch_start = time.time()
         logger.info(f"--- Epoch {epoch + 1}/{cfg['epochs']} ---")
 
@@ -257,7 +294,22 @@ def train_tgr(
             and int(cfg.get("full_val_every", 0)) > 0
             and (epoch + 1) % int(cfg["full_val_every"]) == 0
         ):
-            full_val_metrics = _evaluate_tgr_loader(tgr_model, full_val_loader, device, use_amp)
+            full_val_device_name = str(cfg.get("full_val_device") or "").strip()
+            full_val_device = torch.device(full_val_device_name) if full_val_device_name else device
+            original_device = device
+            if full_val_device != original_device:
+                logger.info(f"Running TGR full-val on {full_val_device}.")
+                tgr_model.to(full_val_device)
+            try:
+                full_val_metrics = _evaluate_tgr_loader(
+                    tgr_model,
+                    full_val_loader,
+                    full_val_device,
+                    use_amp and full_val_device.type == "cuda",
+                )
+            finally:
+                if full_val_device != original_device:
+                    tgr_model.to(original_device)
 
         # ---- Epoch summary ----
         epoch_time = time.time() - epoch_start

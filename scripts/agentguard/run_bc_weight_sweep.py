@@ -286,6 +286,7 @@ def main() -> int:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--tgr-batch-size", type=int, default=0, help="TGR batch size. Defaults to --batch-size when 0.")
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--tgr-lr", type=float, default=1e-4)
     parser.add_argument("--num-workers", type=int, default=2)
@@ -419,6 +420,8 @@ def main() -> int:
             str(args.epochs),
             "--batch-size",
             str(args.batch_size),
+            "--tgr-batch-size",
+            str(args.tgr_batch_size),
             "--lr",
             str(args.lr),
             "--tgr-lr",

@@ -1461,6 +1461,12 @@ def _add_train_student_v0_parser(subparsers: argparse._SubParsersAction) -> None
     p.add_argument("--device", default="cuda", help="Device (cpu or cuda).")
     p.add_argument("--epochs", type=int, default=1, help="Training epochs.")
     p.add_argument("--batch-size", type=int, default=32, help="Batch size.")
+    p.add_argument(
+        "--tgr-batch-size",
+        type=int,
+        default=0,
+        help="TGR batch size. Defaults to --batch-size when 0.",
+    )
     p.add_argument("--lr", type=float, default=3e-4, help="Learning rate.")
     p.add_argument("--tgr-lr", type=float, default=None, help="TGR learning rate (defaults to --lr).")
     p.add_argument("--num-workers", type=int, default=0, help="DataLoader worker count.")
@@ -1484,6 +1490,26 @@ def _add_train_student_v0_parser(subparsers: argparse._SubParsersAction) -> None
         type=int,
         default=0,
         help="Run full validation every N epochs in addition to sampled validation (0=disabled).",
+    )
+    p.add_argument(
+        "--tgr-full-val-device",
+        default="cpu",
+        help="Device used for TGR full validation. CPU avoids long CUDA eval illegal-memory failures.",
+    )
+    p.add_argument(
+        "--skip-iwg-training",
+        action="store_true",
+        help="Skip IWG training and load an existing IWG checkpoint before TGR training.",
+    )
+    p.add_argument(
+        "--iwg-checkpoint",
+        default="",
+        help="IWG checkpoint to load when --skip-iwg-training is set. Defaults to checkpoint-dir/iwg/iwg_best.pt.",
+    )
+    p.add_argument(
+        "--tgr-resume-checkpoint",
+        default="",
+        help="Resume TGR training from this checkpoint, typically checkpoint-dir/tgr/tgr_last.pt.",
     )
 
 
@@ -1546,37 +1572,7 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
         "early_stop_patience": max(2, args.epochs + 1),
         "full_val_every": max(0, int(args.full_val_every)),
     }
-    print("=" * 60)
-    print("Phase 1: Training IWG")
-    print("=" * 60)
-
     iwg_model = IWG(reid_dim=reid_dim).to(device)
-    iwg_train_ds = CompactV0IWGDataset(
-        train_records,
-        metadata["event_cache_root"],
-        metadata["detection_cache_root"],
-        dataset,
-        metadata["split"],
-        feature_builder,
-    )
-    iwg_val_ds = CompactV0IWGDataset(
-        val_records,
-        metadata["event_cache_root"],
-        metadata["detection_cache_root"],
-        dataset,
-        metadata["split"],
-        feature_builder,
-    )
-    iwg_full_val_ds = None
-    if args.full_val_every and len(full_val_records) > len(val_records):
-        iwg_full_val_ds = CompactV0IWGDataset(
-            full_val_records,
-            metadata["event_cache_root"],
-            metadata["detection_cache_root"],
-            dataset,
-            metadata["split"],
-            feature_builder,
-        )
     loader_kwargs = {
         "num_workers": max(0, int(args.num_workers)),
         "pin_memory": device.startswith("cuda"),
@@ -1585,43 +1581,84 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
         loader_kwargs["prefetch_factor"] = 2
         loader_kwargs["persistent_workers"] = False
 
-    iwg_train_loader = DataLoader(
-        iwg_train_ds,
-        batch_size=config["batch_size"],
-        shuffle=True,
-        collate_fn=CompactV0IWGDataset.collate_fn,
-        generator=torch.Generator().manual_seed(int(args.seed)),
-        **loader_kwargs,
-    )
-    iwg_val_loader = DataLoader(
-        iwg_val_ds,
-        batch_size=config["batch_size"],
-        shuffle=False,
-        collate_fn=CompactV0IWGDataset.collate_fn,
-        **loader_kwargs,
-    )
-    iwg_full_val_loader = None
-    if iwg_full_val_ds is not None:
-        iwg_full_val_loader = DataLoader(
-            iwg_full_val_ds,
+    iwg_output_dir = _ensure_dir(os.path.join(checkpoints_dir, "iwg"))
+    iwg_train_ds = None
+    iwg_val_ds = None
+    iwg_full_val_ds = None
+
+    if args.skip_iwg_training:
+        best_iwg_path = args.iwg_checkpoint or os.path.join(iwg_output_dir, "iwg_best.pt")
+        load_checkpoint(best_iwg_path, iwg_model)
+        iwg_model.to(device)
+        iwg_summary = {"skipped": True, "checkpoint": best_iwg_path}
+        print(f"Skipped IWG training; loaded IWG from {best_iwg_path}")
+    else:
+        print("=" * 60)
+        print("Phase 1: Training IWG")
+        print("=" * 60)
+
+        iwg_train_ds = CompactV0IWGDataset(
+            train_records,
+            metadata["event_cache_root"],
+            metadata["detection_cache_root"],
+            dataset,
+            metadata["split"],
+            feature_builder,
+        )
+        iwg_val_ds = CompactV0IWGDataset(
+            val_records,
+            metadata["event_cache_root"],
+            metadata["detection_cache_root"],
+            dataset,
+            metadata["split"],
+            feature_builder,
+        )
+        if args.full_val_every and len(full_val_records) > len(val_records):
+            iwg_full_val_ds = CompactV0IWGDataset(
+                full_val_records,
+                metadata["event_cache_root"],
+                metadata["detection_cache_root"],
+                dataset,
+                metadata["split"],
+                feature_builder,
+            )
+
+        iwg_train_loader = DataLoader(
+            iwg_train_ds,
+            batch_size=config["batch_size"],
+            shuffle=True,
+            collate_fn=CompactV0IWGDataset.collate_fn,
+            generator=torch.Generator().manual_seed(int(args.seed)),
+            **loader_kwargs,
+        )
+        iwg_val_loader = DataLoader(
+            iwg_val_ds,
             batch_size=config["batch_size"],
             shuffle=False,
             collate_fn=CompactV0IWGDataset.collate_fn,
             **loader_kwargs,
         )
+        iwg_full_val_loader = None
+        if iwg_full_val_ds is not None:
+            iwg_full_val_loader = DataLoader(
+                iwg_full_val_ds,
+                batch_size=config["batch_size"],
+                shuffle=False,
+                collate_fn=CompactV0IWGDataset.collate_fn,
+                **loader_kwargs,
+            )
 
-    iwg_output_dir = _ensure_dir(os.path.join(checkpoints_dir, "iwg"))
-    iwg_summary = train_iwg(
-        iwg_model,
-        iwg_train_loader,
-        iwg_val_loader,
-        config,
-        iwg_output_dir,
-        norm_mean=norm_stats.mean,
-        norm_std=norm_stats.std,
-        full_val_loader=iwg_full_val_loader,
-    )
-    print(f"IWG training complete. Best epoch: {iwg_summary.get('best_epoch')}")
+        iwg_summary = train_iwg(
+            iwg_model,
+            iwg_train_loader,
+            iwg_val_loader,
+            config,
+            iwg_output_dir,
+            norm_mean=norm_stats.mean,
+            norm_std=norm_stats.std,
+            full_val_loader=iwg_full_val_loader,
+        )
+        print(f"IWG training complete. Best epoch: {iwg_summary.get('best_epoch')}")
 
     # ---- Phase 2: Train TGR ----
     print("\n" + "=" * 60)
@@ -1631,7 +1668,7 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
     tgr_model = TGR(reid_dim=reid_dim).to(device)
 
     # Load best IWG checkpoint
-    best_iwg_path = os.path.join(iwg_output_dir, "iwg_best.pt")
+    best_iwg_path = args.iwg_checkpoint or os.path.join(iwg_output_dir, "iwg_best.pt")
     if os.path.isfile(best_iwg_path):
         load_checkpoint(best_iwg_path, iwg_model)
         iwg_model.to(device)
@@ -1675,7 +1712,8 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
         print("No TGR windows available; skipping TGR training.")
         tgr_summary = {"skipped": True, "reason": "no_windows"}
     else:
-        tgr_batch_size = max(1, config["batch_size"] // 2)
+        tgr_batch_size = max(1, int(args.tgr_batch_size) if int(args.tgr_batch_size) > 0 else config["batch_size"])
+        print(f"TGR batch size: {tgr_batch_size}")
         tgr_train_loader = DataLoader(
             tgr_train_ds,
             batch_size=tgr_batch_size,
@@ -1705,6 +1743,8 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
             **config,
             "batch_size": tgr_batch_size,
             "learning_rate": args.tgr_lr if args.tgr_lr is not None else args.lr,
+            "full_val_device": args.tgr_full_val_device,
+            "resume_from": args.tgr_resume_checkpoint,
         }
         tgr_output_dir = _ensure_dir(os.path.join(checkpoints_dir, "tgr"))
         tgr_summary = train_tgr(
@@ -1719,8 +1759,10 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
             full_val_loader=tgr_full_val_loader,
         )
         print(f"TGR training complete. Best epoch: {tgr_summary.get('best_epoch')}")
-    iwg_train_ds.close()
-    iwg_val_ds.close()
+    if iwg_train_ds is not None:
+        iwg_train_ds.close()
+    if iwg_val_ds is not None:
+        iwg_val_ds.close()
     if iwg_full_val_ds is not None:
         iwg_full_val_ds.close()
     tgr_train_ds.close()
