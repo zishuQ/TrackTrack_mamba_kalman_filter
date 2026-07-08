@@ -230,7 +230,7 @@ class CompactEventCacheReader:
         }[kind]
         if shard_id < 0 or shard_id >= len(paths):
             raise IndexError(f"{kind} shard {shard_id} outside [0, {len(paths)})")
-        data = torch.load(paths[shard_id], weights_only=False)
+        data = torch.load(paths[shard_id], weights_only=False, encoding="bytes")
         if not isinstance(data, list):
             raise TypeError(f"{paths[shard_id]} must contain a list, got {type(data).__name__}")
         self._loaded[key] = data
@@ -239,7 +239,7 @@ class CompactEventCacheReader:
     def iter_event_records(self, limit: int | None = None):
         yielded = 0
         for shard_id, path in enumerate(self.event_shards):
-            records = torch.load(path, weights_only=False)
+            records = torch.load(path, weights_only=False, encoding="bytes")
             if not isinstance(records, list):
                 raise TypeError(f"{path} must contain a list")
             for offset, record in enumerate(records):
