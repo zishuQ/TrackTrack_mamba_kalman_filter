@@ -540,7 +540,29 @@ def _compute_iwg_loss(
         / gate_valid.sum(dim=-1).clamp(min=1.0)
     )
 
-    loss_per_sample = gate_loss_per_sample + 0.1 * policy_kl_per_sample * policy_valid + 0.1 * brier_per_sample
+    cue_target = torch.stack(
+        [
+            targets.get("motion_label_confidence", torch.zeros_like(targets["motion_target"])),
+            targets.get("appearance_label_confidence", torch.zeros_like(targets["appearance_target"])),
+            torch.maximum(
+                targets.get("motion_label_confidence", torch.zeros_like(targets["motion_target"])),
+                targets.get("appearance_label_confidence", torch.zeros_like(targets["appearance_target"])),
+            ),
+        ],
+        dim=-1,
+    )
+    cue_bce_per_sample = F.binary_cross_entropy(
+        outputs["cue"].clamp(1e-6, 1 - 1e-6),
+        cue_target,
+        reduction="none",
+    ).mean(dim=-1)
+
+    loss_per_sample = (
+        gate_loss_per_sample
+        + 0.1 * policy_kl_per_sample * policy_valid
+        + 0.1 * brier_per_sample
+        + 0.2 * cue_bce_per_sample
+    )
 
     # Apply sample weights
     sample_weight = targets.get("sample_weight", torch.ones_like(loss_per_sample)) * valid_any.float()
@@ -551,4 +573,5 @@ def _compute_iwg_loss(
         "gate_loss": (gate_loss_per_sample * sample_weight).sum() / sample_weight.sum().clamp(min=1).detach(),
         "policy_loss": (policy_kl_per_sample * policy_valid).sum().detach() / policy_valid.sum().clamp(min=1.0),
         "brier_loss": (brier_per_sample * sample_weight).sum().detach() / sample_weight.sum().clamp(min=1.0),
+        "cue_loss": (cue_bce_per_sample * sample_weight).sum().detach() / sample_weight.sum().clamp(min=1.0),
     }

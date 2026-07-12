@@ -21,7 +21,9 @@ from agentguard.rollout.context import RolloutContext
 from agentguard.rollout.motion import compute_motion_benefit
 from agentguard.rollout_labels import (
     compute_dataset_stats,
+    compute_label_confidence,
     compute_policy_soft_target,
+    compute_safe_soft_target,
     compute_soft_target,
     hard_gate_from_benefit,
 )
@@ -551,15 +553,51 @@ def build_compact_rollout_labels_for_sequence(
                 if lbl["valid_appearance"]
                 else 0.5
             )
+            motion_confidence = (
+                compute_label_confidence(
+                    lbl["motion_benefit"],
+                    stats["tau_motion"],
+                    lbl["gt_coverage"],
+                )
+                if lbl["valid_motion"]
+                else 0.0
+            )
+            appearance_confidence = (
+                compute_label_confidence(
+                    lbl["appearance_benefit"],
+                    stats["tau_appearance"],
+                    lbl["oracle_detection_coverage"],
+                )
+                if lbl["valid_appearance"]
+                else 0.0
+            )
+            motion_safe = compute_safe_soft_target(
+                lbl["motion_benefit"],
+                stats["tau_motion"],
+                motion_confidence,
+            )
+            appearance_safe = compute_safe_soft_target(
+                lbl["appearance_benefit"],
+                stats["tau_appearance"],
+                appearance_confidence,
+            )
             lbl["motion_soft_target"] = float(motion_soft)
             lbl["appearance_soft_target"] = float(appearance_soft)
             lbl["motion_target"] = float(motion_soft)
             lbl["appearance_target"] = float(appearance_soft)
+            lbl["motion_safe_target"] = float(motion_safe)
+            lbl["appearance_safe_target"] = float(appearance_safe)
+            lbl["motion_label_confidence"] = float(motion_confidence)
+            lbl["appearance_label_confidence"] = float(appearance_confidence)
+            lbl["label_schema_version"] = 2
             lbl["motion_oracle_hard"] = hard_gate_from_benefit(lbl["motion_benefit"])
             lbl["appearance_oracle_hard"] = hard_gate_from_benefit(lbl["appearance_benefit"])
             lbl["target_gate"] = [lbl["motion_oracle_hard"], lbl["appearance_oracle_hard"]]
             lbl["policy_soft_target"] = compute_policy_soft_target(
                 np.array([motion_soft, appearance_soft], dtype=np.float64)
+            ).tolist()
+            lbl["policy_safe_soft_target"] = compute_policy_soft_target(
+                np.array([motion_safe, appearance_safe], dtype=np.float64)
             ).tolist()
 
         summary.update(
@@ -570,6 +608,7 @@ def build_compact_rollout_labels_for_sequence(
                 "appearance_benefit_positive": int(sum(1 for b in appearance_benefits if b > 1e-9)),
                 "appearance_benefit_negative": int(sum(1 for b in appearance_benefits if b < -1e-9)),
                 "dataset_stats": stats,
+                "label_schema_version": 2,
             }
         )
         return raw_labels, summary
@@ -742,9 +781,11 @@ class _CompactDatasetBase(torch.utils.data.Dataset):
     def _targets(label: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         sample_type = label.get("candidate_type") or label.get("sample_type", "matched")
         return {
-            "motion_target": torch.tensor(float(label.get("motion_soft_target", label.get("motion_target", 0.5))), dtype=torch.float),
-            "appearance_target": torch.tensor(float(label.get("appearance_soft_target", label.get("appearance_target", 0.5))), dtype=torch.float),
-            "policy_soft_target": torch.tensor(label.get("policy_soft_target", [0.2] * 5), dtype=torch.float),
+            "motion_target": torch.tensor(float(label.get("motion_safe_target", label.get("motion_soft_target", label.get("motion_target", 1.0)))), dtype=torch.float),
+            "appearance_target": torch.tensor(float(label.get("appearance_safe_target", label.get("appearance_soft_target", label.get("appearance_target", 1.0)))), dtype=torch.float),
+            "motion_label_confidence": torch.tensor(float(label.get("motion_label_confidence", 0.0)), dtype=torch.float),
+            "appearance_label_confidence": torch.tensor(float(label.get("appearance_label_confidence", 0.0)), dtype=torch.float),
+            "policy_soft_target": torch.tensor(label.get("policy_safe_soft_target", label.get("policy_soft_target", [0.2] * 5)), dtype=torch.float),
             "sample_type": torch.tensor(SAMPLE_TYPE_TO_ID.get(str(sample_type), 0), dtype=torch.long),
             "valid_motion": torch.tensor(bool(label.get("valid_motion", True)), dtype=torch.bool),
             "valid_appearance": torch.tensor(bool(label.get("valid_appearance", True)), dtype=torch.bool),

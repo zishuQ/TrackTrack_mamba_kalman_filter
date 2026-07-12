@@ -17,11 +17,6 @@ from agentguard.rollout.losses import (
     appearance_loss,
     sigmoid,
 )
-from agentguard.rollout_labels import (
-    compute_dataset_stats,
-    compute_soft_targets,
-)
-
 __all__ = [
     # Motion
     "compute_motion_benefit",
@@ -38,7 +33,4 @@ __all__ = [
     "motion_frame_loss",
     "appearance_loss",
     "sigmoid",
-    # Labels (re-exported)
-    "compute_dataset_stats",
-    "compute_soft_targets",
 ]

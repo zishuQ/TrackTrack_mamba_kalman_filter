@@ -7,6 +7,15 @@ from agentguard.contracts.enums import POLICY_PROTOTYPE_MATRIX
 from agentguard.models.event_encoder import EventEncoder
 
 
+def make_head(in_dim: int, hidden_dim: int, out_dim: int) -> nn.Sequential:
+    return nn.Sequential(
+        nn.Linear(in_dim, hidden_dim),
+        nn.GELU(),
+        nn.LayerNorm(hidden_dim),
+        nn.Linear(hidden_dim, out_dim),
+    )
+
+
 class IWG(nn.Module):
     """Instance-wise Gate network."""
 
@@ -20,10 +29,10 @@ class IWG(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
 
-        self.policy_head = nn.Sequential(nn.Linear(event_dim, 64), nn.Linear(64, 5))
-        self.gate_residual_head = nn.Sequential(nn.Linear(event_dim, 64), nn.Linear(64, 2))
-        self.event_head = nn.Sequential(nn.Linear(event_dim, 64), nn.Linear(64, 10))
-        self.cue_head = nn.Sequential(nn.Linear(event_dim, 32), nn.Linear(32, 3))
+        self.policy_head = make_head(event_dim, 64, 5)
+        self.gate_residual_head = make_head(event_dim, 64, 2)
+        self.event_head = make_head(event_dim, 64, 10)
+        self.cue_head = make_head(event_dim, 32, 3)
 
         self.position_embedding = nn.Parameter(torch.zeros(1, 6, event_dim))
         nn.init.normal_(self.position_embedding, mean=0.0, std=0.02)
@@ -52,7 +61,8 @@ class IWG(nn.Module):
 
         gate_residual = self.gate_residual_head(last_out)
         event_logits = self.event_head(last_out)
-        cue = torch.sigmoid(self.cue_head(last_out))
+        cue_logits = self.cue_head(last_out)
+        cue = torch.sigmoid(cue_logits)
 
         device = policy_probs.device
         prototype = torch.from_numpy(POLICY_PROTOTYPE_MATRIX).to(device=device, dtype=policy_probs.dtype)
@@ -60,8 +70,12 @@ class IWG(nn.Module):
         g_final = torch.clamp(g_mix + 0.15 * torch.tanh(gate_residual), 0, 1)
 
         return {
+            'policy_logits': policy_logits,
             'policy_probs': policy_probs,
+            'base_gate': g_final,
             'gate': g_final,
+            'event_embedding': last_out,
+            'cue_logits': cue_logits,
             'event_logits': event_logits,
             'cue': cue,
             'gate_residual': gate_residual,

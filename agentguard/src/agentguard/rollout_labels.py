@@ -37,6 +37,29 @@ def compute_soft_target(benefit: float, tau: float) -> float:
 compute_soft_targets = compute_soft_target
 
 
+def compute_label_confidence(
+    benefit: float,
+    tau: float,
+    coverage: float,
+) -> float:
+    magnitude = min(
+        abs(float(benefit)) / max(2.0 * float(tau), 1e-12),
+        1.0,
+    )
+    return float(np.clip(coverage, 0.0, 1.0) * magnitude)
+
+
+def compute_safe_soft_target(
+    benefit: float,
+    tau: float,
+    confidence: float,
+    fallback: float = 1.0,
+) -> float:
+    oracle_soft = compute_soft_target(benefit, tau)
+    confidence = float(np.clip(confidence, 0.0, 1.0))
+    return float(confidence * oracle_soft + (1.0 - confidence) * float(fallback))
+
+
 def compute_policy_soft_target(
     gate: np.ndarray,
     prototypes: Optional[np.ndarray] = None,
@@ -71,7 +94,16 @@ def build_rollout_labels(
         b_a = appearance_benefits[idx] if idx < len(appearance_benefits) else 0.0
         motion_target = compute_soft_target(b_m, tau_m)
         appearance_target = compute_soft_target(b_a, tau_a)
+        motion_confidence = compute_label_confidence(b_m, tau_m, 1.0)
+        appearance_confidence = compute_label_confidence(b_a, tau_a, 1.0)
+        motion_safe = compute_safe_soft_target(b_m, tau_m, motion_confidence)
+        appearance_safe = compute_safe_soft_target(
+            b_a,
+            tau_a,
+            appearance_confidence,
+        )
         gate = np.array([motion_target, appearance_target], dtype=np.float64)
+        safe_gate = np.array([motion_safe, appearance_safe], dtype=np.float64)
 
         sample_type = "matched" if event.has_detection else "unmatched"
         labels.append(
@@ -87,6 +119,10 @@ def build_rollout_labels(
                 "appearance_target": float(appearance_target),
                 "motion_soft_target": float(motion_target),
                 "appearance_soft_target": float(appearance_target),
+                "motion_safe_target": float(motion_safe),
+                "appearance_safe_target": float(appearance_safe),
+                "motion_label_confidence": float(motion_confidence),
+                "appearance_label_confidence": float(appearance_confidence),
                 "motion_oracle_hard": hard_gate_from_benefit(b_m),
                 "appearance_oracle_hard": hard_gate_from_benefit(b_a),
                 "target_gate": [
@@ -94,6 +130,8 @@ def build_rollout_labels(
                     hard_gate_from_benefit(b_a),
                 ],
                 "policy_soft_target": compute_policy_soft_target(gate),
+                "policy_safe_soft_target": compute_policy_soft_target(safe_gate),
+                "label_schema_version": 2,
                 "sample_type": sample_type,
                 "valid_motion": True,
                 "valid_appearance": True,
