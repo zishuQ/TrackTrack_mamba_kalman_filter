@@ -18,6 +18,8 @@ CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
 LOG_DIR="${RUN_ROOT}/logs"
 
 mkdir -p "${LABEL_DIR}" "${DATASET_DIR}" "${CHECKPOINT_DIR}" "${LOG_DIR}"
+echo "$$" > "${RUN_ROOT}/pipeline.pid"
+trap 'status=$?; echo "${status}" > "${RUN_ROOT}/pipeline.exit_code"' EXIT
 cd "${REPO_ROOT}"
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/3. Tracker:${REPO_ROOT}/agentguard/src:${PYTHONPATH:-}"
 
