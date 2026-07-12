@@ -384,7 +384,10 @@ def test_association_flushes_every_32_frames(tmp_path):
     assert len(sorted(seq_dir.glob("associations_*.pt"))) == 2
 
 
-def test_compact_reader_random_access_restores_event_state_detection_and_association(tmp_path):
+def test_compact_reader_random_access_restores_event_state_detection_and_association(
+    tmp_path,
+    monkeypatch,
+):
     split = _load_split_module()
     det_dir = tmp_path / "det" / "MOT17" / "all" / "seq"
     frames = {
@@ -427,6 +430,20 @@ def test_compact_reader_random_access_restores_event_state_detection_and_associa
         det_dir,
     )
     try:
+        import agentguard.data.cache_reader as cache_reader_module
+
+        real_pairwise_iou = cache_reader_module.pairwise_iou_xyxy
+        iou_input_shapes = []
+
+        def recording_pairwise_iou(boxes_a, boxes_b):
+            iou_input_shapes.append((boxes_a.shape, boxes_b.shape))
+            return real_pairwise_iou(boxes_a, boxes_b)
+
+        monkeypatch.setattr(
+            cache_reader_module,
+            "pairwise_iou_xyxy",
+            recording_pairwise_iou,
+        )
         record = next(reader.iter_event_records())
         event = reader.materialize_training_event(record)
         assert event.event_id == ev["event_id"]
@@ -455,6 +472,7 @@ def test_compact_reader_random_access_restores_event_state_detection_and_associa
             rtol=0.0,
             atol=1e-12,
         )
+        assert iou_input_shapes == [((1, 4), (2, 4))]
         assert event.pre_update_state.history[7][1] == pytest.approx(0.88)
         from agentguard.features.scalar import compute_scalar_features
 

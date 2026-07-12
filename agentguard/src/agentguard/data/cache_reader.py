@@ -318,9 +318,15 @@ class CompactEventCacheReader:
             ],
             axis=0,
         )
-        overlap = pairwise_iou_xyxy(boxes, boxes)
-        np.fill_diagonal(overlap, 0.0)
-        return overlap[col_idx].copy(), col_idx
+        # Only one overlap row is consumed by AssociationContext.  Computing
+        # the full NxN matrix here is especially costly during lazy dataset
+        # loading because this path runs once per sample and per epoch.
+        overlap_row = pairwise_iou_xyxy(
+            boxes[col_idx : col_idx + 1],
+            boxes,
+        )[0]
+        overlap_row[col_idx] = 0.0
+        return overlap_row, col_idx
 
     def _snapshot_from_record(self, record: dict, feature: np.ndarray, track_id: int):
         from agentguard.contracts.states import TrackStateSnapshot
