@@ -305,8 +305,14 @@ class CompactEventCacheReader:
         history = {}
         frames = np.asarray(record.get("recent_history_frames", []), dtype=np.int32)
         boxes = np.asarray(record.get("recent_history_boxes", []), dtype=np.float32)
-        for frame_id, box in zip(frames.tolist(), boxes):
-            history[int(frame_id)] = [np.asarray(box, dtype=np.float64)]
+        scores = np.asarray(record.get("recent_history_scores", []), dtype=np.float32)
+        fallback_score = float(record.get("score", 0.0))
+        for index, (frame_id, box) in enumerate(zip(frames.tolist(), boxes)):
+            score = float(scores[index]) if index < scores.size else fallback_score
+            history[int(frame_id)] = [
+                np.asarray(box, dtype=np.float64),
+                score,
+            ]
         return TrackStateSnapshot(
             track_id=int(track_id),
             box=np.asarray(record.get("box", np.zeros(4)), dtype=np.float64),

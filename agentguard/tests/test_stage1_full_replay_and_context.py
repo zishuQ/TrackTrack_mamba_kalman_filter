@@ -248,10 +248,12 @@ def test_association_context_is_built_and_wired():
         "cosine_distance": np.array([[0.1, 0.2, 0.3], [0.15, 0.05, 0.25], [0.3, 0.2, 0.4]], dtype=np.float64),
         "iou_similarity": np.array([[0.8, 0.6, 0.4], [0.7, 0.9, 0.5], [0.3, 0.2, 0.85]], dtype=np.float64),
     }
+    det_overlap = np.array([0.2, 0.0, 0.4], dtype=np.float64)
 
     ctx = build_association_context(
         meta, track_index=1, detection_index=1,
         num_tracks=3, num_detections=3, no_reid=False,
+        detection_overlap_row=det_overlap,
     )
 
     assert ctx.track_cost_row.shape == (3,)
@@ -261,10 +263,57 @@ def test_association_context_is_built_and_wired():
     assert ctx.num_tracks == 3
     assert ctx.num_detections == 3
     assert ctx.reid_available is True
-    # Row 1 (track_index=1)
+    # Track-to-detection costs still use row 1, while detection overlap is
+    # supplied independently from the detection pool.
     np.testing.assert_array_equal(ctx.track_cost_row, np.array([0.4, 0.2, 0.6]))
     np.testing.assert_array_equal(ctx.detection_cost_col, np.array([0.5, 0.2, 0.8]))
-    np.testing.assert_array_equal(ctx.detection_overlap_row, np.array([0.7, 0.9, 0.5]))
+    np.testing.assert_array_equal(ctx.detection_overlap_row, det_overlap)
+
+
+def test_association_context_without_detection_overlap_is_safe():
+    from integrations.agentguard.converters import build_association_context
+
+    ctx = build_association_context(
+        {"final_cost": np.zeros((1, 2), dtype=np.float64)},
+        track_index=0,
+        detection_index=0,
+        num_tracks=1,
+        num_detections=2,
+    )
+
+    np.testing.assert_array_equal(ctx.detection_overlap_row, np.zeros(2))
+
+
+def test_adapter_detection_overlap_uses_detection_pool_and_excludes_self():
+    from types import SimpleNamespace
+
+    from integrations.agentguard.adapter import AgentGuardTrackerAdapter
+
+    class Detection:
+        def __init__(self, box, score):
+            self.box = np.asarray(box, dtype=np.float64)
+            self.score = score
+
+        @property
+        def x1y1x2y2(self):
+            return self.box
+
+    first = Detection([0, 0, 9, 9], 0.9)
+    second = Detection([5, 0, 14, 9], 0.8)
+    adapter = AgentGuardTrackerAdapter(SimpleNamespace(dataset="MOT17"), "seq")
+
+    adapter.begin_frame(
+        frame_id=1,
+        img_width=1920,
+        img_height=1080,
+        detection_pool=[first, second],
+    )
+
+    overlap = adapter._frame_detection_overlap
+    assert overlap.shape == (2, 2)
+    np.testing.assert_array_equal(np.diag(overlap), np.zeros(2))
+    assert overlap[0, 1] == overlap[1, 0]
+    assert overlap[0, 1] > 0.0
 
 
 def test_association_context_no_reid_fallback():

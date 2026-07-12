@@ -25,10 +25,12 @@ def _compact_state(snapshot: dict | None) -> dict:
     history = snapshot.get("history") or {}
     frames = sorted(int(k) for k in history.keys())[-6:]
     boxes = []
+    scores = []
     for fid in frames:
         item = history.get(fid) or history.get(str(fid))
         if item is not None and len(item) > 0:
             boxes.append(np.asarray(item[0], dtype=np.float32))
+            scores.append(float(item[1]) if len(item) > 1 else float(snapshot.get("score", 0.0)))
     return {
         "mean": _np(snapshot.get("mean"), np.float32),
         "covariance": _np(snapshot.get("covariance"), np.float32),
@@ -43,6 +45,7 @@ def _compact_state(snapshot: dict | None) -> dict:
             if boxes
             else np.zeros((0, 4), dtype=np.float32)
         ),
+        "recent_history_scores": np.asarray(scores, dtype=np.float32),
         "history_count": int(len(history)),
     }
 

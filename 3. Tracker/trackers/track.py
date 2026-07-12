@@ -131,7 +131,10 @@ class Track(BaseTrack):
         for frame_id in frame_ids:
             hist_list = self.history[frame_id]
             if compact_history:
-                history_copy[frame_id] = [hist_list[0].copy()]
+                history_copy[frame_id] = [
+                    hist_list[0].copy(),
+                    float(hist_list[1]),
+                ]
             else:
                 history_copy[frame_id] = [
                     hist_list[0].copy(),

@@ -146,7 +146,11 @@ def test_track_compact_snapshot_copies_recent_6_only():
     }
     snap = track.snapshot_state(compact_history=True)
     assert sorted(snap.history.keys()) == [4, 5, 6, 7, 8, 9]
-    assert all(len(v) == 1 for v in snap.history.values())
+    assert all(len(v) == 2 for v in snap.history.values())
+    np.testing.assert_allclose(
+        [snap.history[i][1] for i in range(4, 10)],
+        [0.9] * 6,
+    )
 
 
 def test_sequence_enumeration_from_detection_manifest(tmp_path, monkeypatch):

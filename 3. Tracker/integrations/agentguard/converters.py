@@ -199,6 +199,7 @@ def build_association_context(
     num_tracks: int,
     num_detections: int,
     no_reid: bool = False,
+    detection_overlap_row: Optional[np.ndarray] = None,
 ) -> AssociationContext:
     """Build an ``AssociationContext`` from raw association matrices.
 
@@ -222,6 +223,10 @@ def build_association_context(
         Total number of detections in the association.
     no_reid : bool
         If True, cosine_distance_matrix is set to zeros.
+    detection_overlap_row : np.ndarray, optional
+        IoU of the accepted detection against every detection in the current
+        detection pool.  This is a detection-to-detection row and must not be
+        derived from the track-to-detection IoU matrix.
 
     Returns
     -------
@@ -241,14 +246,20 @@ def build_association_context(
 
     raw_cost_row = np.asarray(meta.get("raw_cost", final_cost_matrix), dtype=np.float64)[track_index, :].copy()
 
-    iou_sim = np.asarray(meta.get("iou_similarity",
-        np.zeros_like(final_cost_matrix)), dtype=np.float64)
-    detection_overlap_row = iou_sim[track_index, :].copy()
+    if detection_overlap_row is None:
+        overlap_row = np.zeros(num_detections, dtype=np.float64)
+    else:
+        overlap_row = np.asarray(detection_overlap_row, dtype=np.float64).reshape(-1).copy()
+        if overlap_row.shape != (num_detections,):
+            raise ValueError(
+                "detection_overlap_row must have one value per detection: "
+                f"expected {(num_detections,)}, got {overlap_row.shape}"
+            )
 
     return AssociationContext(
         track_cost_row=track_cost_row,
         detection_cost_col=detection_cost_col,
-        detection_overlap_row=detection_overlap_row,
+        detection_overlap_row=overlap_row,
         accepted_detection_index=detection_index,
         num_tracks=num_tracks,
         num_detections=num_detections,

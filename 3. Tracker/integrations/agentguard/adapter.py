@@ -11,6 +11,7 @@ from agentguard.contracts.states import (
 )
 
 from trackers.track import Track
+from trackers.utils import bbox_overlaps
 
 from .converters import (
     build_association_context,
@@ -83,6 +84,17 @@ class AgentGuardTrackerAdapter:
 
         self._frame_detections = detection_pool if detection_pool is not None else []
         self._frame_detection_sources = detection_sources if detection_sources is not None else []
+
+        # Keep detection overlap separate from the track-to-detection
+        # association matrices.  The former describes ambiguity in the
+        # current detection pool and is stable for every accepted track.
+        boxes = np.asarray(
+            [det.x1y1x2y2 for det in self._frame_detections],
+            dtype=np.float64,
+        ).reshape((-1, 4))
+        self._frame_detection_overlap = bbox_overlaps(boxes, boxes)
+        if self._frame_detection_overlap.size:
+            np.fill_diagonal(self._frame_detection_overlap, 0.0)
 
         # Serialize detection pool with stable indices
         detections_serialized = []
@@ -231,6 +243,11 @@ class AgentGuardTrackerAdapter:
             num_tracks=num_tracks if num_tracks > 0 else association_meta.get("num_tracks", 0),
             num_detections=num_detections if num_detections > 0 else association_meta.get("num_detections", 0),
             no_reid=no_reid,
+            detection_overlap_row=(
+                self._frame_detection_overlap[det_idx].copy()
+                if 0 <= det_idx < len(self._frame_detection_overlap)
+                else None
+            ),
         )
 
         return TrackEvent(
@@ -697,7 +714,10 @@ class AgentGuardTrackerAdapter:
         for frame_id, item in snapshot.history.items():
             if item is None or len(item) == 0:
                 continue
-            history[int(frame_id)] = [np.asarray(item[0], dtype=np.float32).copy()]
+            history[int(frame_id)] = [
+                np.asarray(item[0], dtype=np.float32).copy(),
+                float(item[1]) if len(item) > 1 else float(snapshot.score),
+            ]
         return {
             "track_id": int(snapshot.track_id),
             "box": np.asarray(snapshot.box, dtype=np.float32).copy(),
