@@ -222,6 +222,48 @@ def _stratified_record_sample(records: list[dict[str, Any]], max_samples: int) -
     return selected
 
 
+def _record_sequence_order_key(record: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        str(record.get("sequence", "")),
+        int(record.get("frame_id", 0)),
+        int(record.get("event_id", 0)),
+        int(record.get("track_id", 0)),
+        int(record.get("candidate_detection_index", -1)),
+        str(record.get("candidate_type", "A")),
+    )
+
+
+def _slice_records_by_sequence_ratio(
+    records: list[dict[str, Any]],
+    *,
+    start_ratio: float,
+    end_ratio: float,
+) -> list[dict[str, Any]]:
+    if start_ratio <= 0.0 and end_ratio >= 1.0:
+        return records
+    if not (0.0 <= start_ratio < end_ratio <= 1.0):
+        raise ValueError(
+            f"Invalid sequence sample range [{start_ratio}, {end_ratio}); "
+            "expected 0 <= start < end <= 1."
+        )
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        groups.setdefault(str(record.get("sequence", "")), []).append(record)
+
+    selected: list[dict[str, Any]] = []
+    for seq in sorted(groups):
+        bucket = sorted(groups[seq], key=_record_sequence_order_key)
+        n = len(bucket)
+        start = int(n * start_ratio)
+        end = int(n * end_ratio)
+        if end <= start and n > 0:
+            end = min(n, start + 1)
+        selected.extend(bucket[start:end])
+    selected.sort(key=_record_sequence_order_key)
+    return selected
+
+
 def _seed_training(seed: int) -> None:
     random.seed(int(seed))
     np.random.seed(int(seed))
@@ -1316,6 +1358,18 @@ def _add_build_student_v0_data_parser(subparsers: argparse._SubParsersAction) ->
     )
     p.add_argument("--max-samples", type=int, default=0, help="Limit indexed labels (0=all).")
     p.add_argument(
+        "--sample-start-ratio",
+        type=float,
+        default=0.0,
+        help="Per-sequence contiguous sample start ratio, inclusive. Use with --sample-end-ratio.",
+    )
+    p.add_argument(
+        "--sample-end-ratio",
+        type=float,
+        default=1.0,
+        help="Per-sequence contiguous sample end ratio, exclusive. Example: 0.3 for the first 30%%.",
+    )
+    p.add_argument(
         "--split-policy",
         choices=["sequence_holdout", "train_all"],
         default="sequence_holdout",
@@ -1379,6 +1433,11 @@ def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
         candidate_weights=args.candidate_weights,
         max_per_candidate_type=args.max_per_candidate_type,
     )
+    records = _slice_records_by_sequence_ratio(
+        records,
+        start_ratio=float(args.sample_start_ratio),
+        end_ratio=float(args.sample_end_ratio),
+    )
     if not records:
         raise RuntimeError("No valid rollout labels loaded.")
 
@@ -1433,6 +1492,8 @@ def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
         "num_train": len(train_records),
         "num_val": len(val_records),
         "split_policy": args.split_policy,
+        "sample_start_ratio": float(args.sample_start_ratio),
+        "sample_end_ratio": float(args.sample_end_ratio),
         "candidate_types": sorted({str(r.get("candidate_type", "A")) for r in records}),
         "candidate_weights": args.candidate_weights,
         "max_per_candidate_type": int(args.max_per_candidate_type),
@@ -1444,6 +1505,145 @@ def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
 
     print(json.dumps(metadata, indent=2))
     print(f"Saved Student-V0 lazy indexes to {datasets_dir}")
+
+
+# ===================================================================
+# Subcommand: precompute_student_v0_iwg_outputs
+# ===================================================================
+
+
+def _add_precompute_student_v0_iwg_outputs_parser(
+    subparsers: argparse._SubParsersAction,
+) -> None:
+    p = subparsers.add_parser(
+        "precompute_student_v0_iwg_outputs",
+        help="Cache frozen IWG outputs for Student-V0 records.",
+    )
+    p.add_argument("--dataset", default="MOT17", help="Dataset name.")
+    p.add_argument("--mode", default="all", help="Dataset mode used by build_student_v0_data.")
+    p.add_argument("--device", default="cuda", help="Device for frozen IWG inference.")
+    p.add_argument("--batch-size", type=int, default=1024, help="IWG inference batch size.")
+    p.add_argument("--num-workers", type=int, default=2, help="DataLoader worker count.")
+    p.add_argument("--max-records", type=int, default=0, help="Limit records for a smoke test (0=all).")
+    p.add_argument("--dataset-dir", required=True, help="Student-V0 dataset index directory.")
+    p.add_argument("--iwg-checkpoint", required=True, help="Frozen IWG checkpoint (.pt).")
+    p.add_argument("--output-cache", required=True, help="Output NumPy cache (.npz).")
+
+
+def _cmd_precompute_student_v0_iwg_outputs(args: argparse.Namespace) -> None:
+    import torch
+    from torch.utils.data import DataLoader
+
+    from agentguard.models.iwg import IWG
+    from agentguard.training.checkpointing import load_checkpoint
+    from agentguard.features.builder import EventFeatureBuilder
+    from agentguard.features.normalization import NormalizationStats
+    from agentguard.v0_pipeline import CompactV0IWGDataset, read_jsonl, student_v0_record_key
+
+    device = args.device if torch.cuda.is_available() and args.device == "cuda" else "cpu"
+    dataset_dir = os.path.abspath(args.dataset_dir)
+    metadata_path = os.path.join(dataset_dir, "metadata.json")
+    if not os.path.isfile(metadata_path):
+        raise FileNotFoundError(f"Student-V0 metadata not found at {metadata_path}")
+    with open(metadata_path) as f:
+        metadata = json.load(f)
+
+    index_path = os.path.join(dataset_dir, metadata.get("train_index_file", "index.jsonl"))
+    records = read_jsonl(index_path)
+    if not records:
+        raise RuntimeError(f"No records found in {index_path}")
+    if args.max_records > 0:
+        records = records[: int(args.max_records)]
+
+    norm_stats = NormalizationStats.load(os.path.join(dataset_dir, "norm_stats.npz"))
+    reid_dim = int(metadata["reid_dim"])
+    feature_builder = EventFeatureBuilder(reid_dim, norm_stats)
+    model = IWG(reid_dim=reid_dim).to(device)
+    checkpoint_metadata = load_checkpoint(args.iwg_checkpoint, model)
+    model.eval()
+
+    dataset = CompactV0IWGDataset(
+        records,
+        metadata["event_cache_root"],
+        metadata["detection_cache_root"],
+        args.dataset,
+        metadata["split"],
+        feature_builder,
+    )
+    loader_kwargs = {
+        "num_workers": max(0, int(args.num_workers)),
+        "pin_memory": device.startswith("cuda"),
+    }
+    if loader_kwargs["num_workers"] > 0:
+        loader_kwargs["prefetch_factor"] = 2
+        loader_kwargs["persistent_workers"] = False
+    loader = DataLoader(
+        dataset,
+        batch_size=max(1, int(args.batch_size)),
+        shuffle=False,
+        collate_fn=CompactV0IWGDataset.collate_fn,
+        **loader_kwargs,
+    )
+
+    policies = []
+    gates = []
+    print(
+        f"Precomputing frozen IWG outputs: {len(records)} records, "
+        f"device={device}, batch_size={max(1, int(args.batch_size))}",
+        flush=True,
+    )
+    with torch.inference_mode():
+        for batch_idx, batch in enumerate(loader, start=1):
+            track_t = batch["track_feats"].to(device, non_blocking=True)
+            det_t = batch["det_feats"].to(device, non_blocking=True)
+            scalar_t = batch["scalar_feats"].to(device, non_blocking=True)
+            mask_t = batch["mask"].to(device, non_blocking=True)
+            outputs = model(track_t, det_t, scalar_t, mask_t)
+            policies.append(outputs["policy_probs"].cpu().numpy().astype(np.float32))
+            gates.append(outputs["gate"].cpu().numpy().astype(np.float32))
+            if batch_idx == 1 or batch_idx % 20 == 0 or batch_idx == len(loader):
+                print(
+                    f"IWG cache batch {batch_idx}/{len(loader)} "
+                    f"({min(batch_idx * loader.batch_size, len(records))}/{len(records)})",
+                    flush=True,
+                )
+
+    output_cache = os.path.abspath(args.output_cache)
+    Path(output_cache).parent.mkdir(parents=True, exist_ok=True)
+    keys = np.asarray([student_v0_record_key(record) for record in records])
+    policy_array = np.concatenate(policies, axis=0)
+    gate_array = np.concatenate(gates, axis=0)
+    if len(keys) != len(policy_array) or len(keys) != len(gate_array):
+        raise RuntimeError("IWG output count does not match Student-V0 index count")
+    if len(set(keys.tolist())) != len(keys):
+        raise RuntimeError("Student-V0 record keys are not unique; refusing to write ambiguous cache")
+
+    np.savez_compressed(
+        output_cache,
+        keys=keys,
+        policy_probs=policy_array,
+        gates=gate_array,
+    )
+    with open(Path(output_cache).with_suffix(".json"), "w") as f:
+        json.dump(
+            {
+                "dataset": args.dataset,
+                "mode": args.mode,
+                "dataset_dir": dataset_dir,
+                "index_file": index_path,
+                "num_records": len(records),
+                "reid_dim": reid_dim,
+                "iwg_checkpoint": os.path.abspath(args.iwg_checkpoint),
+                "iwg_raw_epoch": checkpoint_metadata.get("epoch"),
+                "device": device,
+                "policy_shape": list(policy_array.shape),
+                "gate_shape": list(gate_array.shape),
+            },
+            f,
+            indent=2,
+        )
+    dataset.close()
+    print(f"Saved IWG output cache to {output_cache}", flush=True)
 
 
 # ===================================================================
@@ -1497,6 +1697,14 @@ def _add_train_student_v0_parser(subparsers: argparse._SubParsersAction) -> None
         help="Device used for TGR full validation. CPU avoids long CUDA eval illegal-memory failures.",
     )
     p.add_argument(
+        "--iwg-output-cache",
+        default="",
+        help=(
+            "Optional .npz cache of frozen IWG outputs. When set, TGR training "
+            "uses the cached IWG policy/gates instead of label-derived soft targets."
+        ),
+    )
+    p.add_argument(
         "--skip-iwg-training",
         action="store_true",
         help="Skip IWG training and load an existing IWG checkpoint before TGR training.",
@@ -1510,6 +1718,11 @@ def _add_train_student_v0_parser(subparsers: argparse._SubParsersAction) -> None
         "--iwg-checkpoint",
         default="",
         help="IWG checkpoint to load when --skip-iwg-training is set. Defaults to checkpoint-dir/iwg/iwg_best.pt.",
+    )
+    p.add_argument(
+        "--iwg-resume-checkpoint",
+        default="",
+        help="Resume IWG training from this checkpoint, typically checkpoint-dir/iwg/iwg_last.pt.",
     )
     p.add_argument(
         "--tgr-resume-checkpoint",
@@ -1532,6 +1745,7 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
     from agentguard.v0_pipeline import (
         CompactV0IWGDataset,
         CompactV0TGRDataset,
+        StudentV0IWGOutputCache,
         read_jsonl,
     )
 
@@ -1583,6 +1797,7 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
         "tgr_window_stride": max(int(args.tgr_window_stride), 1),
         "early_stop_patience": max(2, args.epochs + 1),
         "full_val_every": max(0, int(args.full_val_every)),
+        "resume_from": args.iwg_resume_checkpoint,
     }
     iwg_model = IWG(reid_dim=reid_dim).to(device)
     loader_kwargs = {
@@ -1696,6 +1911,17 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
 
     tgr_model = TGR(reid_dim=reid_dim).to(device)
 
+    iwg_output_cache = None
+    if args.iwg_output_cache:
+        iwg_output_cache = StudentV0IWGOutputCache(args.iwg_output_cache)
+        if len(iwg_output_cache.keys) == 0:
+            raise RuntimeError(f"IWG output cache is empty: {args.iwg_output_cache}")
+        print(
+            f"Loaded frozen IWG output cache: {args.iwg_output_cache} "
+            f"({len(iwg_output_cache.keys)} records)",
+            flush=True,
+        )
+
     # Load best IWG checkpoint
     best_iwg_path = args.iwg_checkpoint or os.path.join(iwg_output_dir, "iwg_best.pt")
     if os.path.isfile(best_iwg_path):
@@ -1715,6 +1941,7 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
         dataset,
         metadata["split"],
         feature_builder,
+        iwg_output_cache=iwg_output_cache,
         window_stride=max(int(args.tgr_window_stride), 1),
     )
     tgr_val_ds = CompactV0TGRDataset(
@@ -1724,6 +1951,7 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
         dataset,
         metadata["split"],
         feature_builder,
+        iwg_output_cache=iwg_output_cache,
         window_stride=max(int(args.tgr_window_stride), 1),
     )
     tgr_full_val_ds = None
@@ -1735,6 +1963,7 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
             dataset,
             metadata["split"],
             feature_builder,
+            iwg_output_cache=iwg_output_cache,
             window_stride=max(int(args.tgr_window_stride), 1),
         )
     if len(tgr_train_ds) == 0:
@@ -2656,6 +2885,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     _add_build_rollout_labels_parser(subparsers)
     _add_evaluate_oracle_parser(subparsers)
     _add_build_student_v0_data_parser(subparsers)
+    _add_precompute_student_v0_iwg_outputs_parser(subparsers)
     _add_train_student_v0_parser(subparsers)
     _add_select_teacher_events_parser(subparsers)
     _add_build_evidence_packets_parser(subparsers)
@@ -2674,6 +2904,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         "build_rollout_labels": _cmd_build_rollout_labels,
         "evaluate_oracle": _cmd_evaluate_oracle,
         "build_student_v0_data": _cmd_build_student_v0_data,
+        "precompute_student_v0_iwg_outputs": _cmd_precompute_student_v0_iwg_outputs,
         "train_student_v0": _cmd_train_student_v0,
         "select_teacher_events": _cmd_select_teacher_events,
         "build_evidence_packets": _cmd_build_evidence_packets,

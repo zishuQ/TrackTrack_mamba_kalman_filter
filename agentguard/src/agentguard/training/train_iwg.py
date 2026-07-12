@@ -88,6 +88,7 @@ def train_iwg(
         "scalar_dim": 63,
         "event_dim": 128,
         "full_val_every": 0,
+        "resume_from": "",
     }
     cfg.update(config)
 
@@ -139,25 +140,60 @@ def train_iwg(
 
     metrics_file = os.path.join(output_dir, "metrics.jsonl")
     epoch_csv_path = os.path.join(output_dir, "epoch_metrics.csv")
+    last_ckpt_path = os.path.join(output_dir, "iwg_last.pt")
+
+    start_epoch = 0
+    resume_from = str(cfg.get("resume_from") or "")
+    if resume_from:
+        resume_metadata = load_checkpoint(resume_from, model, optimizer, scheduler)
+        start_epoch = int(resume_metadata.get("epoch", -1)) + 1
+        global_step = start_epoch * steps_per_epoch
+        logger.info(
+            f"Resumed IWG from {resume_from} at epoch {start_epoch} "
+            f"(checkpoint epoch={resume_metadata.get('epoch', '?')})."
+        )
+        best_ckpt_path = os.path.join(output_dir, "iwg_best.pt")
+        if os.path.isfile(best_ckpt_path):
+            best_ckpt = torch.load(best_ckpt_path, map_location="cpu", weights_only=False)
+            best_meta = best_ckpt.get("metadata", {})
+            best_selection = best_meta.get("best_selection_metrics") or {}
+            best_val_loss = float(
+                best_selection.get(
+                    "loss",
+                    best_meta.get("full_val_metrics", best_meta.get("val_metrics", {})).get(
+                        "loss", float("inf")
+                    ),
+                )
+            )
+            best_epoch = int(best_ckpt.get("epoch", -1)) + 1
+            best_metric_source = str(best_meta.get("best_metric_source", "val"))
+            best_metrics = dict(best_selection or best_meta.get("val_metrics", {}))
+            logger.info(
+                f"Existing best checkpoint: epoch {best_epoch} "
+                f"({best_metric_source}_loss={best_val_loss:.6f})."
+            )
+
+    resume_mode = start_epoch > 0
 
     # Open metrics file for streaming.
-    metrics_fh = open(metrics_file, "w")
+    metrics_fh = open(metrics_file, "a" if resume_mode else "w")
 
     # CSV header.
-    with open(epoch_csv_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "epoch", "train_loss", "val_loss", "gate_accuracy",
-            "motion_mae", "appearance_mae", "policy_kl",
-            "learning_rate", "epoch_time_s",
-        ])
+    if not resume_mode or not os.path.isfile(epoch_csv_path):
+        with open(epoch_csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "epoch", "train_loss", "val_loss", "gate_accuracy",
+                "motion_mae", "appearance_mae", "policy_kl",
+                "learning_rate", "epoch_time_s",
+            ])
 
     train_tracker = MetricsTracker()
 
     # ------------------------------------------------------------------
     # Training loop.
     # ------------------------------------------------------------------
-    for epoch in range(cfg["epochs"]):
+    for epoch in range(start_epoch, cfg["epochs"]):
         epoch_start = time.time()
         logger.info(f"--- Epoch {epoch + 1}/{cfg['epochs']} ---")
 
@@ -310,7 +346,6 @@ def train_iwg(
         )
 
         # Save last checkpoint.
-        last_ckpt_path = os.path.join(output_dir, "iwg_last.pt")
         save_checkpoint(
             model, optimizer, scheduler, epoch,
             metadata={

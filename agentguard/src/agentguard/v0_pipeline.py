@@ -638,6 +638,40 @@ def fit_norm_stats_from_records(
     return stats
 
 
+def student_v0_record_key(record: Dict[str, Any]) -> str:
+    """Return a stable key for one Student-V0 index record."""
+    return "|".join(
+        [
+            str(record.get("event_id", "")),
+            str(record.get("candidate_type", "A")),
+            str(record.get("candidate_detection_index", -1)),
+        ]
+    )
+
+
+class StudentV0IWGOutputCache:
+    """Small on-disk cache of frozen IWG outputs keyed by index records."""
+
+    def __init__(self, path: str | os.PathLike[str]):
+        self.path = str(path)
+        with np.load(self.path, allow_pickle=False) as data:
+            self.keys = np.asarray(data["keys"]).astype(str)
+            self.policy_probs = np.asarray(data["policy_probs"], dtype=np.float32)
+            self.gates = np.asarray(data["gates"], dtype=np.float32)
+        if self.policy_probs.shape != (len(self.keys), 5):
+            raise ValueError(f"Invalid policy_probs shape in {self.path}: {self.policy_probs.shape}")
+        if self.gates.shape != (len(self.keys), 2):
+            raise ValueError(f"Invalid gates shape in {self.path}: {self.gates.shape}")
+        self._indices = {key: idx for idx, key in enumerate(self.keys)}
+
+    def get(self, record: Dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+        key = student_v0_record_key(record)
+        idx = self._indices.get(key)
+        if idx is None:
+            raise KeyError(f"Record key is missing from IWG output cache: {key}")
+        return self.policy_probs[idx].astype(np.float64), self.gates[idx].astype(np.float64)
+
+
 class _CompactDatasetBase(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -647,6 +681,7 @@ class _CompactDatasetBase(torch.utils.data.Dataset):
         dataset: str,
         split: str,
         feature_builder: EventFeatureBuilder,
+        iwg_output_cache: Optional[StudentV0IWGOutputCache] = None,
     ) -> None:
         self.records = records
         self.event_cache_root = Path(event_cache_root)
@@ -654,6 +689,7 @@ class _CompactDatasetBase(torch.utils.data.Dataset):
         self.dataset = dataset
         self.split = split
         self.feature_builder = feature_builder
+        self.iwg_output_cache = iwg_output_cache
         self._readers: Dict[str, CompactEventCacheReader] = {}
 
     def close(self) -> None:
@@ -687,14 +723,19 @@ class _CompactDatasetBase(torch.utils.data.Dataset):
             )
         else:
             event = reader.materialize_training_event(event_record)
-        event.iwg_gate = np.array(
-            [record.get("motion_soft_target", 1.0), record.get("appearance_soft_target", 1.0)],
-            dtype=np.float64,
-        )
-        event.iwg_policy_probs = np.asarray(
-            record.get("policy_soft_target", [0.2] * 5),
-            dtype=np.float64,
-        )
+        if self.iwg_output_cache is not None:
+            policy_probs, gate = self.iwg_output_cache.get(record)
+            event.iwg_gate = gate
+            event.iwg_policy_probs = policy_probs
+        else:
+            event.iwg_gate = np.array(
+                [record.get("motion_soft_target", 1.0), record.get("appearance_soft_target", 1.0)],
+                dtype=np.float64,
+            )
+            event.iwg_policy_probs = np.asarray(
+                record.get("policy_soft_target", [0.2] * 5),
+                dtype=np.float64,
+            )
         return event
 
     @staticmethod
