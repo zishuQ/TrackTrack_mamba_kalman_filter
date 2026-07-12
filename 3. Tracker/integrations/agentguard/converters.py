@@ -233,6 +233,18 @@ def build_association_context(
     AssociationContext
     """
     final_cost_matrix = np.asarray(meta["final_cost"], dtype=np.float64)
+    expected_shape = (num_tracks, num_detections)
+    if final_cost_matrix.shape != expected_shape:
+        raise ValueError(
+            "final_cost shape must match association dimensions: "
+            f"{final_cost_matrix.shape} != {expected_shape}"
+        )
+    if not (0 <= track_index < num_tracks):
+        raise IndexError(f"track_index {track_index} outside [0, {num_tracks})")
+    if not (0 <= detection_index < num_detections):
+        raise IndexError(
+            f"detection_index {detection_index} outside [0, {num_detections})"
+        )
     track_cost_row = final_cost_matrix[track_index, :].copy()
     detection_cost_col = final_cost_matrix[:, detection_index].copy()
 

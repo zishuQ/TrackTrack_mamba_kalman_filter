@@ -55,6 +55,11 @@ class EventFeatureBuilder:
             return arr[: self._scalar_dim]
         return np.pad(arr, (0, self._scalar_dim - arr.size))
 
+    def _event_scalar(self, event: TrackEvent) -> np.ndarray:
+        if event.scalar_features is None:
+            event.scalar_features = self.compute_scalar(event)
+        return self._fit_scalar(event.scalar_features)
+
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
@@ -118,7 +123,7 @@ class EventFeatureBuilder:
                 det_feats[i] = self._fit_reid(evt.detection_feature)
             # else stays zero
 
-            scalar_feats[i] = self._fit_scalar(evt.scalar_features) if evt.scalar_features is not None else np.zeros(self._scalar_dim, dtype=np.float64)
+            scalar_feats[i] = self._event_scalar(evt)
 
         # Optional normalisation
         scalar_feats = self.normalize_scalars(scalar_feats)
@@ -168,8 +173,7 @@ class EventFeatureBuilder:
                 if evt.has_detection and evt.detection_feature.size > 0:
                     det_feats[b, i] = self._fit_reid(evt.detection_feature)
 
-                if evt.scalar_features is not None:
-                    scalar_feats[b, i] = self._fit_scalar(evt.scalar_features)
+                scalar_feats[b, i] = self._event_scalar(evt)
 
         scalar_feats = self.normalize_scalars(scalar_feats).astype(np.float32, copy=False)
 
@@ -219,7 +223,7 @@ class EventFeatureBuilder:
             if evt.has_detection and evt.detection_feature.size > 0:
                 det_feats[i] = self._fit_reid(evt.detection_feature)
 
-            scalar_feats[i] = self._fit_scalar(evt.scalar_features)
+            scalar_feats[i] = self._event_scalar(evt)
 
             if evt.iwg_policy_probs is not None:
                 iwg_policy_probs[i] = evt.iwg_policy_probs.ravel()
@@ -275,7 +279,7 @@ class EventFeatureBuilder:
                 if evt.has_detection and evt.detection_feature.size > 0:
                     det_feats[b, i] = self._fit_reid(evt.detection_feature)
 
-                scalar_feats[b, i] = self._fit_scalar(evt.scalar_features)
+                scalar_feats[b, i] = self._event_scalar(evt)
 
                 if evt.iwg_policy_probs is not None:
                     iwg_policy_probs[b, i] = np.asarray(evt.iwg_policy_probs).reshape(-1)

@@ -52,6 +52,8 @@ class Tracker(object):
                 device = getattr(args, 'agentguard_device', 'cpu')
 
                 def _load_checkpoint(ckpt_path):
+                    from agentguard.data.cache_schema import FEATURE_SCHEMA_SHA256
+
                     checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
 
                     if 'model_state_dict' in checkpoint:
@@ -85,6 +87,11 @@ class Tracker(object):
                         raise ValueError(f"Checkpoint {ckpt_path} missing normalization_mean/std")
                     if feature_schema_sha256 is None:
                         raise ValueError(f"Checkpoint {ckpt_path} missing required field 'feature_schema_sha256'")
+                    if feature_schema_sha256 != FEATURE_SCHEMA_SHA256:
+                        raise ValueError(
+                            f"Checkpoint {ckpt_path} feature schema mismatch: "
+                            f"{feature_schema_sha256!r} != {FEATURE_SCHEMA_SHA256!r}"
+                        )
                     pp_arr = np.asarray(policy_prototypes)
                     if pp_arr.shape != (5, 2):
                         raise ValueError(

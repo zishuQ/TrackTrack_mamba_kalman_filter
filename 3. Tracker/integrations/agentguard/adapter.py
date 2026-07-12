@@ -5,13 +5,13 @@ import numpy as np
 from agentguard.contracts.enums import DetectionSource
 from agentguard.contracts.events import TrackEvent
 from agentguard.contracts.outputs import GateDecision
+from agentguard.features.geometry import pairwise_iou_xyxy
 from agentguard.contracts.states import (
     DetectionObservation,
     TrackStateSnapshot,
 )
 
 from trackers.track import Track
-from trackers.utils import bbox_overlaps
 
 from .converters import (
     build_association_context,
@@ -60,6 +60,7 @@ class AgentGuardTrackerAdapter:
         # Per-frame detection pool for stable indexing
         self._frame_detections: List[Track] = []
         self._frame_detection_sources: List[int] = []
+        self._frame_detection_overlap = np.zeros((0, 0), dtype=np.float64)
 
     # ------------------------------------------------------------------
     # Frame lifecycle
@@ -92,8 +93,8 @@ class AgentGuardTrackerAdapter:
             [det.x1y1x2y2 for det in self._frame_detections],
             dtype=np.float64,
         ).reshape((-1, 4))
-        self._frame_detection_overlap = bbox_overlaps(boxes, boxes)
-        if self._frame_detection_overlap.size:
+        self._frame_detection_overlap = pairwise_iou_xyxy(boxes, boxes)
+        if boxes.shape[0] > 0:
             np.fill_diagonal(self._frame_detection_overlap, 0.0)
 
         # Serialize detection pool with stable indices
@@ -171,6 +172,7 @@ class AgentGuardTrackerAdapter:
             "angle_distance": np.asarray(association_meta["angle_distance"], dtype=np.float32).copy(),
             "assignment_round": np.asarray(association_meta["assignment_round"], dtype=np.int16).copy(),
             "assignment_threshold": np.asarray(association_meta["assignment_threshold"], dtype=np.float32).copy(),
+            "detection_source": np.asarray(association_meta["detection_source"], dtype=np.int8).copy(),
             "reid_available": not bool(no_reid),
         }
 

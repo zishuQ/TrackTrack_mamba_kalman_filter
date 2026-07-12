@@ -288,6 +288,7 @@ def test_adapter_detection_overlap_uses_detection_pool_and_excludes_self():
     from types import SimpleNamespace
 
     from integrations.agentguard.adapter import AgentGuardTrackerAdapter
+    from agentguard.features.geometry import pairwise_iou_xyxy
 
     class Detection:
         def __init__(self, box, score):
@@ -310,7 +311,13 @@ def test_adapter_detection_overlap_uses_detection_pool_and_excludes_self():
     )
 
     overlap = adapter._frame_detection_overlap
+    expected = pairwise_iou_xyxy(
+        np.stack([first.box, second.box]),
+        np.stack([first.box, second.box]),
+    )
+    np.fill_diagonal(expected, 0.0)
     assert overlap.shape == (2, 2)
+    np.testing.assert_allclose(overlap, expected, rtol=0.0, atol=1e-12)
     np.testing.assert_array_equal(np.diag(overlap), np.zeros(2))
     assert overlap[0, 1] == overlap[1, 0]
     assert overlap[0, 1] > 0.0

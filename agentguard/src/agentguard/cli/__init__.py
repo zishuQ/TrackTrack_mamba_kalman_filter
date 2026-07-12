@@ -30,6 +30,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from agentguard.data.cache_schema import (
+    COMPACT_CACHE_SCHEMA_VERSION,
+    FEATURE_SCHEMA_DESCRIPTOR,
+    FEATURE_SCHEMA_SHA256,
+)
+
 # ---------------------------------------------------------------------------
 # Version
 # ---------------------------------------------------------------------------
@@ -557,7 +563,8 @@ def _cmd_cache_events(args: argparse.Namespace) -> None:
         tracker_config = {
             "agentguard_mode": "off",
             "capture_agentguard_events": True,
-            "schema_version": 2,
+            "schema_version": COMPACT_CACHE_SCHEMA_VERSION,
+            "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
             "dataset": dataset,
             "mode": mode,
             "sequence": seq_name,
@@ -579,7 +586,8 @@ def _cmd_cache_events(args: argparse.Namespace) -> None:
                 existing = json.load(f)
             if (
                 existing.get("complete")
-                and int(existing.get("schema_version", 0)) == 2
+                and int(existing.get("schema_version", 0)) == COMPACT_CACHE_SCHEMA_VERSION
+                and existing.get("feature_schema_sha256") == FEATURE_SCHEMA_SHA256
                 and existing.get("tracker_config_sha256") == tracker_config_hash
                 and existing.get("detection_cache_manifest_sha256") == detection_manifest_sha
             ):
@@ -599,7 +607,7 @@ def _cmd_cache_events(args: argparse.Namespace) -> None:
             association_flush_size=32,
             config_hash=config_hash,
             source_commit=source_commit,
-            feature_schema_sha256="",
+            feature_schema_sha256=FEATURE_SCHEMA_SHA256,
             detection_cache_manifest_sha256=detection_manifest_sha,
             tracker_config_sha256=tracker_config_hash,
             total_sequence_frames=total_frames,
@@ -699,6 +707,7 @@ def _add_validate_cache_parser(subparsers: argparse._SubParsersAction) -> None:
 def _cmd_validate_cache(args: argparse.Namespace) -> None:
     from agentguard.data.cache_reader import CompactEventCacheReader
     from agentguard.data.detection_cache import sequence_cache_dir
+    from agentguard.features.scalar import compute_scalar_features
 
     dataset = args.dataset
     mode = args.mode
@@ -706,8 +715,7 @@ def _cmd_validate_cache(args: argparse.Namespace) -> None:
     cache_root = os.path.join(args.event_cache_root, dataset, split)
 
     if not os.path.isdir(cache_root):
-        print(f"Cache directory not found: {cache_root}")
-        return
+        raise FileNotFoundError(f"Cache directory not found: {cache_root}")
 
     sequences = sorted(
         d
@@ -717,18 +725,30 @@ def _cmd_validate_cache(args: argparse.Namespace) -> None:
         and not d.startswith("_")
     )
 
-    total_events = 0
-    matched_events = 0
-    unmatched_events = 0
-    association_record_count = 0
-    invalid_detection_indices = 0
-    duplicate_event_ids = 0
-    warp_alignment_errors = 0
-    feature_nonzero_count = 0
-    feature_element_count = 0
+    totals = {
+        "total_events": 0,
+        "matched_events": 0,
+        "unmatched_events": 0,
+        "association_record_count": 0,
+        "invalid_detection_indices": 0,
+        "duplicate_event_ids": 0,
+        "warp_alignment_errors": 0,
+        "history_length_mismatches": 0,
+        "context_shape_errors": 0,
+        "overlap_contract_errors": 0,
+        "association_local_column_errors": 0,
+        "scalar_nonfinite_events": 0,
+    }
+    scalar_abs_sum = 0.0
+    scalar_abs_count = 0
+    scalar_max_abs = 0.0
+    scalar_index_abs = {25: [], 56: [], 57: []}
+    feature_values = {25: [], 56: [], 57: []}
+    feature_nonzero_count = feature_element_count = 0
     reid_dim = 0
     empty_caches: List[str] = []
     incomplete_sequences: List[str] = []
+    schema_contracts: set[tuple[int, str]] = set()
 
     per_seq: List[Dict[str, Any]] = []
 
@@ -743,66 +763,109 @@ def _cmd_validate_cache(args: argparse.Namespace) -> None:
             incomplete_sequences.append(seq)
             continue
 
-        n_events = 0
-        n_matched = 0
-        n_unmatched = 0
+        schema_contracts.add(
+            (
+                int(manifest.get("schema_version", 0)),
+                str(manifest.get("feature_schema_sha256", "")),
+            )
+        )
+        seq_counts = {key: 0 for key in totals}
         n_assoc = int(manifest.get("num_association_records", 0))
+        seq_counts["association_record_count"] = n_assoc
         seq_feature_nonzero = 0
         seq_feature_total = 0
-        seq_warp_alignment_errors = 0
-        bad_det_idx = 0
         ids_seen: set[str] = set()
-        dup_count = 0
-        for ev in reader.iter_event_records():
-            n_events += 1
-            event_id = str(ev.get("event_id", ""))
-            if event_id in ids_seen:
-                dup_count += 1
-            ids_seen.add(event_id)
+        try:
+            for shard_id in range(len(reader.state_shards)):
+                for state in reader._load_shard("states", shard_id):
+                    lengths = (
+                        len(np.asarray(state.get("recent_history_frames", []))),
+                        len(np.asarray(state.get("recent_history_boxes", []))),
+                        len(np.asarray(state.get("recent_history_scores", []))),
+                    )
+                    if len(set(lengths)) != 1:
+                        seq_counts["history_length_mismatches"] += 1
 
-            f = np.asarray(ev.get("track_feature", []), dtype=np.float32)
-            seq_feature_nonzero += int(np.count_nonzero(f))
-            seq_feature_total += int(f.size)
+            for ev in reader.iter_event_records():
+                seq_counts["total_events"] += 1
+                event_id = str(ev.get("event_id", ""))
+                if event_id in ids_seen:
+                    seq_counts["duplicate_event_ids"] += 1
+                ids_seen.add(event_id)
 
-            frame = reader.get_frame_record(ev.get("frame_index", int(ev["frame_id"]) - 1))
-            wm = None if frame is None else frame.get("warp_matrix", frame.get("effective_warp"))
-            if wm is not None and np.asarray(wm).shape != (2, 3):
-                seq_warp_alignment_errors += 1
+                f = np.asarray(ev.get("track_feature", []), dtype=np.float32)
+                seq_feature_nonzero += int(np.count_nonzero(f))
+                seq_feature_total += int(f.size)
+                cached_scalar = np.asarray(ev.get("scalar_features", []), dtype=np.float64).reshape(-1)
+                if cached_scalar.shape != (63,) or not np.all(np.isfinite(cached_scalar)):
+                    seq_counts["scalar_nonfinite_events"] += 1
 
-            if not bool(ev.get("matched", False)):
-                n_unmatched += 1
-                continue
-            n_matched += 1
-            di = int(ev.get("accepted_detection_index", -1))
-            assoc = reader.get_association(
-                ev.get("association_shard_id", -1),
-                ev.get("association_offset", -1),
-            )
-            if di < 0 or assoc is None:
-                bad_det_idx += 1
-                continue
-            detection_indices = np.asarray(assoc.get("detection_indices", []), dtype=np.int64)
-            if not np.any(detection_indices == di):
-                bad_det_idx += 1
-                continue
-            try:
-                reader.get_detection(di)
-            except Exception:
-                bad_det_idx += 1
-        reader.close()
+                frame = reader.get_frame_record(ev.get("frame_index", int(ev["frame_id"]) - 1))
+                wm = None if frame is None else frame.get("warp_matrix", frame.get("effective_warp"))
+                if wm is not None and np.asarray(wm).shape != (2, 3):
+                    seq_counts["warp_alignment_errors"] += 1
 
-        total_events += n_events
-        matched_events += n_matched
-        unmatched_events += n_unmatched
-        association_record_count += n_assoc
-        invalid_detection_indices += bad_det_idx
-        duplicate_event_ids += dup_count
-        warp_alignment_errors += seq_warp_alignment_errors
+                if not bool(ev.get("matched", False)):
+                    seq_counts["unmatched_events"] += 1
+                    continue
+                seq_counts["matched_events"] += 1
+                global_det_idx = int(ev.get("accepted_detection_index", -1))
+                assoc = reader.get_association(
+                    ev.get("association_shard_id", -1),
+                    ev.get("association_offset", -1),
+                )
+                if global_det_idx < 0 or assoc is None:
+                    seq_counts["invalid_detection_indices"] += 1
+                    continue
+                detection_indices = np.asarray(
+                    assoc.get("detection_indices", []),
+                    dtype=np.int64,
+                ).reshape(-1)
+                local_matches = np.flatnonzero(detection_indices == global_det_idx)
+                if local_matches.size != 1:
+                    seq_counts["association_local_column_errors"] += 1
+                    continue
+                try:
+                    reader.get_detection(global_det_idx)
+                    event = reader.materialize_training_event(ev)
+                except Exception:
+                    seq_counts["context_shape_errors"] += 1
+                    continue
+
+                ctx = event.association_context
+                local_col = int(local_matches[0])
+                if ctx is None or ctx.accepted_detection_index != local_col:
+                    seq_counts["association_local_column_errors"] += 1
+                    continue
+                overlap = np.asarray(ctx.detection_overlap_row, dtype=np.float64)
+                if (
+                    overlap.shape != (ctx.num_detections,)
+                    or not np.all(np.isfinite(overlap))
+                    or np.any(overlap < 0.0)
+                    or np.any(overlap > 1.0 + 1e-12)
+                    or abs(float(overlap[local_col])) > 1e-12
+                ):
+                    seq_counts["overlap_contract_errors"] += 1
+
+                recomputed = compute_scalar_features(event)
+                if cached_scalar.shape == (63,):
+                    abs_error = np.abs(cached_scalar - recomputed)
+                    scalar_abs_sum += float(abs_error.sum())
+                    scalar_abs_count += int(abs_error.size)
+                    scalar_max_abs = max(scalar_max_abs, float(abs_error.max(initial=0.0)))
+                    for index in scalar_index_abs:
+                        scalar_index_abs[index].append(float(abs_error[index]))
+                        feature_values[index].append(float(recomputed[index]))
+        finally:
+            reader.close()
+
+        for key, value in seq_counts.items():
+            totals[key] += value
         feature_nonzero_count += seq_feature_nonzero
         feature_element_count += seq_feature_total
         reid_dim = int(manifest.get("reid_dim", reid_dim))
 
-        if n_events == 0:
+        if seq_counts["total_events"] == 0:
             empty_caches.append(seq)
         if not bool(manifest.get("complete", False)):
             incomplete_sequences.append(seq)
@@ -813,16 +876,10 @@ def _cmd_validate_cache(args: argparse.Namespace) -> None:
             {
                 "sequence": seq,
                 "processed_frames": int(manifest.get("processed_frames", manifest.get("num_frames", 0))),
-                "total_events": n_events,
-                "matched_events": n_matched,
-                "unmatched_events": n_unmatched,
-                "events_with_real_detection": n_matched,
+                **seq_counts,
+                "events_with_real_detection": seq_counts["matched_events"],
                 "association_context_count": n_assoc,
-                "association_record_count": n_assoc,
                 "feature_nonzero_ratio": seq_feature_ratio,
-                "warp_alignment_errors": seq_warp_alignment_errors,
-                "duplicate_event_ids": dup_count,
-                "invalid_detection_indices": bad_det_idx,
                 "complete": bool(manifest.get("complete", False)),
                 "truncated": bool(manifest.get("truncated", False)),
                 "num_detection_records": int(manifest.get("num_detections", 0)),
@@ -834,44 +891,85 @@ def _cmd_validate_cache(args: argparse.Namespace) -> None:
         feature_nonzero_count / max(feature_element_count, 1)
     )
 
+    contract_error_keys = (
+        "invalid_detection_indices",
+        "duplicate_event_ids",
+        "warp_alignment_errors",
+        "history_length_mismatches",
+        "context_shape_errors",
+        "overlap_contract_errors",
+        "association_local_column_errors",
+        "scalar_nonfinite_events",
+    )
+    schema_consistent = schema_contracts == {
+        (COMPACT_CACHE_SCHEMA_VERSION, FEATURE_SCHEMA_SHA256)
+    }
+    scalar_parity = {
+        "max_abs_error": scalar_max_abs,
+        "mean_abs_error": scalar_abs_sum / max(scalar_abs_count, 1),
+        **{
+            f"feature_{index}_max_abs_error": max(values, default=0.0)
+            for index, values in scalar_index_abs.items()
+        },
+    }
+    has_errors = (
+        bool(empty_caches)
+        or bool(incomplete_sequences)
+        or not schema_consistent
+        or any(totals[key] > 0 for key in contract_error_keys)
+        or scalar_max_abs >= 1e-5
+    )
     report = {
         "dataset": dataset,
         "mode": mode,
         "num_sequences": len(sequences),
         "processed_frames": sum(item["processed_frames"] for item in per_seq),
-        "total_events": total_events,
-        "matched_events": matched_events,
-        "unmatched_events": unmatched_events,
-        "events_with_real_detection": matched_events,
-        "association_context_count": association_record_count,
-        "association_record_count": association_record_count,
+        **totals,
+        "events_with_real_detection": totals["matched_events"],
+        "association_context_count": totals["association_record_count"],
+        "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
+        "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
+        "schema_consistent": schema_consistent,
+        "scalar_parity": scalar_parity,
+        "feature_statistics": {
+            str(index): {
+                "count": len(values),
+                "min": min(values, default=0.0),
+                "max": max(values, default=0.0),
+                "mean": float(np.mean(values)) if values else 0.0,
+            }
+            for index, values in feature_values.items()
+        },
         "feature_nonzero_ratio": feature_nonzero_ratio,
-        "warp_alignment_errors": warp_alignment_errors,
-        "duplicate_event_ids": duplicate_event_ids,
-        "invalid_detection_indices": invalid_detection_indices,
-        "complete": (
-            not empty_caches
-            and not incomplete_sequences
-            and invalid_detection_indices == 0
-        ),
+        "complete": not has_errors,
         "truncated": any(item.get("truncated", False) for item in per_seq),
         "reid_dim": reid_dim,
         "per_sequence": per_seq,
         "empty_caches": empty_caches,
         "incomplete_sequences": incomplete_sequences,
         "status": (
-            "ok"
-            if not empty_caches and not incomplete_sequences and invalid_detection_indices == 0
-            else "issues_found"
+            "ok" if not has_errors else "issues_found"
         ),
     }
 
-    out_dir = _ensure_dir(os.path.join(cache_root, "_validation"))
-    out_path = os.path.join(out_dir, "cache_validation.json")
+    out_dir = _ensure_dir(
+        os.path.join(
+            PROJECT_ROOT,
+            "outputs",
+            "agentguard",
+            "reports",
+            "cache_validation",
+            dataset,
+            split,
+        )
+    )
+    out_path = os.path.join(out_dir, "summary.json")
     with open(out_path, "w") as f:
         json.dump(report, f, indent=2, default=str)
     print(f"Validation report saved to {out_path}")
     print(json.dumps(report, indent=2, default=str))
+    if has_errors:
+        raise RuntimeError(f"Cache contract validation failed; see {out_path}")
 
 
 # ===================================================================
@@ -1442,6 +1540,45 @@ def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
         raise RuntimeError("No valid rollout labels loaded.")
 
     seq_names = sorted({r["sequence"] for r in records})
+    event_cache_contracts = []
+    for sequence in seq_names:
+        manifest_path = os.path.join(
+            args.event_cache_root,
+            dataset,
+            split,
+            sequence,
+            "manifest.json",
+        )
+        if not os.path.isfile(manifest_path):
+            raise FileNotFoundError(f"Event cache manifest not found: {manifest_path}")
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        schema_version = int(manifest.get("schema_version", 0))
+        feature_hash = str(manifest.get("feature_schema_sha256", ""))
+        if not bool(manifest.get("complete", False)):
+            raise ValueError(f"Event cache is incomplete: {manifest_path}")
+        if schema_version != COMPACT_CACHE_SCHEMA_VERSION:
+            raise ValueError(
+                f"Event cache schema mismatch in {manifest_path}: "
+                f"{schema_version} != {COMPACT_CACHE_SCHEMA_VERSION}"
+            )
+        if feature_hash != FEATURE_SCHEMA_SHA256:
+            raise ValueError(
+                f"Feature schema mismatch in {manifest_path}: "
+                f"{feature_hash!r} != {FEATURE_SCHEMA_SHA256!r}"
+            )
+        event_cache_contracts.append(
+            {
+                "sequence": sequence,
+                "schema_version": schema_version,
+                "feature_schema_sha256": feature_hash,
+                "tracker_config_sha256": manifest.get("tracker_config_sha256", ""),
+                "detection_cache_manifest_sha256": manifest.get(
+                    "detection_cache_manifest_sha256",
+                    "",
+                ),
+            }
+        )
     if args.split_policy == "train_all":
         train_seqs = set(seq_names)
         val_seqs = set(seq_names)
@@ -1451,13 +1588,16 @@ def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
         rng = np.random.default_rng(42)
         shuffled = list(seq_names)
         rng.shuffle(shuffled)
-        if len(shuffled) == 1:
-            train_seqs = set(shuffled)
-            val_seqs = set(shuffled)
-        else:
-            split_idx = max(1, int(len(shuffled) * 0.8))
-            train_seqs = set(shuffled[:split_idx])
-            val_seqs = set(shuffled[split_idx:])
+        if len(shuffled) < 2:
+            raise ValueError(
+                "sequence_holdout requires at least two sequences; use train_all "
+                "only for an explicit debug/upper-bound run"
+            )
+        split_idx = min(len(shuffled) - 1, max(1, int(len(shuffled) * 0.8)))
+        train_seqs = set(shuffled[:split_idx])
+        val_seqs = set(shuffled[split_idx:])
+        if not train_seqs.isdisjoint(val_seqs):
+            raise AssertionError("train and validation sequences must be disjoint")
         train_records = [r for r in records if r["sequence"] in train_seqs]
         val_records = [r for r in records if r["sequence"] in val_seqs]
     norm_stats = fit_norm_stats_from_records(
@@ -1488,6 +1628,10 @@ def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
         "reid_dim": int(det_manifest["reid_dim"]),
         "scalar_dim": 63,
         "event_dim": 128,
+        "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
+        "feature_schema_descriptor": FEATURE_SCHEMA_DESCRIPTOR,
+        "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
+        "event_cache_contracts_sha256": _sha256_json(event_cache_contracts),
         "num_records": len(records),
         "num_train": len(train_records),
         "num_val": len(val_records),
@@ -1732,6 +1876,8 @@ def _add_train_student_v0_parser(subparsers: argparse._SubParsersAction) -> None
 
 
 def _cmd_train_student_v0(args: argparse.Namespace) -> None:
+    import subprocess
+
     import torch
     from torch.utils.data import DataLoader
 
@@ -1761,6 +1907,21 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
         return
     with open(metadata_path) as f:
         metadata = json.load(f)
+    if int(metadata.get("cache_schema_version", 0)) != COMPACT_CACHE_SCHEMA_VERSION:
+        raise ValueError(
+            f"Dataset metadata cache schema mismatch: "
+            f"{metadata.get('cache_schema_version')} != {COMPACT_CACHE_SCHEMA_VERSION}"
+        )
+    if metadata.get("feature_schema_sha256") != FEATURE_SCHEMA_SHA256:
+        raise ValueError("Dataset metadata feature schema does not match current runtime")
+    try:
+        training_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            text=True,
+        ).strip()
+    except Exception:
+        training_commit = ""
 
     train_index_file = metadata.get("train_index_file", "train_index.jsonl")
     val_index_file = metadata.get("val_index_file", "val_index.jsonl")
@@ -1798,6 +1959,11 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
         "early_stop_patience": max(2, args.epochs + 1),
         "full_val_every": max(0, int(args.full_val_every)),
         "resume_from": args.iwg_resume_checkpoint,
+        "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
+        "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
+        "training_commit": training_commit,
+        "dataset_metadata_path": os.path.abspath(metadata_path),
+        "dataset_metadata_sha256": _sha256_file(metadata_path),
     }
     iwg_model = IWG(reid_dim=reid_dim).to(device)
     loader_kwargs = {

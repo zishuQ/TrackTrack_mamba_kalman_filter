@@ -127,7 +127,43 @@ class AssociationContext:
     reid_available: bool = True     # whether cosine distance was available
 
     def __post_init__(self):
-        for name in ['track_cost_row', 'detection_cost_col', 'detection_overlap_row']:
-            val = getattr(self, name)
-            if isinstance(val, np.ndarray):
-                object.__setattr__(self, name, val.copy())
+        track_cost_row = np.asarray(self.track_cost_row, dtype=np.float64).reshape(-1)
+        detection_cost_col = np.asarray(self.detection_cost_col, dtype=np.float64).reshape(-1)
+        detection_overlap_row = np.asarray(
+            self.detection_overlap_row,
+            dtype=np.float64,
+        ).reshape(-1)
+        if track_cost_row.shape != (self.num_detections,):
+            raise ValueError(
+                "track_cost_row shape must match num_detections: "
+                f"{track_cost_row.shape} != {(self.num_detections,)}"
+            )
+        if detection_overlap_row.shape != (self.num_detections,):
+            raise ValueError(
+                "detection_overlap_row shape must match num_detections: "
+                f"{detection_overlap_row.shape} != {(self.num_detections,)}"
+            )
+        if detection_cost_col.shape != (self.num_tracks,):
+            raise ValueError(
+                "detection_cost_col shape must match num_tracks: "
+                f"{detection_cost_col.shape} != {(self.num_tracks,)}"
+            )
+        if self.accepted_detection_index is not None and not (
+            0 <= self.accepted_detection_index < self.num_detections
+        ):
+            raise ValueError(
+                "accepted_detection_index must be a local association column: "
+                f"{self.accepted_detection_index} outside [0, {self.num_detections})"
+            )
+        if not all(
+            np.all(np.isfinite(value))
+            for value in (track_cost_row, detection_cost_col, detection_overlap_row)
+        ):
+            raise ValueError("AssociationContext arrays must contain only finite values")
+        object.__setattr__(self, "track_cost_row", track_cost_row.copy())
+        object.__setattr__(self, "detection_cost_col", detection_cost_col.copy())
+        object.__setattr__(self, "detection_overlap_row", detection_overlap_row.copy())
+
+    @property
+    def accepted_detection_column(self) -> Optional[int]:
+        return self.accepted_detection_index

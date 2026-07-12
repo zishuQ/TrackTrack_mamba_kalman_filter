@@ -8,6 +8,11 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import torch
 
+from agentguard.data.cache_schema import (
+    COMPACT_CACHE_SCHEMA_VERSION,
+    FEATURE_SCHEMA_SHA256,
+)
+from agentguard.features.geometry import pairwise_iou_xyxy
 from agentguard.data.cache_schema import CacheManifest
 
 
@@ -176,20 +181,29 @@ class EventCacheReader:
 
 
 class CompactEventCacheReader:
-    """Lazy reader for schema-v2 compact AgentGuard event caches."""
+    """Lazy reader for current compact AgentGuard event caches."""
 
     def __init__(
         self,
         cache_dir: str | os.PathLike[str],
         detection_cache_dir: str | os.PathLike[str] | None = None,
+        allow_legacy_schema: bool = False,
     ) -> None:
         self.cache_dir = Path(cache_dir)
         with (self.cache_dir / "manifest.json").open("r") as f:
             self.manifest: dict = json.load(f)
-        if int(self.manifest.get("schema_version", 0)) < 2:
+        self.allow_legacy_schema = bool(allow_legacy_schema)
+        schema_version = int(self.manifest.get("schema_version", 0))
+        feature_schema = str(self.manifest.get("feature_schema_sha256", ""))
+        if not self.allow_legacy_schema and schema_version != COMPACT_CACHE_SCHEMA_VERSION:
             raise ValueError(
-                f"CompactEventCacheReader requires schema_version>=2, got "
-                f"{self.manifest.get('schema_version')} in {self.cache_dir}"
+                "CompactEventCacheReader requires current schema_version="
+                f"{COMPACT_CACHE_SCHEMA_VERSION}, got {schema_version} in {self.cache_dir}"
+            )
+        if not self.allow_legacy_schema and feature_schema != FEATURE_SCHEMA_SHA256:
+            raise ValueError(
+                "CompactEventCacheReader feature schema mismatch: "
+                f"{feature_schema!r} != {FEATURE_SCHEMA_SHA256!r} in {self.cache_dir}"
             )
 
         self.event_shards = self._glob("events")
@@ -276,28 +290,37 @@ class CompactEventCacheReader:
             raise RuntimeError("detection_cache_dir is required to read detections")
         return self.detection_cache.get_detection(detection_index)
 
-    def _max_detection_iou(self, frame_index: int, detection_index: int) -> float:
-        if self.detection_cache is None:
-            return 0.0
-        frame = self.detection_cache.get_frame(int(frame_index), view="source")
-        det_indices = np.asarray(frame.get("detection_indices", []), dtype=np.int64)
-        boxes = np.asarray(frame.get("boxes", []), dtype=np.float64)
-        matches = np.flatnonzero(det_indices == int(detection_index))
-        if matches.size == 0 or boxes.shape[0] <= 1:
-            return 0.0
-        box_idx = int(matches[0])
-        box = boxes[box_idx]
-        x1 = np.maximum(box[0], boxes[:, 0])
-        y1 = np.maximum(box[1], boxes[:, 1])
-        x2 = np.minimum(box[2], boxes[:, 2])
-        y2 = np.minimum(box[3], boxes[:, 3])
-        inter = np.maximum(0.0, x2 - x1) * np.maximum(0.0, y2 - y1)
-        area_a = max(0.0, float((box[2] - box[0]) * (box[3] - box[1])))
-        area_b = np.maximum(0.0, boxes[:, 2] - boxes[:, 0]) * np.maximum(0.0, boxes[:, 3] - boxes[:, 1])
-        union = area_a + area_b - inter
-        iou = np.divide(inter, np.maximum(union, 1e-12))
-        iou[box_idx] = 0.0
-        return float(np.max(iou)) if iou.size else 0.0
+    def _association_detection_overlap_row(
+        self,
+        association: dict,
+        selected_detection_index: int,
+    ) -> tuple[np.ndarray, int]:
+        det_indices = np.asarray(
+            association.get("detection_indices", []),
+            dtype=np.int64,
+        ).reshape(-1)
+        matches = np.flatnonzero(det_indices == int(selected_detection_index))
+        if matches.size == 0:
+            raise ValueError(
+                f"selected detection {selected_detection_index} is absent from association pool"
+            )
+        if matches.size > 1:
+            raise ValueError(
+                f"selected detection {selected_detection_index} occurs multiple times in association pool"
+            )
+        col_idx = int(matches[0])
+        if det_indices.size == 0:
+            return np.zeros((0,), dtype=np.float64), col_idx
+        boxes = np.stack(
+            [
+                np.asarray(self.get_detection(int(index))["box"], dtype=np.float64)
+                for index in det_indices
+            ],
+            axis=0,
+        )
+        overlap = pairwise_iou_xyxy(boxes, boxes)
+        np.fill_diagonal(overlap, 0.0)
+        return overlap[col_idx].copy(), col_idx
 
     def _snapshot_from_record(self, record: dict, feature: np.ndarray, track_id: int):
         from agentguard.contracts.states import TrackStateSnapshot
@@ -306,6 +329,13 @@ class CompactEventCacheReader:
         frames = np.asarray(record.get("recent_history_frames", []), dtype=np.int32)
         boxes = np.asarray(record.get("recent_history_boxes", []), dtype=np.float32)
         scores = np.asarray(record.get("recent_history_scores", []), dtype=np.float32)
+        if not self.allow_legacy_schema and not (
+            len(frames) == len(boxes) == len(scores)
+        ):
+            raise ValueError(
+                "compact history frames/boxes/scores length mismatch: "
+                f"{len(frames)}/{len(boxes)}/{len(scores)}"
+            )
         fallback_score = float(record.get("score", 0.0))
         for index, (frame_id, box) in enumerate(zip(frames.tolist(), boxes)):
             score = float(scores[index]) if index < scores.size else fallback_score
@@ -378,10 +408,12 @@ class CompactEventCacheReader:
                 class_id=int(det["class_id"]),
             )
 
-        if association is not None and row_idx >= 0:
+        if has_detection and selected >= 0 and association is not None and row_idx >= 0:
             det_indices = np.asarray(association.get("detection_indices", []), dtype=np.int64)
-            matches = np.flatnonzero(det_indices == selected)
-            col_idx = int(matches[0]) if matches.size else -1
+            overlap_row, col_idx = self._association_detection_overlap_row(
+                association,
+                selected,
+            )
             final_cost = np.asarray(association["final_cost"], dtype=np.float64)
             raw_cost = np.asarray(association.get("raw_cost", final_cost), dtype=np.float64)
             iou_similarity = np.asarray(association.get("iou_similarity", np.zeros_like(final_cost)), dtype=np.float64)
@@ -391,7 +423,21 @@ class CompactEventCacheReader:
             angle_distance = np.asarray(association.get("angle_distance", np.zeros_like(final_cost)), dtype=np.float64)
             assignment_round = np.asarray(association.get("assignment_round", np.full(final_cost.shape, -1)), dtype=np.int16)
             assignment_threshold = np.asarray(association.get("assignment_threshold", np.full(final_cost.shape, -1.0)), dtype=np.float64)
+            detection_source = np.asarray(
+                association.get("detection_source", np.full(final_cost.shape, -1)),
+                dtype=np.int16,
+            )
             if col_idx >= 0 and row_idx < final_cost.shape[0]:
+                source = int(detection_source[row_idx, col_idx])
+                if detection is not None:
+                    detection = DetectionObservation(
+                        detection_index=detection.detection_index,
+                        box=detection.box,
+                        score=detection.score,
+                        feature=detection.feature,
+                        source=source,
+                        class_id=detection.class_id,
+                    )
                 pair = AssociationPairFeatures(
                     iou_similarity=float(iou_similarity[row_idx, col_idx]),
                     iou_distance=float(iou_distance[row_idx, col_idx]),
@@ -402,26 +448,22 @@ class CompactEventCacheReader:
                     final_cost=float(final_cost[row_idx, col_idx]),
                     assignment_round=int(assignment_round[row_idx, col_idx]),
                     assignment_threshold=float(assignment_threshold[row_idx, col_idx]),
-                    detection_source=int(detection.source if detection is not None else -1),
+                    detection_source=source,
                 )
                 ctx = AssociationContext(
                     track_cost_row=final_cost[row_idx, :].copy(),
                     detection_cost_col=final_cost[:, col_idx].copy(),
-                    detection_overlap_row=np.asarray(
-                        [
-                            self._max_detection_iou(
-                                int(record.get("frame_index", int(record["frame_id"]) - 1)),
-                                selected,
-                            )
-                        ],
-                        dtype=np.float64,
-                    ),
-                    accepted_detection_index=selected,
+                    detection_overlap_row=overlap_row,
+                    accepted_detection_index=col_idx,
                     num_tracks=int(final_cost.shape[0]),
                     num_detections=int(final_cost.shape[1]),
                     reid_available=bool(association.get("reid_available", True)),
                 )
 
+        is_alternative = (
+            candidate_detection_index is not None
+            and int(selected) != int(accepted)
+        )
         event = TrackEvent(
             event_id=str(record["event_id"]),
             dataset=str(self.manifest.get("dataset", "")),
@@ -444,11 +486,15 @@ class CompactEventCacheReader:
                 if frame_record is not None
                 else np.eye(2, 3, dtype=np.float64)
             ),
-            scalar_features=np.asarray(record.get("scalar_features", []), dtype=np.float64),
+            scalar_features=(
+                None
+                if is_alternative
+                else np.asarray(record.get("scalar_features", []), dtype=np.float64)
+            ),
             track_feature=track_feature,
             detection_feature=detection_feature,
         )
-        if candidate_detection_index is not None and int(candidate_detection_index) >= 0:
+        if is_alternative:
             from agentguard.features.scalar import compute_scalar_features
 
             event.scalar_features = compute_scalar_features(event)

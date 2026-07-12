@@ -9,8 +9,12 @@ from typing import Any
 import numpy as np
 import torch
 
+from agentguard.data.cache_schema import (
+    COMPACT_CACHE_SCHEMA_VERSION,
+    FEATURE_SCHEMA_SHA256,
+)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = COMPACT_CACHE_SCHEMA_VERSION
 
 
 def _np(value: Any, dtype=None) -> np.ndarray:
@@ -28,9 +32,14 @@ def _compact_state(snapshot: dict | None) -> dict:
     scores = []
     for fid in frames:
         item = history.get(fid) or history.get(str(fid))
-        if item is not None and len(item) > 0:
-            boxes.append(np.asarray(item[0], dtype=np.float32))
-            scores.append(float(item[1]) if len(item) > 1 else float(snapshot.get("score", 0.0)))
+        if item is None or len(item) < 2:
+            raise ValueError(f"compact history frame {fid} is missing box or observation score")
+        box = np.asarray(item[0], dtype=np.float32).reshape(-1)
+        score = float(item[1])
+        if box.shape != (4,) or not np.all(np.isfinite(box)) or not np.isfinite(score):
+            raise ValueError(f"invalid compact history entry at frame {fid}")
+        boxes.append(box)
+        scores.append(score)
     return {
         "mean": _np(snapshot.get("mean"), np.float32),
         "covariance": _np(snapshot.get("covariance"), np.float32),
@@ -65,6 +74,7 @@ def _compact_association(record: dict, record_id: int, frame_id: int) -> dict:
         "angle_distance": _np(record.get("angle_distance"), np.float32),
         "assignment_round": _np(record.get("assignment_round"), np.int16),
         "assignment_threshold": _np(record.get("assignment_threshold"), np.float32),
+        "detection_source": _np(record.get("detection_source"), np.int8),
         "reid_available": bool(record.get("reid_available", True)),
     }
 
@@ -89,7 +99,7 @@ class CompactEventCacheSink:
         association_flush_size: int = 32,
         config_hash: str = "",
         source_commit: str = "",
-        feature_schema_sha256: str = "",
+        feature_schema_sha256: str = FEATURE_SCHEMA_SHA256,
         detection_cache_manifest_sha256: str = "",
         tracker_config_sha256: str = "",
         total_sequence_frames: int = 0,
@@ -107,7 +117,7 @@ class CompactEventCacheSink:
         self.association_flush_size = int(association_flush_size)
         self.config_hash = config_hash
         self.source_commit = source_commit
-        self.feature_schema_sha256 = feature_schema_sha256
+        self.feature_schema_sha256 = feature_schema_sha256 or FEATURE_SCHEMA_SHA256
         self.detection_cache_manifest_sha256 = detection_cache_manifest_sha256
         self.tracker_config_sha256 = tracker_config_sha256 or config_hash
         self.total_sequence_frames = int(total_sequence_frames)
@@ -155,7 +165,14 @@ class CompactEventCacheSink:
             if manifest_path.is_file():
                 with manifest_path.open("r") as f:
                     manifest = json.load(f)
-                if manifest.get("complete") and manifest.get("schema_version") == SCHEMA_VERSION:
+                if (
+                    manifest.get("complete")
+                    and manifest.get("schema_version") == SCHEMA_VERSION
+                    and manifest.get("feature_schema_sha256") == self.feature_schema_sha256
+                    and manifest.get("tracker_config_sha256") == self.tracker_config_sha256
+                    and manifest.get("detection_cache_manifest_sha256")
+                    == self.detection_cache_manifest_sha256
+                ):
                     self._temp_dir = None
                     return
             shutil.rmtree(self._final_dir)

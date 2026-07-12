@@ -8,6 +8,10 @@ import torch
 import torch.nn as nn
 
 from agentguard.contracts.enums import POLICY_PROTOTYPE_MATRIX
+from agentguard.data.cache_schema import (
+    COMPACT_CACHE_SCHEMA_VERSION,
+    FEATURE_SCHEMA_SHA256,
+)
 
 
 def save_checkpoint(
@@ -60,7 +64,29 @@ def save_checkpoint(
         "scalar_dim": metadata.get("scalar_dim", metadata.get("config", {}).get("scalar_dim", 63)),
         "event_dim": metadata.get("event_dim", metadata.get("config", {}).get("event_dim", 128)),
         "policy_prototypes": metadata.get("policy_prototypes", POLICY_PROTOTYPE_MATRIX),
-        "feature_schema_sha256": metadata.get("feature_schema_sha256", "v0_compact_scalar63_reid"),
+        "feature_schema_sha256": metadata.get(
+            "feature_schema_sha256",
+            metadata.get("config", {}).get("feature_schema_sha256", FEATURE_SCHEMA_SHA256),
+        ),
+        "cache_schema_version": metadata.get(
+            "cache_schema_version",
+            metadata.get("config", {}).get(
+                "cache_schema_version",
+                COMPACT_CACHE_SCHEMA_VERSION,
+            ),
+        ),
+        "training_commit": metadata.get(
+            "training_commit",
+            metadata.get("config", {}).get("training_commit", ""),
+        ),
+        "dataset_metadata_path": metadata.get(
+            "dataset_metadata_path",
+            metadata.get("config", {}).get("dataset_metadata_path", ""),
+        ),
+        "dataset_metadata_sha256": metadata.get(
+            "dataset_metadata_sha256",
+            metadata.get("config", {}).get("dataset_metadata_sha256", ""),
+        ),
     }
 
     if optimizer is not None:

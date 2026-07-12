@@ -1,7 +1,31 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, asdict
 from typing import Any, Dict
+
+
+COMPACT_CACHE_SCHEMA_VERSION = 3
+
+FEATURE_SCHEMA_DESCRIPTOR = {
+    "name": "agentguard_scalar63",
+    "version": 2,
+    "scalar_dim": 63,
+    "history_score_semantics": "per_observation_score",
+    "detection_overlap_semantics": "accepted_detection_vs_association_pool",
+    "detection_overlap_diagonal": 0.0,
+    "detection_source_semantics": "association_tier_high_low_deleted",
+    "xyxy_iou_convention": "tracktrack_inclusive_plus_one",
+}
+
+FEATURE_SCHEMA_SHA256 = hashlib.sha256(
+    json.dumps(
+        FEATURE_SCHEMA_DESCRIPTOR,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
 
 
 @dataclass
@@ -11,7 +35,7 @@ class CacheManifest:
     Stored as ``manifest.json`` alongside the sharded ``.pt`` files.
     """
 
-    schema_version: int = 2
+    schema_version: int = COMPACT_CACHE_SCHEMA_VERSION
     dataset: str = ""
     split: str = ""
     sequence: str = ""
@@ -31,7 +55,7 @@ class CacheManifest:
     truncated: bool = False
     source_commit: str = ""
     config_sha256: str = ""
-    feature_schema_sha256: str = ""
+    feature_schema_sha256: str = FEATURE_SCHEMA_SHA256
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to a JSON-serialisable dictionary."""
@@ -41,7 +65,7 @@ class CacheManifest:
     def from_dict(cls, data: Dict[str, Any]) -> "CacheManifest":
         """Reconstruct from a dictionary (e.g. loaded from a JSON file)."""
         return cls(
-            schema_version=int(data.get("schema_version", 2)),
+            schema_version=int(data.get("schema_version", 0)),
             dataset=str(data.get("dataset", "")),
             split=str(data.get("split", "")),
             sequence=str(data.get("sequence", "")),
