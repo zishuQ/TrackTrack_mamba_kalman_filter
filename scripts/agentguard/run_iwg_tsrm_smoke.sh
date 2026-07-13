@@ -11,11 +11,20 @@ PROVENANCE_DIR="${RUN_ROOT}/provenance"
 
 export PYTHONPATH="${ROOT}:${ROOT}/3. Tracker:${ROOT}/agentguard/src:${PYTHONPATH:-}"
 
-if [[ -e "${RUN_ROOT}/completed" || -e "${RUN_ROOT}/running" ]]; then
+if [[ -e "${RUN_ROOT}/running" ]]; then
+  existing_pid="$(cat "${RUN_ROOT}/pipeline.pid" 2>/dev/null || true)"
+  if [[ -n "${existing_pid}" ]] && kill -0 "${existing_pid}" 2>/dev/null; then
+    echo "Refusing to reuse active smoke directory: ${RUN_ROOT}" >&2
+    exit 2
+  fi
+  rm -f "${RUN_ROOT}/running"
+fi
+if [[ -e "${RUN_ROOT}/completed" ]]; then
   echo "Refusing to reuse active/completed smoke directory: ${RUN_ROOT}" >&2
   exit 2
 fi
 mkdir -p "${CHECKPOINT_DIR}" "${LOG_DIR}" "${PROVENANCE_DIR}"
+rm -f "${RUN_ROOT}/failed"
 echo "$$" > "${RUN_ROOT}/pipeline.pid"
 touch "${RUN_ROOT}/running"
 
