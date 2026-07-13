@@ -29,7 +29,7 @@ from agentguard.training.loss_iwg_tsrm import compute_iwg_tsrm_loss
 from agentguard.training.scheduler import CosineWarmupScheduler
 
 
-JOINT_MODEL_SCHEMA = "agentguard_iwg_tsrm_v3"
+JOINT_MODEL_SCHEMA = "agentguard_iwg_tsrm_v4"
 BASE_MODEL_SCHEMA = "agentguard_iwg_base_v3"
 
 
@@ -336,6 +336,9 @@ def _checkpoint_contract(
         "iwg_warmup_events": int(dataset_metadata["iwg_warmup_events"]),
         "iwg_input_size": int(dataset_metadata["iwg_input_size"]),
         "delta_max": float(config["delta_max"]),
+        "temporal_iwg_gradient_scale": float(
+            config.get("temporal_iwg_gradient_scale", 1.0)
+        ),
         "normalization_mean": np.asarray(norm["mean"], dtype=np.float64),
         "normalization_std": np.asarray(norm["std"], dtype=np.float64),
         "policy_prototypes": np.asarray(POLICY_PROTOTYPE_MATRIX, dtype=np.float64),
@@ -398,6 +401,10 @@ def validate_checkpoint_contract(
     ]
     if missing:
         raise ValueError(f"checkpoint missing required fields: {missing}")
+    if training_mode == "joint" and "temporal_iwg_gradient_scale" not in checkpoint:
+        raise ValueError(
+            "checkpoint missing required fields: ['temporal_iwg_gradient_scale']"
+        )
     mismatches = {
         key: (checkpoint.get(key), value)
         for key, value in expected.items()
@@ -417,6 +424,9 @@ def validate_checkpoint_contract(
         raise ValueError("iwg_warmup_events must equal 5")
     if int(checkpoint["iwg_input_size"]) != int(checkpoint["window_size"]) + 5:
         raise ValueError("iwg_input_size must equal window_size + 5")
+    gradient_scale = float(checkpoint.get("temporal_iwg_gradient_scale", 1.0))
+    if not 0.0 <= gradient_scale <= 1.0:
+        raise ValueError("temporal_iwg_gradient_scale must be in [0, 1]")
     if dataset_metadata_path is not None:
         actual_hash = _sha256_file(dataset_metadata_path)
         if checkpoint["dataset_metadata_sha256"] != actual_hash:
@@ -443,6 +453,15 @@ def _load_resume(
         expected_training_mode=training_mode,
         dataset_metadata_path=dataset_metadata_path,
     )
+    if training_mode == "joint" and not math.isclose(
+        float(checkpoint["temporal_iwg_gradient_scale"]),
+        float(getattr(model, "temporal_iwg_gradient_scale")),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise ValueError(
+            "temporal_iwg_gradient_scale mismatch between checkpoint and model"
+        )
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -497,7 +516,11 @@ def train_iwg_tsrm(config: dict[str, Any]) -> dict[str, Any]:
     val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
     if training_mode == "joint":
         model: torch.nn.Module = IWGTSRM(
-            reid_dim=int(metadata["reid_dim"]), delta_max=float(config["delta_max"])
+            reid_dim=int(metadata["reid_dim"]),
+            delta_max=float(config["delta_max"]),
+            temporal_iwg_gradient_scale=float(
+                config.get("temporal_iwg_gradient_scale", 1.0)
+            ),
         )
     else:
         model = IWG(reid_dim=int(metadata["reid_dim"]))
@@ -630,7 +653,11 @@ def validate_iwg_tsrm_checkpoint(
     training_mode = checkpoint["training_mode"]
     if training_mode == "joint":
         model: torch.nn.Module = IWGTSRM(
-            reid_dim=int(checkpoint["reid_dim"]), delta_max=float(checkpoint["delta_max"])
+            reid_dim=int(checkpoint["reid_dim"]),
+            delta_max=float(checkpoint["delta_max"]),
+            temporal_iwg_gradient_scale=float(
+                checkpoint["temporal_iwg_gradient_scale"]
+            ),
         )
     else:
         model = IWG(reid_dim=int(checkpoint["reid_dim"]))

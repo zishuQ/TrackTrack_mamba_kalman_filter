@@ -183,6 +183,9 @@ class Tracker(object):
                         scalar_dim=int(checkpoint['scalar_dim']),
                         event_dim=int(checkpoint['event_dim']),
                         delta_max=float(checkpoint['delta_max']),
+                        temporal_iwg_gradient_scale=float(
+                            checkpoint['temporal_iwg_gradient_scale']
+                        ),
                     )
                     joint_model.load_state_dict(checkpoint['model_state_dict'], strict=True)
                     joint_model.eval()

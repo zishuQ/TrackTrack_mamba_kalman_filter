@@ -40,19 +40,20 @@ def _checkpoint() -> dict:
         "iwg_warmup_events": 5,
         "iwg_input_size": 21,
         "delta_max": 0.2,
+        "temporal_iwg_gradient_scale": 0.0,
         "reid_dim": 16,
         "scalar_dim": 63,
         "event_dim": 128,
     }
 
 
-def test_v3_combined_checkpoint_contract_accepts_endpoint_schema():
+def test_v4_combined_checkpoint_contract_accepts_gradient_scale():
     validate_checkpoint_contract(_checkpoint(), expected_training_mode="joint")
 
 
-def test_v2_combined_checkpoint_is_strictly_rejected():
+def test_v3_combined_checkpoint_is_strictly_rejected():
     checkpoint = copy.deepcopy(_checkpoint())
-    checkpoint["model_schema_version"] = "agentguard_iwg_tsrm_v2"
+    checkpoint["model_schema_version"] = "agentguard_iwg_tsrm_v3"
     with pytest.raises(ValueError, match="schema mismatch"):
         validate_checkpoint_contract(checkpoint, expected_training_mode="joint")
 
@@ -63,6 +64,7 @@ def test_v2_combined_checkpoint_is_strictly_rejected():
         ("iwg_warmup_events", 0, "must equal 5"),
         ("iwg_input_size", 16, r"window_size \+ 5"),
         ("window_size", 0, "must be positive"),
+        ("temporal_iwg_gradient_scale", -0.1, r"must be in \[0, 1\]"),
     ],
 )
 def test_checkpoint_rejects_incompatible_window_contract(field, value, message):

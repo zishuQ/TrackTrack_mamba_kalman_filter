@@ -3114,6 +3114,12 @@ def _add_train_iwg_tsrm_parser(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--lambda-dynamics", type=float, default=0.1)
     parser.add_argument("--lambda-revision", type=float, default=0.01)
     parser.add_argument(
+        "--temporal-iwg-gradient-scale",
+        type=float,
+        default=1.0,
+        help="Scale temporal/final gradients reaching IWG without changing forward values.",
+    )
+    parser.add_argument(
         "--selection-metric",
         choices=["base_gate_loss", "final_gate_loss"],
         default=None,
@@ -3142,6 +3148,10 @@ def _cmd_train_iwg_tsrm(args: argparse.Namespace) -> None:
         raise ValueError(
             f"window_size mismatch: dataset={metadata['window_size']} CLI={args.window_size}"
         )
+    if not 0.0 <= float(args.temporal_iwg_gradient_scale) <= 1.0:
+        raise ValueError("temporal_iwg_gradient_scale must be in [0, 1]")
+    if args.training_mode == "base" and float(args.temporal_iwg_gradient_scale) != 1.0:
+        raise ValueError("temporal_iwg_gradient_scale only applies to joint training")
     expected_selection = (
         "final_gate_loss" if args.training_mode == "joint" else "base_gate_loss"
     )
@@ -3186,6 +3196,7 @@ def _cmd_train_iwg_tsrm(args: argparse.Namespace) -> None:
         "lambda_residual": float(args.lambda_residual),
         "lambda_dynamics": float(args.lambda_dynamics),
         "lambda_revision": float(args.lambda_revision),
+        "temporal_iwg_gradient_scale": float(args.temporal_iwg_gradient_scale),
         "selection_metric": expected_selection,
         "early_stop_patience": int(args.early_stop_patience),
         "max_train_windows": int(args.max_train_windows),

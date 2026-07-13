@@ -10,6 +10,13 @@ from agentguard.models.tsrm import TSRM
 IWG_WARMUP_EVENTS = 5
 
 
+def scale_gradient(value: torch.Tensor, scale: float) -> torch.Tensor:
+    """Preserve forward values while scaling gradients to the value producer."""
+    if not 0.0 <= float(scale) <= 1.0:
+        raise ValueError("gradient scale must be in [0, 1]")
+    return value.detach() + float(scale) * (value - value.detach())
+
+
 def forward_iwg_with_warmup(
     iwg: IWG,
     batch: dict[str, torch.Tensor],
@@ -53,8 +60,12 @@ class IWGTSRM(nn.Module):
         event_dim: int = 128,
         hidden_dim: int = 128,
         delta_max: float = 0.2,
+        temporal_iwg_gradient_scale: float = 1.0,
     ) -> None:
         super().__init__()
+        if not 0.0 <= float(temporal_iwg_gradient_scale) <= 1.0:
+            raise ValueError("temporal_iwg_gradient_scale must be in [0, 1]")
+        self.temporal_iwg_gradient_scale = float(temporal_iwg_gradient_scale)
         self.iwg = IWG(reid_dim=reid_dim, scalar_dim=scalar_dim, event_dim=event_dim)
         self.tsrm = TSRM(
             event_dim=event_dim,
@@ -93,13 +104,23 @@ class IWGTSRM(nn.Module):
         outputs = self.apply_unmatched_sentinel(
             iwg_outputs, batch["has_detection_mask"]
         )
+        temporal_inputs = {
+            key: scale_gradient(outputs[key], self.temporal_iwg_gradient_scale)
+            for key in (
+                "event_embedding",
+                "base_gate",
+                "policy_probs",
+                "cue",
+                "risk",
+            )
+        }
         tsrm_outputs = self.tsrm(
-            event_embedding=outputs["event_embedding"],
+            event_embedding=temporal_inputs["event_embedding"],
             scalar_feats=batch["scalar_feats"],
-            base_gate=outputs["base_gate"],
-            policy_probs=outputs["policy_probs"],
-            cue=outputs["cue"],
-            risk=outputs["risk"],
+            base_gate=temporal_inputs["base_gate"],
+            policy_probs=temporal_inputs["policy_probs"],
+            cue=temporal_inputs["cue"],
+            risk=temporal_inputs["risk"],
             padding_mask=padding_mask,
             has_detection_mask=batch["has_detection_mask"],
             reset_mask=batch.get("reset_mask"),

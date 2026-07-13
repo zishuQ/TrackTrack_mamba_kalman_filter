@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PY="${PYTHON_BIN:-${ROOT}/.venv/bin/python}"
 RUN_ROOT="${RUN_ROOT:-${ROOT}/outputs/agentguard/experiments/iwg_tsrm_v3_endpoint_smoke_seed42}"
 DATASET_DIR="${DATASET_DIR:-${ROOT}/outputs/agentguard/experiments/iwg_tsrm_v3_endpoint_holdout_seed42/dataset}"
+TEMPORAL_IWG_GRADIENT_SCALE="${TEMPORAL_IWG_GRADIENT_SCALE:-1.0}"
 CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
 LOG_DIR="${RUN_ROOT}/logs"
 PROVENANCE_DIR="${RUN_ROOT}/provenance"
@@ -58,6 +59,7 @@ COMMAND=(
   --seed 42 --window-size 16 --delta-max 0.2
   --lambda-final 1.0 --lambda-residual 0.5
   --lambda-dynamics 0.0 --lambda-revision 0.01
+  --temporal-iwg-gradient-scale "${TEMPORAL_IWG_GRADIENT_SCALE}"
   --sampling-policy sequence_balanced
   --selection-metric final_gate_loss
   --max-train-windows 512 --max-val-windows 128

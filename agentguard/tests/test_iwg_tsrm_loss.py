@@ -104,6 +104,74 @@ def test_production_joint_loss_is_finite_and_trains_every_branch():
         _assert_nonzero_finite_gradients(module, name)
 
 
+def test_zero_temporal_iwg_gradient_scale_isolates_production_temporal_loss():
+    torch.manual_seed(19)
+    model = IWGTSRM(reid_dim=16, temporal_iwg_gradient_scale=0.0).eval()
+    reference = IWGTSRM(reid_dim=16, temporal_iwg_gradient_scale=1.0).eval()
+    reference.load_state_dict(model.state_dict())
+    batch = make_joint_batch()
+
+    def temporal_only_targets(outputs):
+        isolated = {
+            key: value.clone() if torch.is_tensor(value) else value
+            for key, value in batch.items()
+        }
+        isolated["base_gate_target"] = outputs["base_gate"].detach().clone()
+        isolated["policy_soft_target"] = outputs["policy_probs"].detach().clone()
+        isolated["cue_target"] = outputs["cue"].detach().clone()
+        isolated["risk_target"] = outputs["risk"].detach().clone()
+        isolated["final_gate_target"] = torch.clamp(
+            outputs["base_gate"].detach() + 0.1, 0.0, 1.0
+        )
+        return isolated
+
+    with torch.no_grad():
+        detached_outputs = model(batch)
+        reference_outputs = reference(batch)
+    for key in ("base_gate", "temporal_gate_correction", "final_gate"):
+        torch.testing.assert_close(detached_outputs[key], reference_outputs[key])
+
+    # Move the zero-initialized delta head once so the second production-loss
+    # audit can reach the upstream TCN/GRU/fusion branches.
+    optimizer = torch.optim.SGD(model.tsrm.parameters(), lr=0.1)
+    outputs = model(batch)
+    loss, _ = compute_iwg_tsrm_loss(
+        outputs,
+        temporal_only_targets(outputs),
+        training_mode="joint",
+        lambda_dynamics=0.0,
+    )
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+
+    outputs = model(batch)
+    loss, _ = compute_iwg_tsrm_loss(
+        outputs,
+        temporal_only_targets(outputs),
+        training_mode="joint",
+        lambda_dynamics=0.0,
+    )
+    model.zero_grad(set_to_none=True)
+    loss.backward()
+
+    iwg_gradients = [
+        parameter.grad for parameter in model.iwg.parameters()
+        if parameter.grad is not None
+    ]
+    assert iwg_gradients
+    assert all(torch.isfinite(gradient).all() for gradient in iwg_gradients)
+    assert max(float(gradient.abs().max()) for gradient in iwg_gradients) <= 1e-6
+    for name, module in {
+        "tcn": model.tsrm.tcn_blocks,
+        "gru": model.tsrm.gru,
+        "fusion": model.tsrm.fusion_head,
+        "delta": model.tsrm.delta_head,
+        "strength": model.tsrm.strength_head,
+    }.items():
+        _assert_nonzero_finite_gradients(module, name)
+
+
 def test_joint_loss_masks_padding_unmatched_and_empty_supervision():
     model = IWGTSRM(reid_dim=16).train()
     batch = make_joint_batch()

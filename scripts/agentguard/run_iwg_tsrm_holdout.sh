@@ -9,6 +9,7 @@ EPOCHS="${EPOCHS:-100}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 NUM_WORKERS="${NUM_WORKERS:-2}"
 GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"
+TEMPORAL_IWG_GRADIENT_SCALE="${TEMPORAL_IWG_GRADIENT_SCALE:-1.0}"
 DATASET_DIR="${DATASET_DIR:-${ROOT}/outputs/agentguard/experiments/iwg_tsrm_v3_endpoint_holdout_seed42/dataset}"
 if [[ "${TRAINING_MODE}" == "joint" ]]; then
   RUN_ROOT="${RUN_ROOT:-${ROOT}/outputs/agentguard/experiments/iwg_tsrm_v3_endpoint_holdout_seed${SEED}}"
@@ -59,6 +60,7 @@ COMMAND=(
   --seed "${SEED}" --window-size 16 --delta-max 0.2
   --lambda-final 1.0 --lambda-residual 0.5
   --lambda-dynamics 0.0 --lambda-revision 0.01
+  --temporal-iwg-gradient-scale "${TEMPORAL_IWG_GRADIENT_SCALE}"
   --sampling-policy sequence_balanced
   --selection-metric "${SELECTION}" --early-stop-patience 15
 )
