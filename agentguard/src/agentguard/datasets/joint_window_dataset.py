@@ -419,9 +419,10 @@ class CompactIWGTSRMWindowDataset(torch.utils.data.Dataset):
         return self._readers[sequence]
 
     def close(self) -> None:
-        for reader in self._readers.values():
+        for reader in getattr(self, "_readers", {}).values():
             reader.close()
-        self._readers.clear()
+        if hasattr(self, "_readers"):
+            self._readers.clear()
 
     def __del__(self) -> None:
         self.close()

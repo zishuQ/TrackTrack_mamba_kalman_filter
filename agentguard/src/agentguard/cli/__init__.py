@@ -3089,6 +3089,141 @@ def _cmd_build_iwg_tsrm_data(args: argparse.Namespace) -> None:
     print(json.dumps(metadata, indent=2, sort_keys=True))
 
 
+def _add_train_iwg_tsrm_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "train_iwg_tsrm", help="Train a base IWG or joint IWG+TSRM checkpoint."
+    )
+    parser.add_argument("--training-mode", choices=["base", "joint"], required=True)
+    parser.add_argument("--dataset-dir", required=True)
+    parser.add_argument("--checkpoint-dir", required=True)
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--amp", action="store_true")
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--warmup-epochs", type=int, default=1)
+    parser.add_argument("--grad-clip", type=float, default=5.0)
+    parser.add_argument("--grad-accum-steps", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--window-size", type=int, default=16)
+    parser.add_argument("--delta-max", type=float, default=0.2)
+    parser.add_argument("--lambda-final", type=float, default=1.0)
+    parser.add_argument("--lambda-residual", type=float, default=0.5)
+    parser.add_argument("--lambda-dynamics", type=float, default=0.1)
+    parser.add_argument("--lambda-revision", type=float, default=0.01)
+    parser.add_argument(
+        "--selection-metric",
+        choices=["base_gate_loss", "final_gate_loss"],
+        default=None,
+    )
+    parser.add_argument("--early-stop-patience", type=int, default=0)
+    parser.add_argument("--max-train-windows", type=int, default=0)
+    parser.add_argument("--max-val-windows", type=int, default=0)
+    parser.add_argument("--resume-from", default="")
+
+
+def _cmd_train_iwg_tsrm(args: argparse.Namespace) -> None:
+    import subprocess
+    import torch
+
+    from agentguard.training.train_iwg_tsrm import train_iwg_tsrm
+
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but is not available")
+    metadata = json.loads((Path(args.dataset_dir) / "metadata.json").read_text())
+    if int(metadata["window_size"]) != int(args.window_size):
+        raise ValueError(
+            f"window_size mismatch: dataset={metadata['window_size']} CLI={args.window_size}"
+        )
+    expected_selection = (
+        "final_gate_loss" if args.training_mode == "joint" else "base_gate_loss"
+    )
+    if args.selection_metric is not None and args.selection_metric != expected_selection:
+        raise ValueError(
+            f"{args.training_mode} training requires selection metric {expected_selection}"
+        )
+    checkpoint_dir = Path(args.checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    diagnostics_output = checkpoint_dir.parent / "label_diagnostics.json"
+    command = [
+        sys.executable,
+        str(Path(PROJECT_ROOT) / "scripts" / "agentguard" / "label_diagnostics.py"),
+        "--label-dir",
+        str(metadata["label_dir"]),
+        "--dataset",
+        str(metadata["dataset"]),
+        "--mode",
+        str(metadata["split"]),
+        "--output",
+        str(diagnostics_output),
+    ]
+    subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
+    config = {
+        "training_mode": args.training_mode,
+        "dataset_dir": str(Path(args.dataset_dir).resolve()),
+        "checkpoint_dir": str(checkpoint_dir.resolve()),
+        "device": args.device,
+        "amp": bool(args.amp),
+        "epochs": int(args.epochs),
+        "batch_size": int(args.batch_size),
+        "num_workers": int(args.num_workers),
+        "lr": float(args.lr),
+        "weight_decay": float(args.weight_decay),
+        "warmup_epochs": int(args.warmup_epochs),
+        "grad_clip": float(args.grad_clip),
+        "grad_accum_steps": int(args.grad_accum_steps),
+        "seed": int(args.seed),
+        "window_size": int(args.window_size),
+        "delta_max": float(args.delta_max),
+        "lambda_final": float(args.lambda_final),
+        "lambda_residual": float(args.lambda_residual),
+        "lambda_dynamics": float(args.lambda_dynamics),
+        "lambda_revision": float(args.lambda_revision),
+        "selection_metric": expected_selection,
+        "early_stop_patience": int(args.early_stop_patience),
+        "max_train_windows": int(args.max_train_windows),
+        "max_val_windows": int(args.max_val_windows),
+        "resume_from": args.resume_from,
+    }
+    summary = train_iwg_tsrm(config)
+    (checkpoint_dir / "training_summary.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n"
+    )
+    print(json.dumps(summary, indent=2, sort_keys=True))
+
+
+def _add_validate_iwg_tsrm_checkpoint_parser(
+    subparsers: argparse._SubParsersAction,
+) -> None:
+    parser = subparsers.add_parser(
+        "validate_iwg_tsrm_checkpoint", help="Strictly validate and evaluate a joint checkpoint."
+    )
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--dataset-dir", required=True)
+    parser.add_argument("--split", choices=["train", "val"], default="val")
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--max-batches", type=int, default=0)
+    parser.add_argument("--output", default="")
+
+
+def _cmd_validate_iwg_tsrm_checkpoint(args: argparse.Namespace) -> None:
+    from agentguard.training.train_iwg_tsrm import validate_iwg_tsrm_checkpoint
+
+    report = validate_iwg_tsrm_checkpoint(
+        checkpoint_path=args.checkpoint,
+        dataset_dir=args.dataset_dir,
+        split=args.split,
+        device=args.device,
+        max_batches=args.max_batches,
+    )
+    text = json.dumps(report, indent=2, sort_keys=True)
+    print(text)
+    if args.output:
+        Path(args.output).write_text(text + "\n")
+
+
 # ===================================================================
 # Main entry point
 # ===================================================================
@@ -3135,6 +3270,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     _add_build_student_v1_data_parser(subparsers)
     _add_train_student_v1_parser(subparsers)
     _add_build_iwg_tsrm_data_parser(subparsers)
+    _add_train_iwg_tsrm_parser(subparsers)
+    _add_validate_iwg_tsrm_checkpoint_parser(subparsers)
 
     parsed = parser.parse_args(argv)
 
@@ -3155,6 +3292,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         "build_student_v1_data": _cmd_build_student_v1_data,
         "train_student_v1": _cmd_train_student_v1,
         "build_iwg_tsrm_data": _cmd_build_iwg_tsrm_data,
+        "train_iwg_tsrm": _cmd_train_iwg_tsrm,
+        "validate_iwg_tsrm_checkpoint": _cmd_validate_iwg_tsrm_checkpoint,
     }
 
     handler = dispatch.get(parsed.command)
