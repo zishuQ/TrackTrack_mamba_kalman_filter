@@ -3,141 +3,178 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 from statistics import mean
-from typing import Any
+from typing import Any, Iterable
+
+from agentguard.data.label_schema import (
+    ROLLOUT_LABEL_SCHEMA_DESCRIPTOR,
+    ROLLOUT_LABEL_SCHEMA_SHA256,
+    ROLLOUT_LABEL_SCHEMA_VERSION,
+    validate_rollout_label,
+)
+
+
+RISK_NAMES = (
+    "motion_harm",
+    "appearance_harm",
+    "insufficient_evidence",
+    "cross_modal_conflict",
+)
 
 
 def _records(label_dir: Path, max_records: int) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for path in sorted(label_dir.glob("*_labels.json")):
+    paths = sorted(label_dir.glob("*_labels.json"))
+    if not paths:
+        raise FileNotFoundError(f"No *_labels.json files found in {label_dir}")
+    for path in paths:
         data = json.loads(path.read_text())
-        for item in data:
+        if not isinstance(data, list):
+            raise ValueError(f"Expected a label list in {path}")
+        for index, item in enumerate(data):
+            try:
+                validate_rollout_label(item)
+            except ValueError as exc:
+                raise ValueError(f"Invalid label {path}:{index}: {exc}") from exc
             records.append(item)
             if max_records > 0 and len(records) >= max_records:
                 return records
     return records
 
 
-def _safe_mean(values: list[float]) -> float:
-    return float(mean(values)) if values else 0.0
+def _quantiles(values: Iterable[float]) -> dict[str, float]:
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return {name: 0.0 for name in ("p05", "p25", "p50", "p75", "p95")}
+
+    def q(fraction: float) -> float:
+        index = round((len(ordered) - 1) * fraction)
+        return ordered[max(0, min(len(ordered) - 1, index))]
+
+    return {
+        "p05": q(0.05),
+        "p25": q(0.25),
+        "p50": q(0.50),
+        "p75": q(0.75),
+        "p95": q(0.95),
+    }
 
 
-def _quantiles(values: list[float]) -> dict[str, float]:
-    if not values:
-        return {"p05": 0.0, "p25": 0.0, "p50": 0.0, "p75": 0.0, "p95": 0.0}
-    values = sorted(values)
-    def q(frac: float) -> float:
-        idx = min(len(values) - 1, max(0, int(round((len(values) - 1) * frac))))
-        return float(values[idx])
-    return {"p05": q(0.05), "p25": q(0.25), "p50": q(0.5), "p75": q(0.75), "p95": q(0.95)}
-
-
-def _benefit_stats(values: list[float]) -> dict[str, Any]:
-    eps = 1e-6
-    near = [v for v in values if abs(v) <= eps]
-    soft = [1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, v / 0.1)))) for v in values]
-    near_soft = [y for y in soft if abs(y - 0.5) <= 0.05]
+def _distribution(values: Iterable[float]) -> dict[str, float | int]:
+    values = [float(value) for value in values]
     return {
         "count": len(values),
-        "mean": _safe_mean(values),
-        "positive": sum(v > eps for v in values),
-        "negative": sum(v < -eps for v in values),
-        "tie": len(near),
-        "positive_ratio": sum(v > eps for v in values) / max(len(values), 1),
-        "negative_ratio": sum(v < -eps for v in values) / max(len(values), 1),
-        "near_zero_ratio": len(near) / max(len(values), 1),
-        "soft_near_0p5_ratio_tau_0p1": len(near_soft) / max(len(values), 1),
+        "mean": float(mean(values)) if values else 0.0,
         **_quantiles(values),
     }
 
 
-def _summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
-    by_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    by_seq = Counter()
-    for record in records:
-        ctype = str(record.get("candidate_type", "A")).upper()
-        by_type[ctype].append(record)
-        by_seq[str(record.get("sequence", ""))] += 1
-
-    summary: dict[str, Any] = {
-        "total_records": len(records),
-        "sequence_counts": dict(sorted(by_seq.items())),
-        "candidate_counts": {k: len(v) for k, v in sorted(by_type.items())},
-        "candidate": {},
+def _channel_summary(records: list[dict[str, Any]], channel: str) -> dict[str, Any]:
+    valid_field = f"valid_{channel}"
+    valid = [record for record in records if bool(record[valid_field])]
+    benefits = [float(record[f"{channel}_benefit"]) for record in valid]
+    soft = [float(record[f"{channel}_soft_target"]) for record in valid]
+    safe = [float(record[f"{channel}_safe_target"]) for record in valid]
+    confidence = [float(record[f"{channel}_label_confidence"]) for record in valid]
+    negative = [record for record in valid if float(record[f"{channel}_benefit"]) < 0.0]
+    eps = 1e-6
+    return {
+        "valid_count": len(valid),
+        "valid_coverage": len(valid) / max(len(records), 1),
+        "benefit": {
+            **_distribution(benefits),
+            "positive_ratio": sum(value > eps for value in benefits) / max(len(benefits), 1),
+            "negative_ratio": sum(value < -eps for value in benefits) / max(len(benefits), 1),
+            "near_zero_ratio": sum(abs(value) <= eps for value in benefits) / max(len(benefits), 1),
+        },
+        "soft_target": _distribution(soft),
+        "safe_target": {
+            **_distribution(safe),
+            "gte_0p95_ratio": sum(value >= 0.95 for value in safe) / max(len(safe), 1),
+        },
+        "confidence": _distribution(confidence),
+        "negative_benefit_subset": {
+            "count": len(negative),
+            "safe_lt_0p5_ratio": sum(
+                float(record[f"{channel}_safe_target"]) < 0.5 for record in negative
+            ) / max(len(negative), 1),
+            "safe_gte_0p8_ratio": sum(
+                float(record[f"{channel}_safe_target"]) >= 0.8 for record in negative
+            ) / max(len(negative), 1),
+        },
     }
-    for ctype, bucket in sorted(by_type.items()):
-        target_known = [r for r in bucket if r.get("target_gt_id", -1) not in (-1, None)]
-        det_known = [r for r in bucket if r.get("detection_gt_id", -1) not in (-1, None)]
-        valid_motion = [r for r in bucket if bool(r.get("valid_motion", False))]
-        valid_app = [r for r in bucket if bool(r.get("valid_appearance", False))]
-        motion = [float(r.get("motion_benefit", 0.0)) for r in valid_motion]
-        app = [float(r.get("appearance_benefit", 0.0)) for r in valid_app]
-        same_identity = [
-            r for r in bucket
-            if r.get("target_gt_id", -1) not in (-1, None)
-            and r.get("detection_gt_id", -1) not in (-1, None)
-            and int(r.get("target_gt_id")) == int(r.get("detection_gt_id"))
-        ]
-        other_identity = [
-            r for r in bucket
-            if r.get("target_gt_id", -1) not in (-1, None)
-            and r.get("detection_gt_id", -1) not in (-1, None)
-            and int(r.get("target_gt_id")) != int(r.get("detection_gt_id"))
-        ]
-        summary["candidate"][ctype] = {
-            "count": len(bucket),
-            "target_known_ratio": len(target_known) / max(len(bucket), 1),
-            "detection_gt_known_ratio": len(det_known) / max(len(bucket), 1),
-            "same_identity_ratio": len(same_identity) / max(len(bucket), 1),
-            "other_identity_ratio": len(other_identity) / max(len(bucket), 1),
-            "valid_motion_ratio": len(valid_motion) / max(len(bucket), 1),
-            "valid_appearance_ratio": len(valid_app) / max(len(bucket), 1),
-            "gt_coverage_mean": _safe_mean([float(r.get("gt_coverage", 0.0)) for r in bucket]),
-            "oracle_detection_coverage_mean": _safe_mean(
-                [float(r.get("oracle_detection_coverage", 0.0)) for r in bucket]
-            ),
-            "motion_benefit": _benefit_stats(motion),
-            "appearance_benefit": _benefit_stats(app),
-            "motion_hard_write_ratio": _safe_mean(
-                [float(r.get("motion_oracle_hard", 0)) for r in bucket if r.get("valid_motion", False)]
-            ),
-            "appearance_hard_write_ratio": _safe_mean(
-                [float(r.get("appearance_oracle_hard", 0)) for r in bucket if r.get("valid_appearance", False)]
-            ),
-        }
-    return summary
+
+
+def _risk_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for index, name in enumerate(RISK_NAMES):
+        if index == 0:
+            selected = [record for record in records if bool(record["valid_motion"])]
+        elif index == 1:
+            selected = [record for record in records if bool(record["valid_appearance"])]
+        else:
+            selected = [
+                record
+                for record in records
+                if bool(record["valid_motion"]) and bool(record["valid_appearance"])
+            ]
+        result[name] = _distribution(record["risk_targets"][index] for record in selected)
+    return result
+
+
+def _summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "total_records": len(records),
+        "motion": _channel_summary(records, "motion"),
+        "appearance": _channel_summary(records, "appearance"),
+        "risk_targets": _risk_summary(records),
+    }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", required=True)
+    parser.add_argument("--label-dir", default="")
+    parser.add_argument("--dataset", default="")
     parser.add_argument("--mode", default="all")
     parser.add_argument("--labels-root", default="outputs/agentguard/labels")
     parser.add_argument("--max-records", type=int, default=0)
     parser.add_argument("--output", default="")
     args = parser.parse_args()
 
-    label_dir = Path(args.labels_root) / args.dataset / args.mode
+    if args.label_dir:
+        label_dir = Path(args.label_dir)
+    else:
+        if not args.dataset:
+            parser.error("--dataset is required when --label-dir is not provided")
+        label_dir = Path(args.labels_root) / args.dataset / args.mode
     if not label_dir.is_dir():
         raise FileNotFoundError(f"Label directory not found: {label_dir}")
+
     records = _records(label_dir, args.max_records)
-    summary = {
-        "dataset": args.dataset,
+    by_sequence: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        by_sequence[str(record.get("sequence", ""))].append(record)
+
+    report = {
+        "dataset": args.dataset or None,
         "mode": args.mode,
         "label_dir": str(label_dir),
-        **_summarize(records),
+        "label_schema_version": ROLLOUT_LABEL_SCHEMA_VERSION,
+        "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
+        "label_schema_descriptor": ROLLOUT_LABEL_SCHEMA_DESCRIPTOR,
+        "overall": _summary(records),
+        "per_sequence": {
+            sequence: _summary(sequence_records)
+            for sequence, sequence_records in sorted(by_sequence.items())
+        },
     }
-    text = json.dumps(summary, indent=2, sort_keys=True)
+    text = json.dumps(report, indent=2, sort_keys=True)
     print(text)
-    if args.output:
-        out = Path(args.output)
-    else:
-        out = label_dir.parent / f"{args.mode}_diagnostics.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(text)
+    output = Path(args.output) if args.output else label_dir.parent / f"{args.mode}_diagnostics.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(text + "\n")
     return 0
 
 

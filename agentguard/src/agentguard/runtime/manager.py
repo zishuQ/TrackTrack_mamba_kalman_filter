@@ -412,9 +412,9 @@ class AgentGuardRuntime:
         dict with keys:
             - ``policy_probs`` : (5,) ndarray  — policy distribution.
             - ``gate`` : (2,) ndarray — ``[motion_gate, appearance_gate]``.
-            - ``event_logits`` : (10,) ndarray — event-type logits.
+            - ``risk`` : (4,) ndarray — semantic risk probabilities.
             - ``cue`` : (3,) ndarray — predicted cues (sigmoid outputs).
-            - ``gate_residual`` : (2,) ndarray — residual before tanh mixing.
+            - ``iwg_gate_residual`` : (2,) ndarray — local IWG residual.
         """
         # Fallback when IWG is unavailable
         if self.iwg is None or self.feature_builder is None:
@@ -427,9 +427,9 @@ class AgentGuardRuntime:
                 "policy_probs": np.ones(5, dtype=np.float64) / 5.0,
 
                 "gate": np.ones(2, dtype=np.float64),
-                "event_logits": np.zeros(10, dtype=np.float64),
+                "risk": np.zeros(4, dtype=np.float64),
                 "cue": np.ones(3, dtype=np.float64),
-                "gate_residual": np.zeros(2, dtype=np.float64),
+                "iwg_gate_residual": np.zeros(2, dtype=np.float64),
             }
 
         device = next(self.iwg.parameters()).device
@@ -448,9 +448,9 @@ class AgentGuardRuntime:
         return {
             "policy_probs": outputs["policy_probs"].squeeze(0).cpu().numpy(),
             "gate": outputs["gate"].squeeze(0).cpu().numpy(),
-            "event_logits": outputs["event_logits"].squeeze(0).cpu().numpy(),
+            "risk": outputs["risk"].squeeze(0).cpu().numpy(),
             "cue": outputs["cue"].squeeze(0).cpu().numpy(),
-            "gate_residual": outputs["gate_residual"].squeeze(0).cpu().numpy(),
+            "iwg_gate_residual": outputs["iwg_gate_residual"].squeeze(0).cpu().numpy(),
         }
 
     def run_iwg_batch_inference(
@@ -469,9 +469,9 @@ class AgentGuardRuntime:
                 {
                     "policy_probs": np.ones(5, dtype=np.float64) / 5.0,
                     "gate": np.ones(2, dtype=np.float64),
-                    "event_logits": np.zeros(10, dtype=np.float64),
+                    "risk": np.zeros(4, dtype=np.float64),
                     "cue": np.ones(3, dtype=np.float64),
-                    "gate_residual": np.zeros(2, dtype=np.float64),
+                    "iwg_gate_residual": np.zeros(2, dtype=np.float64),
                 }
                 for _ in event_sequences
             ]
@@ -489,11 +489,15 @@ class AgentGuardRuntime:
         policy = outputs["policy_probs"].cpu().numpy()
         gate = outputs["gate"].cpu().numpy()
         cue = outputs["cue"].cpu().numpy()
+        risk = outputs["risk"].cpu().numpy()
+        iwg_gate_residual = outputs["iwg_gate_residual"].cpu().numpy()
         return [
             {
                 "policy_probs": policy[i],
                 "gate": gate[i],
                 "cue": cue[i],
+                "risk": risk[i],
+                "iwg_gate_residual": iwg_gate_residual[i],
             }
             for i in range(len(event_sequences))
         ]

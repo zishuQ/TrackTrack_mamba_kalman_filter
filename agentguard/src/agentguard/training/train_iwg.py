@@ -502,10 +502,13 @@ def _compute_iwg_loss(
     * ``policy_loss``: KL divergence between target policy distribution and
       predicted policy probabilities.
     * ``brier_loss``: Brier score (MSE) between predicted and target gates.
+    * ``cue_loss``: reliability supervision with BCE-with-logits.
+    * ``risk_loss``: four semantic risk targets with BCE-with-logits.
 
     The total loss is:
 
-    ``L_total = L_gate + 0.1 * L_policy + 0.1 * L_brier``
+    ``L_total = L_gate + 0.1 * L_policy + 0.1 * L_brier
+    + 0.2 * L_cue + 0.1 * L_risk``
     """
     pred_gate = outputs["gate"]                     # (B, 2)
     pred_policy = outputs["policy_probs"]            # (B, 5)
@@ -540,28 +543,39 @@ def _compute_iwg_loss(
         / gate_valid.sum(dim=-1).clamp(min=1.0)
     )
 
-    cue_target = torch.stack(
-        [
-            targets.get("motion_label_confidence", torch.zeros_like(targets["motion_target"])),
-            targets.get("appearance_label_confidence", torch.zeros_like(targets["appearance_target"])),
-            torch.maximum(
-                targets.get("motion_label_confidence", torch.zeros_like(targets["motion_target"])),
-                targets.get("appearance_label_confidence", torch.zeros_like(targets["appearance_target"])),
-            ),
-        ],
-        dim=-1,
-    )
-    cue_bce_per_sample = F.binary_cross_entropy(
-        outputs["cue"].clamp(1e-6, 1 - 1e-6),
+    cue_target = targets["cue_target"]
+    cue_valid = torch.stack(
+        [valid_motion, valid_appearance, valid_motion | valid_appearance], dim=-1
+    ).float()
+    cue_bce = F.binary_cross_entropy_with_logits(
+        outputs["cue_logits"],
         cue_target,
         reduction="none",
-    ).mean(dim=-1)
+    )
+    cue_bce_per_sample = (
+        (cue_bce * cue_valid).sum(dim=-1)
+        / cue_valid.sum(dim=-1).clamp(min=1.0)
+    )
+
+    risk_target = targets["risk_target"]
+    both_valid = valid_motion & valid_appearance
+    risk_valid = torch.stack(
+        [valid_motion, valid_appearance, both_valid, both_valid], dim=-1
+    ).float()
+    risk_bce = F.binary_cross_entropy_with_logits(
+        outputs["risk_logits"], risk_target, reduction="none"
+    )
+    risk_bce_per_sample = (
+        (risk_bce * risk_valid).sum(dim=-1)
+        / risk_valid.sum(dim=-1).clamp(min=1.0)
+    )
 
     loss_per_sample = (
         gate_loss_per_sample
         + 0.1 * policy_kl_per_sample * policy_valid
         + 0.1 * brier_per_sample
         + 0.2 * cue_bce_per_sample
+        + 0.1 * risk_bce_per_sample
     )
 
     # Apply sample weights
@@ -574,4 +588,5 @@ def _compute_iwg_loss(
         "policy_loss": (policy_kl_per_sample * policy_valid).sum().detach() / policy_valid.sum().clamp(min=1.0),
         "brier_loss": (brier_per_sample * sample_weight).sum().detach() / sample_weight.sum().clamp(min=1.0),
         "cue_loss": (cue_bce_per_sample * sample_weight).sum().detach() / sample_weight.sum().clamp(min=1.0),
+        "risk_loss": (risk_bce_per_sample * sample_weight).sum().detach() / sample_weight.sum().clamp(min=1.0),
     }

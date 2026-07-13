@@ -9,6 +9,13 @@ import numpy as np
 
 from agentguard.contracts.enums import POLICY_PROTOTYPE_MATRIX
 from agentguard.contracts.events import TrackEvent
+from agentguard.data.cache_schema import COMPACT_CACHE_SCHEMA_VERSION, FEATURE_SCHEMA_SHA256
+from agentguard.data.label_schema import (
+    ROLLOUT_LABEL_SCHEMA_SHA256,
+    ROLLOUT_LABEL_SCHEMA_VERSION,
+    make_cue_target,
+    make_risk_targets,
+)
 from agentguard.rollout.losses import sigmoid
 
 _BENEFIT_EPS: float = 1e-3
@@ -104,6 +111,13 @@ def build_rollout_labels(
         )
         gate = np.array([motion_target, appearance_target], dtype=np.float64)
         safe_gate = np.array([motion_safe, appearance_safe], dtype=np.float64)
+        cue_target = make_cue_target(motion_confidence, appearance_confidence)
+        risk_targets = make_risk_targets(
+            motion_target,
+            appearance_target,
+            motion_confidence,
+            appearance_confidence,
+        )
 
         sample_type = "matched" if event.has_detection else "unmatched"
         labels.append(
@@ -131,7 +145,12 @@ def build_rollout_labels(
                 ],
                 "policy_soft_target": compute_policy_soft_target(gate),
                 "policy_safe_soft_target": compute_policy_soft_target(safe_gate),
-                "label_schema_version": 2,
+                "cue_target": cue_target,
+                "risk_targets": risk_targets,
+                "label_schema_version": ROLLOUT_LABEL_SCHEMA_VERSION,
+                "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
+                "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
+                "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
                 "sample_type": sample_type,
                 "valid_motion": True,
                 "valid_appearance": True,

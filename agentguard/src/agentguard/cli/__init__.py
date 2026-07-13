@@ -35,6 +35,11 @@ from agentguard.data.cache_schema import (
     FEATURE_SCHEMA_DESCRIPTOR,
     FEATURE_SCHEMA_SHA256,
 )
+from agentguard.data.label_schema import (
+    ROLLOUT_LABEL_SCHEMA_DESCRIPTOR,
+    ROLLOUT_LABEL_SCHEMA_SHA256,
+    ROLLOUT_LABEL_SCHEMA_VERSION,
+)
 
 # ---------------------------------------------------------------------------
 # Version
@@ -1172,7 +1177,16 @@ def _cmd_build_rollout_labels(args: argparse.Namespace) -> None:
         "num_sequences": len(sequence_summaries),
         "sequences": sequence_summaries,
     }
-    summary_path = os.path.join(label_dir, f"{label_mode}_summary.json")
+    summary.update(
+        {
+            "label_schema_version": ROLLOUT_LABEL_SCHEMA_VERSION,
+            "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
+            "label_schema_descriptor": ROLLOUT_LABEL_SCHEMA_DESCRIPTOR,
+            "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
+            "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
+        }
+    )
+    summary_path = os.path.join(labels_out, "summary.json")
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2, default=str)
 
@@ -1631,6 +1645,9 @@ def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
         "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
         "feature_schema_descriptor": FEATURE_SCHEMA_DESCRIPTOR,
         "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
+        "label_schema_version": ROLLOUT_LABEL_SCHEMA_VERSION,
+        "label_schema_descriptor": ROLLOUT_LABEL_SCHEMA_DESCRIPTOR,
+        "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
         "event_cache_contracts_sha256": _sha256_json(event_cache_contracts),
         "num_records": len(records),
         "num_train": len(train_records),
@@ -1914,6 +1931,13 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
         )
     if metadata.get("feature_schema_sha256") != FEATURE_SCHEMA_SHA256:
         raise ValueError("Dataset metadata feature schema does not match current runtime")
+    if int(metadata.get("label_schema_version", 0)) != ROLLOUT_LABEL_SCHEMA_VERSION:
+        raise ValueError(
+            "Dataset metadata label schema mismatch: "
+            f"{metadata.get('label_schema_version')} != {ROLLOUT_LABEL_SCHEMA_VERSION}"
+        )
+    if metadata.get("label_schema_sha256") != ROLLOUT_LABEL_SCHEMA_SHA256:
+        raise ValueError("Dataset metadata label schema hash does not match current runtime")
     try:
         training_commit = subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
@@ -1961,6 +1985,9 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
         "resume_from": args.iwg_resume_checkpoint,
         "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
         "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
+        "label_schema_version": ROLLOUT_LABEL_SCHEMA_VERSION,
+        "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
+        "model_schema_version": "agentguard_iwg_v3",
         "training_commit": training_commit,
         "dataset_metadata_path": os.path.abspath(metadata_path),
         "dataset_metadata_sha256": _sha256_file(metadata_path),

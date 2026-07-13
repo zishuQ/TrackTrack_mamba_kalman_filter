@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from agentguard.contracts.events import TrackEvent
+from agentguard.data.label_schema import validate_rollout_label
 from agentguard.features.builder import EventFeatureBuilder
 
 
@@ -58,6 +59,11 @@ class IWGDataset(torch.utils.data.Dataset):
             )
         self.events = events
         self.labels = labels
+        for index, label in enumerate(labels):
+            try:
+                validate_rollout_label(label)
+            except ValueError as exc:
+                raise ValueError(f"invalid rollout label at index {index}: {exc}") from exc
         self.feature_builder = feature_builder
         self.max_history = max_history
 
@@ -132,10 +138,21 @@ class IWGDataset(torch.utils.data.Dataset):
 
         # Targets.
         targets = {
-            "motion_target": torch.tensor(label["motion_target"], dtype=torch.float),
-            "appearance_target": torch.tensor(label["appearance_target"], dtype=torch.float),
+            "motion_target": torch.tensor(label["motion_soft_target"], dtype=torch.float),
+            "appearance_target": torch.tensor(label["appearance_soft_target"], dtype=torch.float),
+            "motion_soft_target": torch.tensor(label["motion_soft_target"], dtype=torch.float),
+            "appearance_soft_target": torch.tensor(label["appearance_soft_target"], dtype=torch.float),
+            "motion_safe_target": torch.tensor(label["motion_safe_target"], dtype=torch.float),
+            "appearance_safe_target": torch.tensor(label["appearance_safe_target"], dtype=torch.float),
+            "motion_label_confidence": torch.tensor(label["motion_label_confidence"], dtype=torch.float),
+            "appearance_label_confidence": torch.tensor(label["appearance_label_confidence"], dtype=torch.float),
+            "cue_target": torch.tensor(label["cue_target"], dtype=torch.float),
+            "risk_target": torch.tensor(label["risk_targets"], dtype=torch.float),
             "policy_soft_target": torch.from_numpy(
                 np.asarray(label["policy_soft_target"], dtype=np.float64)
+            ).float(),
+            "policy_safe_soft_target": torch.from_numpy(
+                np.asarray(label["policy_safe_soft_target"], dtype=np.float64)
             ).float(),
             "sample_type": torch.tensor(label["sample_type"], dtype=torch.long),
             "valid_motion": torch.tensor(label["valid_motion"], dtype=torch.bool),
@@ -182,6 +199,15 @@ class IWGDataset(torch.utils.data.Dataset):
             "motion_target": torch.stack([t["motion_target"] for t in targets_list]),
             "appearance_target": torch.stack([t["appearance_target"] for t in targets_list]),
             "policy_soft_target": torch.stack([t["policy_soft_target"] for t in targets_list]),
+            "policy_safe_soft_target": torch.stack([t["policy_safe_soft_target"] for t in targets_list]),
+            "motion_soft_target": torch.stack([t["motion_soft_target"] for t in targets_list]),
+            "appearance_soft_target": torch.stack([t["appearance_soft_target"] for t in targets_list]),
+            "motion_safe_target": torch.stack([t["motion_safe_target"] for t in targets_list]),
+            "appearance_safe_target": torch.stack([t["appearance_safe_target"] for t in targets_list]),
+            "motion_label_confidence": torch.stack([t["motion_label_confidence"] for t in targets_list]),
+            "appearance_label_confidence": torch.stack([t["appearance_label_confidence"] for t in targets_list]),
+            "cue_target": torch.stack([t["cue_target"] for t in targets_list]),
+            "risk_target": torch.stack([t["risk_target"] for t in targets_list]),
             "sample_type": torch.stack([t["sample_type"] for t in targets_list]),
             "valid_motion": torch.stack([t["valid_motion"] for t in targets_list]),
             "valid_appearance": torch.stack([t["valid_appearance"] for t in targets_list]),

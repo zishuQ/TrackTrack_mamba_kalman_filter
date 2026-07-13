@@ -14,6 +14,14 @@ from agentguard.data.cache_reader import CompactEventCacheReader
 from agentguard.data.gt_reader import GTReader
 from agentguard.data.identity_prototype import IdentityPrototypeBuilder
 from agentguard.data.identity_vote import TrackIdentityVoteState
+from agentguard.data.cache_schema import COMPACT_CACHE_SCHEMA_VERSION, FEATURE_SCHEMA_SHA256
+from agentguard.data.label_schema import (
+    ROLLOUT_LABEL_SCHEMA_SHA256,
+    ROLLOUT_LABEL_SCHEMA_VERSION,
+    make_cue_target,
+    make_risk_targets,
+    validate_rollout_label,
+)
 from agentguard.features.builder import EventFeatureBuilder
 from agentguard.motion.nsa_numpy import NSAKalmanFilter
 from agentguard.rollout.appearance import compute_appearance_benefit
@@ -589,7 +597,19 @@ def build_compact_rollout_labels_for_sequence(
             lbl["appearance_safe_target"] = float(appearance_safe)
             lbl["motion_label_confidence"] = float(motion_confidence)
             lbl["appearance_label_confidence"] = float(appearance_confidence)
-            lbl["label_schema_version"] = 2
+            lbl["cue_target"] = make_cue_target(
+                motion_confidence, appearance_confidence
+            )
+            lbl["risk_targets"] = make_risk_targets(
+                motion_soft,
+                appearance_soft,
+                motion_confidence,
+                appearance_confidence,
+            )
+            lbl["label_schema_version"] = ROLLOUT_LABEL_SCHEMA_VERSION
+            lbl["label_schema_sha256"] = ROLLOUT_LABEL_SCHEMA_SHA256
+            lbl["feature_schema_sha256"] = FEATURE_SCHEMA_SHA256
+            lbl["cache_schema_version"] = COMPACT_CACHE_SCHEMA_VERSION
             lbl["motion_oracle_hard"] = hard_gate_from_benefit(lbl["motion_benefit"])
             lbl["appearance_oracle_hard"] = hard_gate_from_benefit(lbl["appearance_benefit"])
             lbl["target_gate"] = [lbl["motion_oracle_hard"], lbl["appearance_oracle_hard"]]
@@ -608,7 +628,10 @@ def build_compact_rollout_labels_for_sequence(
                 "appearance_benefit_positive": int(sum(1 for b in appearance_benefits if b > 1e-9)),
                 "appearance_benefit_negative": int(sum(1 for b in appearance_benefits if b < -1e-9)),
                 "dataset_stats": stats,
-                "label_schema_version": 2,
+                "label_schema_version": ROLLOUT_LABEL_SCHEMA_VERSION,
+                "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
+                "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
+                "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
             }
         )
         return raw_labels, summary
@@ -621,7 +644,11 @@ def load_label_records(label_dir: str | os.PathLike[str], max_samples: int = 0) 
     for path in sorted(Path(label_dir).glob("*_labels.json")):
         with path.open("r") as f:
             seq_records = json.load(f)
-        for record in seq_records:
+        for index, record in enumerate(seq_records):
+            try:
+                validate_rollout_label(record)
+            except ValueError as exc:
+                raise ValueError(f"invalid rollout label {path}:{index}: {exc}") from exc
             records.append(record)
             if max_samples > 0 and len(records) >= max_samples:
                 return records
@@ -722,6 +749,11 @@ class _CompactDatasetBase(torch.utils.data.Dataset):
         feature_builder: EventFeatureBuilder,
         iwg_output_cache: Optional[StudentV0IWGOutputCache] = None,
     ) -> None:
+        for index, record in enumerate(records):
+            try:
+                validate_rollout_label(record)
+            except ValueError as exc:
+                raise ValueError(f"invalid rollout label at record {index}: {exc}") from exc
         self.records = records
         self.event_cache_root = Path(event_cache_root)
         self.detection_cache_root = Path(detection_cache_root)
@@ -779,17 +811,25 @@ class _CompactDatasetBase(torch.utils.data.Dataset):
 
     @staticmethod
     def _targets(label: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        validate_rollout_label(label)
         sample_type = label.get("candidate_type") or label.get("sample_type", "matched")
         return {
-            "motion_target": torch.tensor(float(label.get("motion_safe_target", label.get("motion_soft_target", label.get("motion_target", 1.0)))), dtype=torch.float),
-            "appearance_target": torch.tensor(float(label.get("appearance_safe_target", label.get("appearance_soft_target", label.get("appearance_target", 1.0)))), dtype=torch.float),
-            "motion_label_confidence": torch.tensor(float(label.get("motion_label_confidence", 0.0)), dtype=torch.float),
-            "appearance_label_confidence": torch.tensor(float(label.get("appearance_label_confidence", 0.0)), dtype=torch.float),
-            "policy_soft_target": torch.tensor(label.get("policy_safe_soft_target", label.get("policy_soft_target", [0.2] * 5)), dtype=torch.float),
+            "motion_target": torch.tensor(float(label["motion_soft_target"]), dtype=torch.float),
+            "appearance_target": torch.tensor(float(label["appearance_soft_target"]), dtype=torch.float),
+            "motion_soft_target": torch.tensor(float(label["motion_soft_target"]), dtype=torch.float),
+            "appearance_soft_target": torch.tensor(float(label["appearance_soft_target"]), dtype=torch.float),
+            "motion_safe_target": torch.tensor(float(label["motion_safe_target"]), dtype=torch.float),
+            "appearance_safe_target": torch.tensor(float(label["appearance_safe_target"]), dtype=torch.float),
+            "motion_label_confidence": torch.tensor(float(label["motion_label_confidence"]), dtype=torch.float),
+            "appearance_label_confidence": torch.tensor(float(label["appearance_label_confidence"]), dtype=torch.float),
+            "cue_target": torch.tensor(label["cue_target"], dtype=torch.float),
+            "risk_target": torch.tensor(label["risk_targets"], dtype=torch.float),
+            "policy_soft_target": torch.tensor(label["policy_soft_target"], dtype=torch.float),
+            "policy_safe_soft_target": torch.tensor(label["policy_safe_soft_target"], dtype=torch.float),
             "sample_type": torch.tensor(SAMPLE_TYPE_TO_ID.get(str(sample_type), 0), dtype=torch.long),
-            "valid_motion": torch.tensor(bool(label.get("valid_motion", True)), dtype=torch.bool),
-            "valid_appearance": torch.tensor(bool(label.get("valid_appearance", True)), dtype=torch.bool),
-            "sample_weight": torch.tensor(float(label.get("sample_weight", 1.0)), dtype=torch.float),
+            "valid_motion": torch.tensor(bool(label["valid_motion"]), dtype=torch.bool),
+            "valid_appearance": torch.tensor(bool(label["valid_appearance"]), dtype=torch.bool),
+            "sample_weight": torch.tensor(float(label["sample_weight"]), dtype=torch.float),
         }
 
 

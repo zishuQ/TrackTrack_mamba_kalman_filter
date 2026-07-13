@@ -343,9 +343,9 @@ def test_runtime_iwg_inference_no_model():
     assert result["gate"][0] == 1.0
     assert result["gate"][1] == 1.0
     assert "policy_probs" in result
-    assert "event_logits" in result
+    assert "risk" in result
     assert "cue" in result
-    assert "gate_residual" in result
+    assert "iwg_gate_residual" in result
 
 
 def test_runtime_tgr_inference_no_model():

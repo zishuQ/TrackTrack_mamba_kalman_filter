@@ -577,6 +577,9 @@ class TestLabels:
             assert "valid_motion" in label
             assert "valid_appearance" in label
             assert "sample_weight" in label
+            assert label["label_schema_version"] == 3
+            assert len(label["cue_target"]) == 3
+            assert len(label["risk_targets"]) == 4
             assert label["valid_motion"] is True
             assert label["valid_appearance"] is True
             assert label["sample_weight"] == 1.0

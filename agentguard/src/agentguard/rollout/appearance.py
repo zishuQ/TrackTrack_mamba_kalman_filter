@@ -40,7 +40,9 @@ def compute_appearance_benefit(
     Returns
     -------
     B_a : float
-        Appearance benefit (= L_skip - L_write). Negative means write is better.
+        Appearance benefit (= L_skip - L_write). Positive means write is
+        better and the appearance gate target should move toward 1; negative
+        means skip is better and the target should move toward 0.
     write_losses : list of float
         Per-frame appearance losses for the write branch.
     skip_losses : list of float

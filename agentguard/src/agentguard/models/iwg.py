@@ -30,8 +30,8 @@ class IWG(nn.Module):
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
 
         self.policy_head = make_head(event_dim, 64, 5)
-        self.gate_residual_head = make_head(event_dim, 64, 2)
-        self.event_head = make_head(event_dim, 64, 10)
+        self.iwg_gate_residual_head = make_head(event_dim, 64, 2)
+        self.risk_head = make_head(event_dim, 64, 4)
         self.cue_head = make_head(event_dim, 32, 3)
 
         self.position_embedding = nn.Parameter(torch.zeros(1, 6, event_dim))
@@ -59,24 +59,27 @@ class IWG(nn.Module):
         policy_logits = self.policy_head(last_out)
         policy_probs = F.softmax(policy_logits, dim=-1)
 
-        gate_residual = self.gate_residual_head(last_out)
-        event_logits = self.event_head(last_out)
+        iwg_gate_residual = self.iwg_gate_residual_head(last_out)
+        risk_logits = self.risk_head(last_out)
         cue_logits = self.cue_head(last_out)
         cue = torch.sigmoid(cue_logits)
 
         device = policy_probs.device
         prototype = torch.from_numpy(POLICY_PROTOTYPE_MATRIX).to(device=device, dtype=policy_probs.dtype)
         g_mix = policy_probs @ prototype
-        g_final = torch.clamp(g_mix + 0.15 * torch.tanh(gate_residual), 0, 1)
+        base_gate = torch.clamp(
+            g_mix + 0.15 * torch.tanh(iwg_gate_residual), 0, 1
+        )
 
         return {
             'policy_logits': policy_logits,
             'policy_probs': policy_probs,
-            'base_gate': g_final,
-            'gate': g_final,
+            'base_gate': base_gate,
+            'gate': base_gate,
             'event_embedding': last_out,
             'cue_logits': cue_logits,
-            'event_logits': event_logits,
+            'risk_logits': risk_logits,
+            'risk': torch.sigmoid(risk_logits),
             'cue': cue,
-            'gate_residual': gate_residual,
+            'iwg_gate_residual': iwg_gate_residual,
         }

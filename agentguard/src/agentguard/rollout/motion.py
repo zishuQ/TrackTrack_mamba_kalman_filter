@@ -48,7 +48,9 @@ def compute_motion_benefit(
     Returns
     -------
     B_m : float
-        Motion benefit (= L_skip - L_write). Negative means write branch is better.
+        Motion benefit (= L_skip - L_write). Positive means write is better
+        and the motion gate target should move toward 1; negative means skip
+        is better and the target should move toward 0.
     write_losses : list of float
         Per-frame losses for the write branch.
     skip_losses : list of float

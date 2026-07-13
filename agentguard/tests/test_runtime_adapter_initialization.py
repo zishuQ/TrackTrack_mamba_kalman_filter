@@ -56,9 +56,9 @@ def test_adapter_uses_getattr_for_event_sink():
             return {
                 "policy_probs": np.ones(5) / 5,
                 "gate": np.ones(2),
-                "event_logits": np.zeros(10),
+                "risk": np.zeros(4),
                 "cue": np.ones(3),
-                "gate_residual": np.zeros(2),
+                "iwg_gate_residual": np.zeros(2),
             }
 
     from integrations.agentguard.adapter import AgentGuardTrackerAdapter
@@ -98,9 +98,9 @@ def test_adapter_no_reinit_feature_builder():
             return {
                 "policy_probs": np.ones(5) / 5,
                 "gate": np.ones(2),
-                "event_logits": np.zeros(10),
+                "risk": np.zeros(4),
                 "cue": np.ones(3),
-                "gate_residual": np.zeros(2),
+                "iwg_gate_residual": np.zeros(2),
             }
 
     from integrations.agentguard.adapter import AgentGuardTrackerAdapter
