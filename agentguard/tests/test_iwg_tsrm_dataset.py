@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
+import pytest
 
 from agentguard.datasets.joint_window_dataset import (
     HOLD_BOTH_POLICY,
+    JOINT_DATASET_SCHEMA_VERSION,
+    MOT17_FRCNN_TRAIN_SEQUENCES,
+    MOT17_FRCNN_VAL_SEQUENCES,
     UNMATCHED_CUE,
     UNMATCHED_RISK,
+    CompactIWGTSRMWindowDataset,
     build_window_index,
     event_key,
+    resolve_joint_sequences,
     segment_track_timelines,
 )
 
@@ -60,7 +68,14 @@ def test_window_index_is_left_padded_fixed_context_and_segment_local():
     assert windows[0]["pad_left"] == 3
     assert len(windows[0]["events"]) == 1
     assert all(len(window["events"]) + window["pad_left"] == 4 for window in windows)
+    assert all(
+        len(window["iwg_events"]) + window["iwg_pad_left"] == 9
+        for window in windows
+    )
     assert windows[-1]["events"][-1]["frame_id"] == 9
+    assert [event["frame_id"] for event in windows[-1]["iwg_events"]] == list(
+        range(1, 10)
+    )
     assert all({event["track_id"] for event in window["events"]} == {7} for window in windows)
 
 
@@ -73,3 +88,29 @@ def test_unmatched_sentinel_contract_is_exact():
 def test_event_key_is_sequence_scoped_and_stable():
     assert event_key("MOT17-02-FRCNN", 3, 9) == "MOT17-02-FRCNN|3|9"
     assert event_key("a", 3, 9) != event_key("b", 3, 9)
+
+
+def test_mot17_all_split_ignores_other_detector_directories():
+    other_detectors = ["MOT17-02-DPM", "MOT17-11-SDP"]
+    selected, train, val = resolve_joint_sequences(
+        dataset="MOT17",
+        split="all",
+        available_sequences=(
+            MOT17_FRCNN_TRAIN_SEQUENCES
+            + MOT17_FRCNN_VAL_SEQUENCES
+            + other_detectors
+        ),
+        val_sequences=MOT17_FRCNN_VAL_SEQUENCES,
+    )
+    assert train == sorted(MOT17_FRCNN_TRAIN_SEQUENCES)
+    assert val == sorted(MOT17_FRCNN_VAL_SEQUENCES)
+    assert selected == sorted(train + val)
+    assert set(selected).isdisjoint(other_detectors)
+
+
+def test_v1_joint_dataset_is_strictly_rejected(tmp_path):
+    (tmp_path / "metadata.json").write_text(
+        json.dumps({"joint_dataset_schema_version": JOINT_DATASET_SCHEMA_VERSION - 1})
+    )
+    with pytest.raises(ValueError, match="schema mismatch"):
+        CompactIWGTSRMWindowDataset(tmp_path, "train")

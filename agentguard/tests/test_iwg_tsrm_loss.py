@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from agentguard.models.iwg_tsrm import IWGTSRM
+from agentguard.models.iwg_tsrm import IWGTSRM, forward_iwg_with_warmup
 from agentguard.training.loss_iwg_tsrm import compute_iwg_tsrm_loss
 
 
@@ -22,10 +22,20 @@ def make_joint_batch(batch_size: int = 2, length: int = 8, reid_dim: int = 16) -
     appearance_conf = torch.rand((batch_size, length), generator=generator)
     policy = torch.rand((batch_size, length, 5), generator=generator)
     policy = policy / policy.sum(dim=-1, keepdim=True)
+    iwg_length = length + 5
+    iwg_padding = torch.zeros((batch_size, iwg_length), dtype=torch.bool)
+    iwg_padding[0, :7] = True
+    iwg_track = torch.randn(batch_size, iwg_length, reid_dim, generator=generator)
+    iwg_det = torch.randn(batch_size, iwg_length, reid_dim, generator=generator)
+    iwg_scalar = torch.randn(batch_size, iwg_length, 63, generator=generator)
     return {
-        "track_feats": torch.randn(batch_size, length, reid_dim, generator=generator),
-        "det_feats": torch.randn(batch_size, length, reid_dim, generator=generator),
-        "scalar_feats": torch.randn(batch_size, length, 63, generator=generator),
+        "track_feats": iwg_track[:, -length:].clone(),
+        "det_feats": iwg_det[:, -length:].clone(),
+        "scalar_feats": iwg_scalar[:, -length:].clone(),
+        "iwg_track_feats": iwg_track,
+        "iwg_det_feats": iwg_det,
+        "iwg_scalar_feats": iwg_scalar,
+        "iwg_padding_mask": iwg_padding,
         "padding_mask": padding,
         "has_detection_mask": has_detection,
         "reset_mask": reset,
@@ -109,9 +119,7 @@ def test_joint_loss_masks_padding_unmatched_and_empty_supervision():
 def test_base_training_mode_does_not_require_tsrm_outputs():
     model = IWGTSRM(reid_dim=16).train()
     batch = make_joint_batch()
-    outputs = model.iwg.forward_sequence(
-        batch["track_feats"], batch["det_feats"], batch["scalar_feats"], batch["padding_mask"]
-    )
+    outputs = forward_iwg_with_warmup(model.iwg, batch)
     outputs = model.apply_unmatched_sentinel(outputs, batch["has_detection_mask"])
     loss, components = compute_iwg_tsrm_loss(outputs, batch, training_mode="base")
     assert torch.isfinite(loss)

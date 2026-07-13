@@ -23,13 +23,13 @@ from agentguard.datasets.joint_window_dataset import (
     CompactIWGTSRMWindowDataset,
 )
 from agentguard.models.iwg import IWG
-from agentguard.models.iwg_tsrm import IWGTSRM
+from agentguard.models.iwg_tsrm import IWGTSRM, forward_iwg_with_warmup
 from agentguard.training.loss_iwg_tsrm import compute_iwg_tsrm_loss
 from agentguard.training.scheduler import CosineWarmupScheduler
 
 
-JOINT_MODEL_SCHEMA = "agentguard_iwg_tsrm_v1"
-BASE_MODEL_SCHEMA = "agentguard_iwg_base_v1"
+JOINT_MODEL_SCHEMA = "agentguard_iwg_tsrm_v2"
+BASE_MODEL_SCHEMA = "agentguard_iwg_base_v2"
 
 
 def _sha256_file(path: Path) -> str:
@@ -64,12 +64,7 @@ def _model_forward(
 ) -> dict[str, torch.Tensor]:
     if training_mode == "joint":
         return model(batch)
-    outputs = model.forward_sequence(
-        batch["track_feats"],
-        batch["det_feats"],
-        batch["scalar_feats"],
-        batch["padding_mask"],
-    )
+    outputs = forward_iwg_with_warmup(model, batch)
     return IWGTSRM.apply_unmatched_sentinel(outputs, batch["has_detection_mask"])
 
 
@@ -315,6 +310,8 @@ def _checkpoint_contract(
         "scalar_dim": int(dataset_metadata["scalar_dim"]),
         "event_dim": int(dataset_metadata["event_dim"]),
         "window_size": int(dataset_metadata["window_size"]),
+        "iwg_warmup_events": int(dataset_metadata["iwg_warmup_events"]),
+        "iwg_input_size": int(dataset_metadata["iwg_input_size"]),
         "delta_max": float(config["delta_max"]),
         "normalization_mean": np.asarray(norm["mean"], dtype=np.float64),
         "normalization_std": np.asarray(norm["std"], dtype=np.float64),
@@ -367,6 +364,8 @@ def validate_checkpoint_contract(
             "scheduler_state_dict",
             "scaler_state_dict",
             "window_size",
+            "iwg_warmup_events",
+            "iwg_input_size",
             "delta_max",
             "reid_dim",
             "scalar_dim",
@@ -389,6 +388,12 @@ def validate_checkpoint_contract(
         raise ValueError("normalization_std must have shape (63,)")
     if np.asarray(checkpoint["policy_prototypes"]).shape != (5, 2):
         raise ValueError("policy_prototypes must have shape (5, 2)")
+    if int(checkpoint["window_size"]) < 1:
+        raise ValueError("window_size must be positive")
+    if int(checkpoint["iwg_warmup_events"]) != 5:
+        raise ValueError("iwg_warmup_events must equal 5")
+    if int(checkpoint["iwg_input_size"]) != int(checkpoint["window_size"]) + 5:
+        raise ValueError("iwg_input_size must equal window_size + 5")
     if dataset_metadata_path is not None:
         actual_hash = _sha256_file(dataset_metadata_path)
         if checkpoint["dataset_metadata_sha256"] != actual_hash:

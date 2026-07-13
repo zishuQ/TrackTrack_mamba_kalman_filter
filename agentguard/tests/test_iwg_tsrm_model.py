@@ -39,10 +39,20 @@ def make_joint_batch(batch_size: int = 2, length: int = 8, reid_dim: int = 16) -
     )
     policy = torch.rand((batch_size, length, 5), generator=generator)
     policy = policy / policy.sum(dim=-1, keepdim=True)
+    iwg_length = length + 5
+    iwg_padding = torch.zeros((batch_size, iwg_length), dtype=torch.bool)
+    iwg_padding[0, :7] = True
+    iwg_track = torch.randn(batch_size, iwg_length, reid_dim, generator=generator)
+    iwg_det = torch.randn(batch_size, iwg_length, reid_dim, generator=generator)
+    iwg_scalar = torch.randn(batch_size, iwg_length, 63, generator=generator)
     return {
-        "track_feats": torch.randn(batch_size, length, reid_dim, generator=generator),
-        "det_feats": torch.randn(batch_size, length, reid_dim, generator=generator),
-        "scalar_feats": torch.randn(batch_size, length, 63, generator=generator),
+        "track_feats": iwg_track[:, -length:].clone(),
+        "det_feats": iwg_det[:, -length:].clone(),
+        "scalar_feats": iwg_scalar[:, -length:].clone(),
+        "iwg_track_feats": iwg_track,
+        "iwg_det_feats": iwg_det,
+        "iwg_scalar_feats": iwg_scalar,
+        "iwg_padding_mask": iwg_padding,
         "padding_mask": padding,
         "mask": padding,
         "has_detection_mask": has_detection,
@@ -81,8 +91,9 @@ def test_iwg_tsrm_is_strictly_causal():
     model = IWGTSRM(reid_dim=16).eval()
     batch = make_joint_batch(batch_size=1)
     changed = {key: value.clone() if torch.is_tensor(value) else value for key, value in batch.items()}
-    changed["track_feats"][:, 5:] += 50.0
-    changed["det_feats"][:, 5:] -= 50.0
+    changed["iwg_track_feats"][:, 10:] += 50.0
+    changed["iwg_det_feats"][:, 10:] -= 50.0
+    changed["iwg_scalar_feats"][:, 10:] *= -20.0
     changed["scalar_feats"][:, 5:] *= -20.0
     with torch.no_grad():
         original = model(batch)

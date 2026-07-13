@@ -80,7 +80,14 @@ class AgentGuardRuntime:
         self.joint_output = str(config.get("joint_output", "final"))
         if self.joint_output not in {"base", "final"}:
             raise ValueError("joint_output must be 'base' or 'final'")
-        self.joint_window_size = int(config.get("joint_window_size", 16))
+        configured_window_size = config.get("joint_window_size")
+        if self.mode == "joint" and configured_window_size is None:
+            raise ValueError(
+                "joint_window_size must be loaded from the combined checkpoint"
+            )
+        self.joint_window_size = int(configured_window_size or 16)
+        if self.joint_window_size < 1:
+            raise ValueError("joint_window_size must be positive")
         self.joint_max_frame_gap = int(config.get("joint_max_frame_gap", 30))
 
         # Statistics
@@ -147,6 +154,33 @@ class AgentGuardRuntime:
                 max_frame_gap=self.joint_max_frame_gap,
             )
         return self.temporal_buffers[track_id]
+
+    def _reset_joint_history_for_frame(self, track_id: int, frame_id: int) -> bool:
+        """Clear IWG and TSRM history before encoding an event across a gap."""
+        previous_frames: list[int] = []
+        event_buffer = self.event_buffers.get(track_id)
+        if event_buffer is not None and event_buffer.events:
+            previous_frames.append(int(event_buffer.events[-1].frame_id))
+        temporal_buffer = self.temporal_buffers.get(track_id)
+        if temporal_buffer is not None and temporal_buffer.tokens:
+            previous_frames.append(int(temporal_buffer.tokens[-1]["frame_id"]))
+        if not previous_frames:
+            return False
+        if len(set(previous_frames)) != 1:
+            if event_buffer is not None:
+                event_buffer.clear()
+            if temporal_buffer is not None:
+                temporal_buffer.clear()
+            return True
+        previous_frame = previous_frames[0]
+        gap = int(frame_id) - previous_frame
+        if 0 < gap <= self.joint_max_frame_gap:
+            return False
+        if event_buffer is not None:
+            event_buffer.clear()
+        if temporal_buffer is not None:
+            temporal_buffer.clear()
+        return True
 
     # ------------------------------------------------------------------
     # Event processing
@@ -569,6 +603,14 @@ class AgentGuardRuntime:
         if self.feature_builder is None:
             raise RuntimeError("joint runtime feature builder is not initialized")
 
+        event_sequences = list(event_sequences)
+        for index, (track_id, frame_id) in enumerate(zip(track_ids, frame_ids)):
+            if self._reset_joint_history_for_frame(track_id, frame_id):
+                sequence = event_sequences[index]
+                if not sequence or sequence[-1] is None:
+                    raise ValueError("joint event sequence must end with the current event")
+                event_sequences[index] = [None] * (len(sequence) - 1) + [sequence[-1]]
+
         device = next(self.joint_model.parameters()).device
         inputs = self.feature_builder.build_iwg_batch_input(event_sequences)
         track_t = inputs["track_feats"].to(device, non_blocking=True)
@@ -661,6 +703,10 @@ class AgentGuardRuntime:
                     "policy_probs": policy[index],
                     "cue": cue_values[index],
                     "risk": risk_values[index],
+                    "event_embedding": iwg_outputs["event_embedding"][index]
+                    .float()
+                    .cpu()
+                    .numpy(),
                 }
             )
         return results

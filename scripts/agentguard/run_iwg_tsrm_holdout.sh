@@ -5,12 +5,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PY="${PYTHON_BIN:-${ROOT}/.venv/bin/python}"
 TRAINING_MODE="${1:-joint}"
 SEED="${SEED:-42}"
-DATASET_DIR="${DATASET_DIR:-${ROOT}/outputs/agentguard/experiments/iwg_tsrm_v1_holdout_seed42/dataset}"
+EPOCHS="${EPOCHS:-100}"
+BATCH_SIZE="${BATCH_SIZE:-64}"
+NUM_WORKERS="${NUM_WORKERS:-2}"
+GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"
+DATASET_DIR="${DATASET_DIR:-${ROOT}/outputs/agentguard/experiments/iwg_tsrm_v2_holdout_seed42/dataset}"
 if [[ "${TRAINING_MODE}" == "joint" ]]; then
-  RUN_ROOT="${RUN_ROOT:-${ROOT}/outputs/agentguard/experiments/iwg_tsrm_v1_holdout_seed${SEED}}"
+  RUN_ROOT="${RUN_ROOT:-${ROOT}/outputs/agentguard/experiments/iwg_tsrm_v2_holdout_seed${SEED}}"
   SELECTION="final_gate_loss"
 else
-  RUN_ROOT="${RUN_ROOT:-${ROOT}/outputs/agentguard/experiments/iwg_base_v3_holdout_seed${SEED}}"
+  RUN_ROOT="${RUN_ROOT:-${ROOT}/outputs/agentguard/experiments/iwg_base_v4_holdout_seed${SEED}}"
   SELECTION="base_gate_loss"
 fi
 CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
@@ -21,6 +25,13 @@ if [[ -e "${RUN_ROOT}/completed" ]]; then
   echo "Refusing to overwrite completed run: ${RUN_ROOT}" >&2
   exit 2
 fi
+if [[ -e "${RUN_ROOT}/provenance/dataset_metadata.sha256" ]]; then
+  sha256sum --check --status "${RUN_ROOT}/provenance/dataset_metadata.sha256" || {
+    echo "Refusing to reuse run with incompatible dataset metadata: ${RUN_ROOT}" >&2
+    exit 2
+  }
+fi
+rm -f "${RUN_ROOT}/failed"
 echo "$$" > "${RUN_ROOT}/pipeline.pid"
 touch "${RUN_ROOT}/running"
 finish() {
@@ -42,7 +53,8 @@ COMMAND=(
   "${PY}" -m agentguard.cli train_iwg_tsrm
   --training-mode "${TRAINING_MODE}"
   --dataset-dir "${DATASET_DIR}" --checkpoint-dir "${CHECKPOINT_DIR}"
-  --device cuda --amp --epochs 100 --batch-size 64 --num-workers 2
+  --device cuda --amp --epochs "${EPOCHS}" --batch-size "${BATCH_SIZE}"
+  --num-workers "${NUM_WORKERS}" --grad-accum-steps "${GRAD_ACCUM_STEPS}"
   --lr 0.0001 --weight-decay 0.0001 --warmup-epochs 1 --grad-clip 5.0
   --seed "${SEED}" --window-size 16 --delta-max 0.2
   --lambda-final 1.0 --lambda-residual 0.5
@@ -55,3 +67,15 @@ fi
 printf '%q ' "${COMMAND[@]}" > "${RUN_ROOT}/provenance/command.txt"
 printf '\n' >> "${RUN_ROOT}/provenance/command.txt"
 "${COMMAND[@]}" 2>&1 | tee "${RUN_ROOT}/logs/train.log"
+
+if [[ "${TRAINING_MODE}" == "joint" ]]; then
+  BEST_CHECKPOINT="${CHECKPOINT_DIR}/iwg_tsrm_best.pt"
+else
+  BEST_CHECKPOINT="${CHECKPOINT_DIR}/iwg_base_best.pt"
+fi
+"${PY}" -m agentguard.cli validate_iwg_tsrm_checkpoint \
+  --checkpoint "${BEST_CHECKPOINT}" \
+  --dataset-dir "${DATASET_DIR}" --split val --device cuda \
+  --output "${RUN_ROOT}/checkpoint_validation.json" \
+  2>&1 | tee "${RUN_ROOT}/logs/validate.log"
+sha256sum "${BEST_CHECKPOINT}" > "${RUN_ROOT}/provenance/checkpoint.sha256"

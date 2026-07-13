@@ -22,13 +22,30 @@ from agentguard.data.label_schema import (
 from agentguard.features.normalization import NormalizationStats
 
 
-JOINT_DATASET_SCHEMA_VERSION = 1
+JOINT_DATASET_SCHEMA_VERSION = 2
+IWG_CONTEXT_SIZE = 6
+IWG_WARMUP_EVENTS = IWG_CONTEXT_SIZE - 1
+MOT17_FRCNN_TRAIN_SEQUENCES = [
+    "MOT17-04-FRCNN",
+    "MOT17-05-FRCNN",
+    "MOT17-09-FRCNN",
+    "MOT17-10-FRCNN",
+    "MOT17-13-FRCNN",
+]
+MOT17_FRCNN_VAL_SEQUENCES = [
+    "MOT17-02-FRCNN",
+    "MOT17-11-FRCNN",
+]
 JOINT_DATASET_SCHEMA_DESCRIPTOR = {
     "name": "agentguard_iwg_tsrm_windows",
     "version": JOINT_DATASET_SCHEMA_VERSION,
     "timeline": "compact_cache_matched_and_unmatched",
     "label_join_key": ["sequence", "event_shard_id", "event_offset"],
     "unmatched_policy": "hold_both_sentinel",
+    "iwg_context_size": IWG_CONTEXT_SIZE,
+    "iwg_warmup_events": IWG_WARMUP_EVENTS,
+    "iwg_input": "five_segment_local_warmup_events_plus_tsrm_window",
+    "tsrm_input": "formal_window_only",
     "scalar_dim": 63,
     "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
     "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
@@ -140,6 +157,9 @@ def build_window_index(
         for endpoint in endpoints:
             start = max(0, endpoint - window_size + 1)
             events = segment[start : endpoint + 1]
+            iwg_start = max(0, start - IWG_WARMUP_EVENTS)
+            iwg_events = segment[iwg_start : endpoint + 1]
+            iwg_input_size = window_size + IWG_WARMUP_EVENTS
             windows.append(
                 {
                     "sequence": str(events[0]["sequence"]),
@@ -147,6 +167,8 @@ def build_window_index(
                     "segment_id": segment_id,
                     "pad_left": window_size - len(events),
                     "events": events,
+                    "iwg_pad_left": iwg_input_size - len(iwg_events),
+                    "iwg_events": iwg_events,
                 }
             )
         segment_id += 1
@@ -214,6 +236,37 @@ def _fit_train_normalization(
     return stats
 
 
+def resolve_joint_sequences(
+    *,
+    dataset: str,
+    split: str,
+    available_sequences: Iterable[str],
+    val_sequences: Iterable[str],
+) -> tuple[list[str], list[str], list[str]]:
+    available = sorted(set(available_sequences))
+    validation = sorted(set(val_sequences))
+    if dataset == "MOT17" and split == "all":
+        expected_val = sorted(MOT17_FRCNN_VAL_SEQUENCES)
+        if validation != expected_val:
+            raise ValueError(
+                "MOT17/all joint holdout requires exact validation sequences "
+                f"{expected_val}, got {validation}"
+            )
+        train = sorted(MOT17_FRCNN_TRAIN_SEQUENCES)
+        selected = sorted(train + expected_val)
+    else:
+        selected = available
+        train = sorted(set(selected).difference(validation))
+    missing = sorted(set(selected).difference(available))
+    if missing:
+        raise ValueError(f"required sequences are absent from event cache: {missing}")
+    if not train or not validation:
+        raise ValueError("explicit holdout requires non-empty train and validation sequences")
+    if not set(train).isdisjoint(validation):
+        raise AssertionError("train and validation sequences must be disjoint")
+    return selected, train, validation
+
+
 def build_iwg_tsrm_dataset(
     *,
     dataset: str,
@@ -232,16 +285,15 @@ def build_iwg_tsrm_dataset(
     label_dir = Path(label_dir).resolve()
     output_dir = Path(output_dir).resolve()
     cache_split_root = event_cache_root / dataset / split
-    sequences = sorted(path.name for path in cache_split_root.iterdir() if path.is_dir())
-    val_sequences = sorted(set(val_sequences))
-    unknown = sorted(set(val_sequences).difference(sequences))
-    if unknown:
-        raise ValueError(f"validation sequences are absent from event cache: {unknown}")
-    train_sequences = sorted(set(sequences).difference(val_sequences))
-    if not train_sequences or not val_sequences:
-        raise ValueError("explicit holdout requires non-empty train and validation sequences")
-    if not set(train_sequences).isdisjoint(val_sequences):
-        raise AssertionError("train and validation sequences must be disjoint")
+    available_sequences = sorted(
+        path.name for path in cache_split_root.iterdir() if path.is_dir()
+    )
+    sequences, train_sequences, val_sequences = resolve_joint_sequences(
+        dataset=dataset,
+        split=split,
+        available_sequences=available_sequences,
+        val_sequences=val_sequences,
+    )
 
     labels = _load_labels(label_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -253,6 +305,8 @@ def build_iwg_tsrm_dataset(
             "train_sequences": train_sequences,
             "val_sequences": val_sequences,
             "window_size": int(window_size),
+            "iwg_warmup_events": IWG_WARMUP_EVENTS,
+            "iwg_input_size": int(window_size) + IWG_WARMUP_EVENTS,
             "window_stride": int(window_stride),
             "max_frame_gap": int(max_frame_gap),
         }
@@ -328,6 +382,9 @@ def build_iwg_tsrm_dataset(
         "detection_cache_root": str(detection_cache_root),
         "label_dir": str(label_dir),
         "window_size": int(window_size),
+        "iwg_context_size": IWG_CONTEXT_SIZE,
+        "iwg_warmup_events": IWG_WARMUP_EVENTS,
+        "iwg_input_size": int(window_size) + IWG_WARMUP_EVENTS,
         "window_stride": int(window_stride),
         "max_frame_gap": int(max_frame_gap),
         "reid_dim": reid_dims.pop(),
@@ -391,6 +448,10 @@ class CompactIWGTSRMWindowDataset(torch.utils.data.Dataset):
             "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
             "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
             "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
+            "iwg_context_size": IWG_CONTEXT_SIZE,
+            "iwg_warmup_events": IWG_WARMUP_EVENTS,
+            "iwg_input_size": int(self.metadata.get("window_size", 0))
+            + IWG_WARMUP_EVENTS,
         }
         mismatches = {
             key: (self.metadata.get(key), value)
@@ -403,6 +464,14 @@ class CompactIWGTSRMWindowDataset(torch.utils.data.Dataset):
         val = set(self.metadata["val_sequences"])
         if not train.isdisjoint(val):
             raise ValueError(f"joint dataset sequence leakage: {sorted(train & val)}")
+        if self.metadata.get("dataset") == "MOT17" and self.metadata.get("split") == "all":
+            expected_train = set(MOT17_FRCNN_TRAIN_SEQUENCES)
+            expected_val = set(MOT17_FRCNN_VAL_SEQUENCES)
+            if train != expected_train or val != expected_val:
+                raise ValueError(
+                    "MOT17/all joint dataset must use the fixed FRCNN split: "
+                    f"train={sorted(expected_train)}, val={sorted(expected_val)}"
+                )
 
     def _reader(self, sequence: str) -> CompactEventCacheReader:
         if sequence not in self._readers:
@@ -433,11 +502,15 @@ class CompactIWGTSRMWindowDataset(torch.utils.data.Dataset):
     def __getitem__(self, index: int) -> dict[str, Any]:
         window = self.windows[index]
         length = int(self.metadata["window_size"])
+        iwg_length = int(self.metadata["iwg_input_size"])
         reid_dim = int(self.metadata["reid_dim"])
         pad_left = int(window["pad_left"])
-        track_feats = np.zeros((length, reid_dim), dtype=np.float32)
-        det_feats = np.zeros((length, reid_dim), dtype=np.float32)
-        scalar_feats = np.zeros((length, 63), dtype=np.float64)
+        iwg_pad_left = int(window["iwg_pad_left"])
+        iwg_track_feats = np.zeros((iwg_length, reid_dim), dtype=np.float32)
+        iwg_det_feats = np.zeros((iwg_length, reid_dim), dtype=np.float32)
+        iwg_scalar_feats = np.zeros((iwg_length, 63), dtype=np.float64)
+        iwg_padding_mask = np.ones(iwg_length, dtype=np.bool_)
+        iwg_has_detection = np.zeros(iwg_length, dtype=np.bool_)
         padding_mask = np.ones(length, dtype=np.bool_)
         has_detection = np.zeros(length, dtype=np.bool_)
         label_mask = np.zeros(length, dtype=np.bool_)
@@ -454,7 +527,9 @@ class CompactIWGTSRMWindowDataset(torch.utils.data.Dataset):
         reset_mask = np.zeros(length, dtype=np.bool_)
 
         reader = self._reader(window["sequence"])
-        for position, reference in enumerate(window["events"], start=pad_left):
+        for position, reference in enumerate(
+            window["iwg_events"], start=iwg_pad_left
+        ):
             record = reader.get_event_record(
                 reference["event_shard_id"], reference["event_offset"]
             )
@@ -467,23 +542,32 @@ class CompactIWGTSRMWindowDataset(torch.utils.data.Dataset):
                 )
             if not np.isfinite(track).all() or not np.isfinite(scalar).all():
                 raise ValueError("joint dataset encountered non-finite cached features")
-            track_feats[position] = track
-            scalar_feats[position] = scalar
+            iwg_track_feats[position] = track
+            iwg_scalar_feats[position] = scalar
             matched = bool(record.get("matched", False))
-            has_detection[position] = matched
+            iwg_has_detection[position] = matched
             if matched:
                 detection_index = int(record.get("accepted_detection_index", -1))
                 if detection_index < 0:
                     raise ValueError("matched event has no accepted detection index")
-                det_feats[position] = np.asarray(
+                iwg_det_feats[position] = np.asarray(
                     reader.get_detection(detection_index)["feature"], dtype=np.float32
                 ).reshape(-1)
-            else:
+            iwg_padding_mask[position] = False
+
+        formal_offset = iwg_length - length
+        track_feats = iwg_track_feats[formal_offset:].copy()
+        det_feats = iwg_det_feats[formal_offset:].copy()
+        scalar_feats = iwg_scalar_feats[formal_offset:].copy()
+        has_detection[:] = iwg_has_detection[formal_offset:]
+        padding_mask[:] = iwg_padding_mask[formal_offset:]
+
+        for position, reference in enumerate(window["events"], start=pad_left):
+            matched = bool(has_detection[position])
+            if not matched:
                 policy_target[position] = HOLD_BOTH_POLICY
                 cue_target[position] = UNMATCHED_CUE
                 risk_target[position] = UNMATCHED_RISK
-
-            padding_mask[position] = False
             frame_ids[position] = int(reference["frame_id"])
             track_ids[position] = int(reference["track_id"])
             key = event_key(
@@ -509,7 +593,9 @@ class CompactIWGTSRMWindowDataset(torch.utils.data.Dataset):
                 risk_target[position] = label["risk_targets"]
                 sample_weight[position] = float(label["sample_weight"])
 
-        scalar_feats = self.norm_stats.transform(scalar_feats).astype(np.float32)
+        iwg_scalar_feats = self.norm_stats.transform(iwg_scalar_feats).astype(np.float32)
+        iwg_scalar_feats[iwg_padding_mask] = 0.0
+        scalar_feats = iwg_scalar_feats[formal_offset:].copy()
         scalar_feats[padding_mask] = 0.0
         if pad_left < length:
             reset_mask[pad_left] = True
@@ -517,6 +603,11 @@ class CompactIWGTSRMWindowDataset(torch.utils.data.Dataset):
             "track_feats": torch.from_numpy(track_feats),
             "det_feats": torch.from_numpy(det_feats),
             "scalar_feats": torch.from_numpy(scalar_feats),
+            "iwg_track_feats": torch.from_numpy(iwg_track_feats),
+            "iwg_det_feats": torch.from_numpy(iwg_det_feats),
+            "iwg_scalar_feats": torch.from_numpy(iwg_scalar_feats),
+            "iwg_padding_mask": torch.from_numpy(iwg_padding_mask),
+            "iwg_has_detection_mask": torch.from_numpy(iwg_has_detection),
             "padding_mask": torch.from_numpy(padding_mask),
             "mask": torch.from_numpy(padding_mask),
             "has_detection_mask": torch.from_numpy(has_detection),

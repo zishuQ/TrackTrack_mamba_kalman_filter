@@ -169,6 +169,7 @@ class Tracker(object):
                     validate_checkpoint_contract(
                         checkpoint, expected_training_mode='joint'
                     )
+                    runtime_config['joint_window_size'] = int(checkpoint['window_size'])
                     checkpoint_reid_dim = int(checkpoint['reid_dim'])
                     checkpoint_norm_stats = NormalizationStats()
                     checkpoint_norm_stats.mean = np.asarray(

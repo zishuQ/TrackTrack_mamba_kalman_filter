@@ -7,6 +7,43 @@ from agentguard.models.iwg import IWG
 from agentguard.models.tsrm import TSRM
 
 
+IWG_WARMUP_EVENTS = 5
+
+
+def forward_iwg_with_warmup(
+    iwg: IWG,
+    batch: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Encode warm-up plus formal events and return formal-window outputs."""
+    required = (
+        "iwg_track_feats",
+        "iwg_det_feats",
+        "iwg_scalar_feats",
+        "iwg_padding_mask",
+        "padding_mask",
+    )
+    missing = [key for key in required if key not in batch]
+    if missing:
+        raise KeyError(f"IWG warm-up batch missing required fields: {missing}")
+    formal_length = int(batch["padding_mask"].shape[1])
+    iwg_length = int(batch["iwg_padding_mask"].shape[1])
+    if iwg_length != formal_length + IWG_WARMUP_EVENTS:
+        raise ValueError(
+            "IWG input must contain exactly five warm-up positions: "
+            f"iwg_length={iwg_length}, formal_length={formal_length}"
+        )
+    sequence_outputs = iwg.forward_sequence(
+        batch["iwg_track_feats"],
+        batch["iwg_det_feats"],
+        batch["iwg_scalar_feats"],
+        batch["iwg_padding_mask"],
+    )
+    return {
+        key: value[:, -formal_length:]
+        for key, value in sequence_outputs.items()
+    }
+
+
 class IWGTSRM(nn.Module):
     def __init__(
         self,
@@ -52,12 +89,7 @@ class IWGTSRM(nn.Module):
         padding_mask = batch.get("padding_mask", batch.get("mask"))
         if padding_mask is None:
             raise KeyError("IWGTSRM batch requires padding_mask")
-        iwg_outputs = self.iwg.forward_sequence(
-            batch["track_feats"],
-            batch["det_feats"],
-            batch["scalar_feats"],
-            padding_mask,
-        )
+        iwg_outputs = forward_iwg_with_warmup(self.iwg, batch)
         outputs = self.apply_unmatched_sentinel(
             iwg_outputs, batch["has_detection_mask"]
         )

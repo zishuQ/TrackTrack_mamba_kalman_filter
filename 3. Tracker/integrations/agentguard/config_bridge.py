@@ -22,7 +22,8 @@ def build_runtime_config(args) -> dict:
         "tgr_checkpoint": getattr(args, "tgr_checkpoint", None),
         "agentguard_checkpoint": getattr(args, "agentguard_checkpoint", None),
         "joint_output": getattr(args, "joint_output", "final"),
-        "joint_window_size": 16,
+        # Joint runtime injects this from the strictly validated checkpoint.
+        "joint_window_size": None,
         "joint_max_frame_gap": 30,
         "device": getattr(args, "agentguard_device", "cpu"),
         "replay_diff_threshold": float(
