@@ -7,7 +7,7 @@ import torch
 
 from agentguard.contracts.events import TrackEvent
 from agentguard.contracts.outputs import GateDecision
-from agentguard.runtime.buffers import EventBuffer, WindowBuffer
+from agentguard.runtime.buffers import EventBuffer, TemporalTokenBuffer, WindowBuffer
 from agentguard.runtime.checkpoint import CheckpointManager
 from agentguard.runtime.statistics import RuntimeStatistics
 
@@ -35,22 +35,34 @@ class AgentGuardRuntime:
         iwg_model: Optional[torch.nn.Module] = None,
         tgr_model: Optional[torch.nn.Module] = None,
         device: str = "cpu",
+        joint_model: Optional[torch.nn.Module] = None,
     ):
         self.config = config
         self.mode = config.get("mode", "off")
         self.device = device
         self.iwg = iwg_model
         self.tgr = tgr_model
+        self.joint_model = joint_model
+        if self.mode == "joint":
+            if self.joint_model is None:
+                raise RuntimeError("joint mode requires a combined IWGTSRM model")
+            if self.tgr is not None:
+                raise RuntimeError("joint mode must not instantiate TGR")
+            self.iwg = self.joint_model.iwg
         if self.iwg is not None:
             self.iwg.to(device)
             self.iwg.eval()
         if self.tgr is not None:
             self.tgr.to(device)
             self.tgr.eval()
+        if self.joint_model is not None:
+            self.joint_model.to(device)
+            self.joint_model.eval()
 
         # Per-track state
         self.event_buffers: Dict[int, EventBuffer] = {}
         self.window_buffers: Dict[int, WindowBuffer] = {}
+        self.temporal_buffers: Dict[int, TemporalTokenBuffer] = {}
         self.checkpoints = CheckpointManager()
 
         # Feature builder (initialised once via init_feature_builder)
@@ -65,6 +77,11 @@ class AgentGuardRuntime:
         )
         self.tgr_frame_stride = max(int(config.get("tgr_frame_stride", 1) or 1), 1)
         self._finalize_frame_index = 0
+        self.joint_output = str(config.get("joint_output", "final"))
+        if self.joint_output not in {"base", "final"}:
+            raise ValueError("joint_output must be 'base' or 'final'")
+        self.joint_window_size = int(config.get("joint_window_size", 16))
+        self.joint_max_frame_gap = int(config.get("joint_max_frame_gap", 30))
 
         # Statistics
         self.stats = RuntimeStatistics()
@@ -117,6 +134,19 @@ class AgentGuardRuntime:
             self.event_buffers[track_id] = EventBuffer()
             self.window_buffers[track_id] = WindowBuffer()
         return self.event_buffers[track_id], self.window_buffers[track_id]
+
+    def get_or_create_event_buffer(self, track_id: int) -> EventBuffer:
+        if track_id not in self.event_buffers:
+            self.event_buffers[track_id] = EventBuffer()
+        return self.event_buffers[track_id]
+
+    def get_or_create_temporal_buffer(self, track_id: int) -> TemporalTokenBuffer:
+        if track_id not in self.temporal_buffers:
+            self.temporal_buffers[track_id] = TemporalTokenBuffer(
+                max_len=self.joint_window_size,
+                max_frame_gap=self.joint_max_frame_gap,
+            )
+        return self.temporal_buffers[track_id]
 
     # ------------------------------------------------------------------
     # Event processing
@@ -502,6 +532,139 @@ class AgentGuardRuntime:
             for i in range(len(event_sequences))
         ]
 
+    def run_joint_inference(
+        self,
+        track_id: int,
+        events_sequence: List[Optional[TrackEvent]],
+        *,
+        frame_id: int,
+        has_detection: bool,
+    ) -> Dict[str, np.ndarray]:
+        return self.run_joint_batch_inference(
+            [track_id],
+            [events_sequence],
+            frame_ids=[frame_id],
+            has_detection=[has_detection],
+        )[0]
+
+    def run_joint_batch_inference(
+        self,
+        track_ids: List[int],
+        event_sequences: List[List[Optional[TrackEvent]]],
+        *,
+        frame_ids: List[int],
+        has_detection: List[bool],
+    ) -> List[Dict[str, np.ndarray]]:
+        if self.mode != "joint" or self.joint_model is None:
+            raise RuntimeError("run_joint_batch_inference requires joint mode")
+        size = len(track_ids)
+        if not (
+            len(event_sequences) == len(frame_ids) == len(has_detection) == size
+        ):
+            raise ValueError("joint batch inputs must have equal lengths")
+        if size == 0:
+            return []
+        if len(set(track_ids)) != size:
+            raise ValueError("joint batch cannot contain duplicate track ids")
+        if self.feature_builder is None:
+            raise RuntimeError("joint runtime feature builder is not initialized")
+
+        device = next(self.joint_model.parameters()).device
+        inputs = self.feature_builder.build_iwg_batch_input(event_sequences)
+        track_t = inputs["track_feats"].to(device, non_blocking=True)
+        det_t = inputs["det_feats"].to(device, non_blocking=True)
+        scalar_t = inputs["scalar_feats"].to(device, non_blocking=True)
+        mask_t = inputs["mask"].to(device, non_blocking=True)
+        has_current = torch.as_tensor(has_detection, dtype=torch.bool, device=device)
+        with torch.inference_mode():
+            iwg_outputs = self.joint_model.iwg(track_t, det_t, scalar_t, mask_t)
+            iwg_outputs = self.joint_model.apply_unmatched_sentinel(
+                iwg_outputs, has_current
+            )
+
+        for index, track_id in enumerate(track_ids):
+            token = {
+                "frame_id": int(frame_ids[index]),
+                "event_embedding": iwg_outputs["event_embedding"][index].float().cpu().numpy(),
+                "scalar_feats": scalar_t[index, -1].float().cpu().numpy(),
+                "base_gate": iwg_outputs["base_gate"][index].float().cpu().numpy(),
+                "policy_probs": iwg_outputs["policy_probs"][index].float().cpu().numpy(),
+                "cue": iwg_outputs["cue"][index].float().cpu().numpy(),
+                "risk": iwg_outputs["risk"][index].float().cpu().numpy(),
+                "has_detection": bool(has_detection[index]),
+            }
+            self.get_or_create_temporal_buffer(track_id).push(token)
+
+        window_size = self.joint_window_size
+        event_embedding = np.zeros((size, window_size, 128), dtype=np.float32)
+        scalar_feats = np.zeros((size, window_size, 63), dtype=np.float32)
+        base_gate = np.zeros((size, window_size, 2), dtype=np.float32)
+        policy_probs = np.zeros((size, window_size, 5), dtype=np.float32)
+        cue = np.zeros((size, window_size, 3), dtype=np.float32)
+        risk = np.zeros((size, window_size, 4), dtype=np.float32)
+        padding = np.ones((size, window_size), dtype=np.bool_)
+        detection_mask = np.zeros((size, window_size), dtype=np.bool_)
+        reset = np.zeros((size, window_size), dtype=np.bool_)
+        for batch_index, track_id in enumerate(track_ids):
+            tokens = self.temporal_buffers[track_id].get_window()
+            offset = window_size - len(tokens)
+            reset[batch_index, offset] = True
+            for position, token in enumerate(tokens, start=offset):
+                event_embedding[batch_index, position] = token["event_embedding"]
+                scalar_feats[batch_index, position] = token["scalar_feats"]
+                base_gate[batch_index, position] = token["base_gate"]
+                policy_probs[batch_index, position] = token["policy_probs"]
+                cue[batch_index, position] = token["cue"]
+                risk[batch_index, position] = token["risk"]
+                padding[batch_index, position] = False
+                detection_mask[batch_index, position] = token["has_detection"]
+
+        def tensor(array: np.ndarray) -> torch.Tensor:
+            return torch.from_numpy(array).to(device, non_blocking=True)
+
+        with torch.inference_mode():
+            temporal = self.joint_model.tsrm(
+                event_embedding=tensor(event_embedding),
+                scalar_feats=tensor(scalar_feats),
+                base_gate=tensor(base_gate),
+                policy_probs=tensor(policy_probs),
+                cue=tensor(cue),
+                risk=tensor(risk),
+                padding_mask=tensor(padding),
+                has_detection_mask=tensor(detection_mask),
+                reset_mask=tensor(reset),
+            )
+        final = temporal["final_gate"][:, -1].float().cpu().numpy()
+        correction = temporal["temporal_gate_correction"][:, -1].float().cpu().numpy()
+        strength = temporal["revision_strength"][:, -1, 0].float().cpu().numpy()
+        base = iwg_outputs["base_gate"].float().cpu().numpy()
+        policy = iwg_outputs["policy_probs"].float().cpu().numpy()
+        cue_values = iwg_outputs["cue"].float().cpu().numpy()
+        risk_values = iwg_outputs["risk"].float().cpu().numpy()
+        applied = base if self.joint_output == "base" else final
+        results: List[Dict[str, np.ndarray]] = []
+        for index in range(size):
+            self.stats.record_joint(
+                base[index],
+                final[index],
+                correction[index],
+                float(strength[index]),
+                applied[index],
+            )
+            results.append(
+                {
+                    "gate": applied[index],
+                    "base_gate": base[index],
+                    "final_gate": final[index],
+                    "temporal_gate_correction": correction[index],
+                    "revision_strength": np.asarray(strength[index]),
+                    "policy_probs": policy[index],
+                    "cue": cue_values[index],
+                    "risk": risk_values[index],
+                }
+            )
+        return results
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
@@ -510,4 +673,5 @@ class AgentGuardRuntime:
         """Remove all runtime state associated with *track_id*."""
         self.event_buffers.pop(track_id, None)
         self.window_buffers.pop(track_id, None)
+        self.temporal_buffers.pop(track_id, None)
         self.checkpoints.cleanup_track(track_id)

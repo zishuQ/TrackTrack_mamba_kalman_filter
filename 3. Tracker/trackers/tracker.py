@@ -41,6 +41,7 @@ class Tracker(object):
             import torch
             from agentguard.runtime.manager import AgentGuardRuntime
             from agentguard.models.iwg import IWG
+            from agentguard.models.iwg_tsrm import IWGTSRM
             from agentguard.models.tgr import TGR
 
             event_sink = getattr(args, 'event_sink', None)
@@ -49,6 +50,7 @@ class Tracker(object):
                 runtime_config = build_runtime_config(args)
                 iwg_ckpt = getattr(args, 'iwg_checkpoint', None)
                 tgr_ckpt = getattr(args, 'tgr_checkpoint', None)
+                joint_ckpt = getattr(args, 'agentguard_checkpoint', None)
                 device = getattr(args, 'agentguard_device', 'cpu')
 
                 def _load_checkpoint(ckpt_path):
@@ -129,6 +131,7 @@ class Tracker(object):
 
                 iwg_model = None
                 tgr_model = None
+                joint_model = None
                 checkpoint_reid_dim = None
                 checkpoint_norm_stats = None
 
@@ -156,7 +159,40 @@ class Tracker(object):
                     tgr_model.load_state_dict(sd_tgr)
                     tgr_model.eval()
 
-                runtime = AgentGuardRuntime(runtime_config, iwg_model, tgr_model, device)
+                if ag_mode == 'joint':
+                    if joint_ckpt is None:
+                        raise RuntimeError("Combined AgentGuard checkpoint required for joint mode")
+                    from agentguard.training.train_iwg_tsrm import validate_checkpoint_contract
+                    from agentguard.features.normalization import NormalizationStats
+
+                    checkpoint = torch.load(joint_ckpt, map_location='cpu', weights_only=False)
+                    validate_checkpoint_contract(
+                        checkpoint, expected_training_mode='joint'
+                    )
+                    checkpoint_reid_dim = int(checkpoint['reid_dim'])
+                    checkpoint_norm_stats = NormalizationStats()
+                    checkpoint_norm_stats.mean = np.asarray(
+                        checkpoint['normalization_mean'], dtype=np.float64
+                    )
+                    checkpoint_norm_stats.std = np.asarray(
+                        checkpoint['normalization_std'], dtype=np.float64
+                    )
+                    joint_model = IWGTSRM(
+                        reid_dim=checkpoint_reid_dim,
+                        scalar_dim=int(checkpoint['scalar_dim']),
+                        event_dim=int(checkpoint['event_dim']),
+                        delta_max=float(checkpoint['delta_max']),
+                    )
+                    joint_model.load_state_dict(checkpoint['model_state_dict'], strict=True)
+                    joint_model.eval()
+
+                runtime = AgentGuardRuntime(
+                    runtime_config,
+                    iwg_model,
+                    tgr_model,
+                    device,
+                    joint_model=joint_model,
+                )
                 runtime.event_sink = event_sink
 
                 if checkpoint_reid_dim is not None:

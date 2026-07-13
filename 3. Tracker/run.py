@@ -121,12 +121,16 @@ def make_parser():
 
     # AgentGuard parameters
     parser.add_argument("--agentguard-mode", type=str, default="off",
-                       choices=["off", "iwg", "full"],
-                       help="AgentGuard gating mode: off (baseline), iwg (per-frame gating), full (gating + TGR replay)")
+                       choices=["off", "iwg", "full", "joint"],
+                       help="AgentGuard mode: off, iwg, full replay, or causal joint IWG+TSRM")
     parser.add_argument("--iwg-checkpoint", type=str, default=None,
                        help="Path to IWG model checkpoint (.pt)")
     parser.add_argument("--tgr-checkpoint", type=str, default=None,
                        help="Path to TGR model checkpoint (.pt)")
+    parser.add_argument("--agentguard-checkpoint", type=str, default=None,
+                       help="Path to combined IWG+TSRM checkpoint (.pt)")
+    parser.add_argument("--joint-output", choices=["base", "final"], default="final",
+                       help="Apply base or TSRM-corrected gate from a combined checkpoint")
     parser.add_argument("--agentguard-device", type=str, default="cpu",
                        help="Device for AgentGuard inference (cpu or cuda)")
     parser.add_argument(
@@ -437,6 +441,8 @@ def run():
         trackers_to_eval += '_agentguard_iwg'
     elif args.agentguard_mode == 'full':
         trackers_to_eval += '_agentguard_full'
+    elif args.agentguard_mode == 'joint':
+        trackers_to_eval += f'_agentguard_joint_{args.joint_output}'
     result_folder_base = os.path.join(args.output_dir, trackers_to_eval)
     if 'dance' in args.dataset.lower() and args.mode == 'test':
         result_folder = os.path.join(result_folder_base, 'tracker')
@@ -525,6 +531,8 @@ if __name__ == "__main__":
             parser.error("--iwg-checkpoint is required when --agentguard-mode=full")
         if args.tgr_checkpoint is None:
             parser.error("--tgr-checkpoint is required when --agentguard-mode=full")
+    if args.agentguard_mode == 'joint' and args.agentguard_checkpoint is None:
+        parser.error("--agentguard-checkpoint is required when --agentguard-mode=joint")
 
     # Set random seed
     random.seed(args.seed)

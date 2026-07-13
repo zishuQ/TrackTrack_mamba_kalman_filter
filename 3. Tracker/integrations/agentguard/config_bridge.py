@@ -20,6 +20,10 @@ def build_runtime_config(args) -> dict:
         "mode": getattr(args, "agentguard_mode", "off"),
         "iwg_checkpoint": getattr(args, "iwg_checkpoint", None),
         "tgr_checkpoint": getattr(args, "tgr_checkpoint", None),
+        "agentguard_checkpoint": getattr(args, "agentguard_checkpoint", None),
+        "joint_output": getattr(args, "joint_output", "final"),
+        "joint_window_size": 16,
+        "joint_max_frame_gap": 30,
         "device": getattr(args, "agentguard_device", "cpu"),
         "replay_diff_threshold": float(
             getattr(args, "agentguard_replay_diff_threshold", 0.0) or 0.0

@@ -28,6 +28,12 @@ class RuntimeStatistics:
         self.revision_abs_diff_count: int = 0
         self.gate_sum: np.ndarray = np.zeros(2, dtype=np.float64)
         self.gate_count: int = 0
+        self.base_gate_sum: np.ndarray = np.zeros(2, dtype=np.float64)
+        self.final_gate_sum: np.ndarray = np.zeros(2, dtype=np.float64)
+        self.correction_abs_sum: np.ndarray = np.zeros(2, dtype=np.float64)
+        self.correction_abs_max: float = 0.0
+        self.strength_sum: float = 0.0
+        self.joint_count: int = 0
 
     def record_event(self) -> None:
         """Increment the total event counter."""
@@ -48,6 +54,25 @@ class RuntimeStatistics:
     def record_tgr(self, count: int = 1) -> None:
         """Increment the TGR call counter."""
         self.tgr_calls += int(count)
+
+    def record_joint(
+        self,
+        base_gate: np.ndarray,
+        final_gate: np.ndarray,
+        correction: np.ndarray,
+        strength: float,
+        applied_gate: np.ndarray,
+    ) -> None:
+        self.iwg_calls += 1
+        self.gate_sum += np.asarray(applied_gate, dtype=np.float64)
+        self.gate_count += 1
+        self.base_gate_sum += np.asarray(base_gate, dtype=np.float64)
+        self.final_gate_sum += np.asarray(final_gate, dtype=np.float64)
+        correction = np.asarray(correction, dtype=np.float64)
+        self.correction_abs_sum += np.abs(correction)
+        self.correction_abs_max = max(self.correction_abs_max, float(np.abs(correction).max()))
+        self.strength_sum += float(strength)
+        self.joint_count += 1
 
     def record_replay(self, steps: int = 0) -> None:
         """Increment replay-plan counters."""
@@ -96,6 +121,9 @@ class RuntimeStatistics:
         avg_revision_diff = self.revision_abs_diff_sum / max(
             self.revision_abs_diff_count, 1
         )
+        avg_base = self.base_gate_sum / max(self.joint_count, 1)
+        avg_final = self.final_gate_sum / max(self.joint_count, 1)
+        avg_correction = self.correction_abs_sum / max(self.joint_count, 1)
         return {
             "total_events": self.total_events,
             "iwg_calls": self.iwg_calls,
@@ -110,4 +138,13 @@ class RuntimeStatistics:
             "max_revision_abs_diff": float(self.revision_abs_diff_max),
             "avg_motion_gate": float(avg_gate[0]),
             "avg_appearance_gate": float(avg_gate[1]),
+            "avg_base_motion_gate": float(avg_base[0]),
+            "avg_base_appearance_gate": float(avg_base[1]),
+            "avg_final_motion_gate": float(avg_final[0]),
+            "avg_final_appearance_gate": float(avg_final[1]),
+            "avg_motion_correction_abs": float(avg_correction[0]),
+            "avg_appearance_correction_abs": float(avg_correction[1]),
+            "max_correction_abs": float(self.correction_abs_max),
+            "avg_revision_strength": self.strength_sum / max(self.joint_count, 1),
+            "joint_events": self.joint_count,
         }
