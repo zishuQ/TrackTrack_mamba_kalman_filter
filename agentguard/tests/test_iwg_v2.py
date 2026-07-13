@@ -48,6 +48,58 @@ def test_iwg_v2_outputs_composable_embedding_and_legacy_aliases():
     assert torch.isfinite(outputs["base_gate"]).all()
 
 
+def test_iwg_forward_sequence_shapes_and_last_position_parity():
+    model = IWG(reid_dim=16).eval()
+    inputs = _inputs()
+    with torch.no_grad():
+        single = model(**inputs)
+        sequence = model.forward_sequence(**inputs)
+
+    expected_dims = {
+        "policy_logits": 5,
+        "policy_probs": 5,
+        "base_gate": 2,
+        "gate": 2,
+        "event_embedding": 128,
+        "cue_logits": 3,
+        "cue": 3,
+        "risk_logits": 4,
+        "risk": 4,
+        "iwg_gate_residual": 2,
+    }
+    for key, dim in expected_dims.items():
+        assert sequence[key].shape == (3, 6, dim)
+        torch.testing.assert_close(single[key], sequence[key][:, -1], atol=1e-6, rtol=0.0)
+
+
+def test_iwg_forward_sequence_is_causal():
+    model = IWG(reid_dim=16).eval()
+    inputs = _inputs(batch_size=1)
+    changed = {key: value.clone() for key, value in inputs.items()}
+    changed["track_feats"][:, 4:] += 100.0
+    changed["det_feats"][:, 4:] -= 100.0
+    changed["scalar_feats"][:, 4:] *= -50.0
+
+    with torch.no_grad():
+        original = model.forward_sequence(**inputs)
+        perturbed = model.forward_sequence(**changed)
+    for key in original:
+        torch.testing.assert_close(
+            original[key][:, :4], perturbed[key][:, :4], atol=1e-6, rtol=0.0
+        )
+
+
+def test_iwg_forward_selects_last_valid_position():
+    model = IWG(reid_dim=16).eval()
+    inputs = _inputs(batch_size=1)
+    inputs["mask"][:, 4:] = True
+    with torch.no_grad():
+        single = model(**inputs)
+        sequence = model.forward_sequence(**inputs)
+    for key in single:
+        torch.testing.assert_close(single[key], sequence[key][:, 3], atol=1e-6, rtol=0.0)
+
+
 def test_iwg_v2_heads_have_nonlinearity_and_normalization():
     model = IWG(reid_dim=16)
     for head in (

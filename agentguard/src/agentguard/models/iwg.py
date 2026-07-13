@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 
 from agentguard.contracts.enums import POLICY_PROTOTYPE_MATRIX
 from agentguard.models.event_encoder import EventEncoder
@@ -37,49 +36,95 @@ class IWG(nn.Module):
         self.position_embedding = nn.Parameter(torch.zeros(1, 6, event_dim))
         nn.init.normal_(self.position_embedding, mean=0.0, std=0.02)
 
-    def forward(self, track_feats: torch.Tensor, det_feats: torch.Tensor,
-                scalar_feats: torch.Tensor, mask: torch.BoolTensor = None) -> dict:
-        B, seq_len, _ = track_feats.shape
-
-        track_flat = track_feats.view(-1, self.encoder.reid_dim)
-        det_flat = det_feats.view(-1, self.encoder.reid_dim)
-        scalar_flat = scalar_feats.view(-1, scalar_feats.shape[-1])
-        event_embs = self.encoder(track_flat, det_flat, scalar_flat)
-        event_embs = event_embs.view(B, seq_len, -1)
-
-        x = event_embs + self.position_embedding[:, :seq_len, :]
-        if mask is not None:
-            trans_out = self.transformer(x, src_key_padding_mask=mask)
-        else:
-            trans_out = self.transformer(x)
-
-        # Use position -1 (last position, guaranteed non-padded for left-padded sequences)
-        last_out = trans_out[:, -1, :]
-
-        policy_logits = self.policy_head(last_out)
+    def _apply_heads(self, event_embedding: torch.Tensor) -> dict:
+        policy_logits = self.policy_head(event_embedding)
         policy_probs = F.softmax(policy_logits, dim=-1)
+        iwg_gate_residual = self.iwg_gate_residual_head(event_embedding)
+        risk_logits = self.risk_head(event_embedding)
+        cue_logits = self.cue_head(event_embedding)
 
-        iwg_gate_residual = self.iwg_gate_residual_head(last_out)
-        risk_logits = self.risk_head(last_out)
-        cue_logits = self.cue_head(last_out)
-        cue = torch.sigmoid(cue_logits)
-
-        device = policy_probs.device
-        prototype = torch.from_numpy(POLICY_PROTOTYPE_MATRIX).to(device=device, dtype=policy_probs.dtype)
-        g_mix = policy_probs @ prototype
-        base_gate = torch.clamp(
-            g_mix + 0.15 * torch.tanh(iwg_gate_residual), 0, 1
+        prototype = torch.as_tensor(
+            POLICY_PROTOTYPE_MATRIX,
+            device=policy_probs.device,
+            dtype=policy_probs.dtype,
         )
-
+        g_policy = policy_probs @ prototype
+        base_gate = torch.clamp(
+            g_policy + 0.15 * torch.tanh(iwg_gate_residual), 0.0, 1.0
+        )
         return {
-            'policy_logits': policy_logits,
-            'policy_probs': policy_probs,
-            'base_gate': base_gate,
-            'gate': base_gate,
-            'event_embedding': last_out,
-            'cue_logits': cue_logits,
-            'risk_logits': risk_logits,
-            'risk': torch.sigmoid(risk_logits),
-            'cue': cue,
-            'iwg_gate_residual': iwg_gate_residual,
+            "policy_logits": policy_logits,
+            "policy_probs": policy_probs,
+            "base_gate": base_gate,
+            "gate": base_gate,
+            "event_embedding": event_embedding,
+            "cue_logits": cue_logits,
+            "cue": torch.sigmoid(cue_logits),
+            "risk_logits": risk_logits,
+            "risk": torch.sigmoid(risk_logits),
+            "iwg_gate_residual": iwg_gate_residual,
+        }
+
+    def forward_sequence(
+        self,
+        track_feats: torch.Tensor,
+        det_feats: torch.Tensor,
+        scalar_feats: torch.Tensor,
+        mask: torch.BoolTensor | None = None,
+    ) -> dict:
+        """Evaluate every causal six-event window with one EventEncoder pass."""
+        B, seq_len, _ = track_feats.shape
+        if seq_len < 1:
+            raise ValueError("IWG sequence length must be positive")
+        if det_feats.shape[:2] != (B, seq_len) or scalar_feats.shape[:2] != (B, seq_len):
+            raise ValueError("IWG input tensors must share batch and sequence dimensions")
+        if mask is None:
+            mask = torch.zeros((B, seq_len), dtype=torch.bool, device=track_feats.device)
+        elif mask.shape != (B, seq_len):
+            raise ValueError(f"mask must have shape {(B, seq_len)}, got {tuple(mask.shape)}")
+
+        track_flat = track_feats.reshape(-1, self.encoder.reid_dim)
+        det_flat = det_feats.reshape(-1, self.encoder.reid_dim)
+        scalar_flat = scalar_feats.reshape(-1, scalar_feats.shape[-1])
+        event_embs = self.encoder(track_flat, det_flat, scalar_flat)
+        event_embs = event_embs.reshape(B, seq_len, -1)
+
+        left_embeddings = F.pad(event_embs, (0, 0, 5, 0))
+        left_mask = F.pad(mask, (5, 0), value=True)
+        windows = left_embeddings.unfold(1, 6, 1).permute(0, 1, 3, 2)
+        window_mask = left_mask.unfold(1, 6, 1)
+        flat_windows = windows.reshape(B * seq_len, 6, -1)
+        flat_mask = window_mask.reshape(B * seq_len, 6).clone()
+
+        # PyTorch attention returns NaN when every key is masked. These rows
+        # correspond only to output positions that are themselves padding.
+        all_padding = flat_mask.all(dim=-1)
+        flat_mask[all_padding, -1] = False
+        x = flat_windows + self.position_embedding
+        transformed = self.transformer(x, src_key_padding_mask=flat_mask)
+        current = transformed[:, -1, :].reshape(B, seq_len, -1)
+        return self._apply_heads(current)
+
+    def forward(
+        self,
+        track_feats: torch.Tensor,
+        det_feats: torch.Tensor,
+        scalar_feats: torch.Tensor,
+        mask: torch.BoolTensor | None = None,
+    ) -> dict:
+        sequence_outputs = self.forward_sequence(track_feats, det_feats, scalar_feats, mask)
+        batch_size, seq_len = track_feats.shape[:2]
+        if mask is None:
+            last_valid = torch.full(
+                (batch_size,), seq_len - 1, dtype=torch.long, device=track_feats.device
+            )
+        else:
+            positions = torch.arange(seq_len, device=track_feats.device).expand(batch_size, -1)
+            last_valid = positions.masked_fill(mask, -1).max(dim=-1).values
+            if (last_valid < 0).any():
+                raise ValueError("IWG forward requires at least one valid event per sample")
+        batch_indices = torch.arange(batch_size, device=track_feats.device)
+        return {
+            key: value[batch_indices, last_valid]
+            for key, value in sequence_outputs.items()
         }

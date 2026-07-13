@@ -3042,6 +3042,54 @@ def _cmd_train_student_v1(args: argparse.Namespace) -> None:
 
 
 # ===================================================================
+# Subcommand: build_iwg_tsrm_data
+# ===================================================================
+
+
+def _add_build_iwg_tsrm_data_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "build_iwg_tsrm_data",
+        help="Build causal IWG+TSRM windows from the complete compact timeline.",
+    )
+    parser.add_argument("--dataset", default="MOT17")
+    parser.add_argument("--mode", default="all")
+    parser.add_argument("--candidate-types", default="A")
+    parser.add_argument("--event-cache-root", required=True)
+    parser.add_argument("--detection-cache-root", required=True)
+    parser.add_argument("--label-dir", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--split-policy",
+        choices=["explicit_sequence_holdout"],
+        required=True,
+    )
+    parser.add_argument("--val-sequences", nargs="+", required=True)
+    parser.add_argument("--window-size", type=int, default=16)
+    parser.add_argument("--window-stride", type=int, default=4)
+    parser.add_argument("--max-frame-gap", type=int, default=30)
+
+
+def _cmd_build_iwg_tsrm_data(args: argparse.Namespace) -> None:
+    from agentguard.datasets.joint_window_dataset import build_iwg_tsrm_dataset
+
+    if _parse_candidate_types(args.candidate_types) != {"A"}:
+        raise ValueError("IWG+TSRM v1 supports candidate type A only")
+    metadata = build_iwg_tsrm_dataset(
+        dataset=args.dataset,
+        split=_resolve_split(args.mode),
+        event_cache_root=args.event_cache_root,
+        detection_cache_root=args.detection_cache_root,
+        label_dir=args.label_dir,
+        output_dir=args.output_dir,
+        val_sequences=args.val_sequences,
+        window_size=args.window_size,
+        window_stride=args.window_stride,
+        max_frame_gap=args.max_frame_gap,
+    )
+    print(json.dumps(metadata, indent=2, sort_keys=True))
+
+
+# ===================================================================
 # Main entry point
 # ===================================================================
 
@@ -3086,6 +3134,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     _add_verify_and_fuse_parser(subparsers)
     _add_build_student_v1_data_parser(subparsers)
     _add_train_student_v1_parser(subparsers)
+    _add_build_iwg_tsrm_data_parser(subparsers)
 
     parsed = parser.parse_args(argv)
 
@@ -3105,6 +3154,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         "verify_and_fuse": _cmd_verify_and_fuse,
         "build_student_v1_data": _cmd_build_student_v1_data,
         "train_student_v1": _cmd_train_student_v1,
+        "build_iwg_tsrm_data": _cmd_build_iwg_tsrm_data,
     }
 
     handler = dispatch.get(parsed.command)
