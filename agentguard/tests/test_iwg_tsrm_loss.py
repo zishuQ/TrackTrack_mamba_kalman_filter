@@ -15,6 +15,8 @@ def make_joint_batch(batch_size: int = 2, length: int = 8, reid_dim: int = 16) -
     reset = torch.zeros_like(padding)
     reset[0, 2] = True
     reset[1, 0] = True
+    endpoint = torch.zeros_like(padding)
+    endpoint[:, -1] = True
     label = has_detection.clone()
     motion = torch.rand((batch_size, length), generator=generator)
     appearance = torch.rand((batch_size, length), generator=generator)
@@ -39,6 +41,7 @@ def make_joint_batch(batch_size: int = 2, length: int = 8, reid_dim: int = 16) -
         "padding_mask": padding,
         "has_detection_mask": has_detection,
         "reset_mask": reset,
+        "temporal_endpoint_mask": endpoint,
         "label_mask": label,
         "valid_motion": label.clone(),
         "valid_appearance": label.clone(),
@@ -114,6 +117,27 @@ def test_joint_loss_masks_padding_unmatched_and_empty_supervision():
     assert components["base_gate_loss"].item() == 0.0
     assert components["final_gate_loss"].item() == 0.0
     assert components["dynamics_loss"].item() > 0.0
+
+
+def test_temporal_losses_only_supervise_last_valid_endpoint():
+    model = IWGTSRM(reid_dim=16).eval()
+    batch = make_joint_batch()
+    with torch.no_grad():
+        outputs = model(batch)
+    _, original = compute_iwg_tsrm_loss(
+        outputs, batch, training_mode="joint", lambda_dynamics=0.0
+    )
+    changed = {
+        key: value.clone() if torch.is_tensor(value) else value
+        for key, value in batch.items()
+    }
+    changed["final_gate_target"][:, :-1] = 1.0 - changed["final_gate_target"][:, :-1]
+    _, perturbed = compute_iwg_tsrm_loss(
+        outputs, changed, training_mode="joint", lambda_dynamics=0.0
+    )
+    for key in ("final_gate_loss", "residual_loss", "revision_loss"):
+        torch.testing.assert_close(original[key], perturbed[key])
+    assert original["dynamics_loss"].item() == 0.0
 
 
 def test_base_training_mode_does_not_require_tsrm_outputs():

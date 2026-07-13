@@ -9,12 +9,12 @@ EPOCHS="${EPOCHS:-100}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 NUM_WORKERS="${NUM_WORKERS:-2}"
 GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"
-DATASET_DIR="${DATASET_DIR:-${ROOT}/outputs/agentguard/experiments/iwg_tsrm_v2_holdout_seed42/dataset}"
+DATASET_DIR="${DATASET_DIR:-${ROOT}/outputs/agentguard/experiments/iwg_tsrm_v3_endpoint_holdout_seed42/dataset}"
 if [[ "${TRAINING_MODE}" == "joint" ]]; then
-  RUN_ROOT="${RUN_ROOT:-${ROOT}/outputs/agentguard/experiments/iwg_tsrm_v2_holdout_seed${SEED}}"
+  RUN_ROOT="${RUN_ROOT:-${ROOT}/outputs/agentguard/experiments/iwg_tsrm_v3_endpoint_holdout_seed${SEED}}"
   SELECTION="final_gate_loss"
 else
-  RUN_ROOT="${RUN_ROOT:-${ROOT}/outputs/agentguard/experiments/iwg_base_v4_holdout_seed${SEED}}"
+  RUN_ROOT="${RUN_ROOT:-${ROOT}/outputs/agentguard/experiments/iwg_base_v5_balanced_holdout_seed${SEED}}"
   SELECTION="base_gate_loss"
 fi
 CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
@@ -58,7 +58,8 @@ COMMAND=(
   --lr 0.0001 --weight-decay 0.0001 --warmup-epochs 1 --grad-clip 5.0
   --seed "${SEED}" --window-size 16 --delta-max 0.2
   --lambda-final 1.0 --lambda-residual 0.5
-  --lambda-dynamics 0.1 --lambda-revision 0.01
+  --lambda-dynamics 0.0 --lambda-revision 0.01
+  --sampling-policy sequence_balanced
   --selection-metric "${SELECTION}" --early-stop-patience 15
 )
 if [[ -n "${RESUME_FROM:-}" ]]; then

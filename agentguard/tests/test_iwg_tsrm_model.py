@@ -15,6 +15,8 @@ def make_joint_batch(batch_size: int = 2, length: int = 8, reid_dim: int = 16) -
     reset[0, 2] = True
     if batch_size > 1:
         reset[1, 0] = True
+    endpoint = torch.zeros_like(padding)
+    endpoint[:, -1] = True
     label = has_detection.clone()
     valid_motion = label.clone()
     valid_appearance = label.clone()
@@ -57,6 +59,7 @@ def make_joint_batch(batch_size: int = 2, length: int = 8, reid_dim: int = 16) -
         "mask": padding,
         "has_detection_mask": has_detection,
         "reset_mask": reset,
+        "temporal_endpoint_mask": endpoint,
         "label_mask": label,
         "valid_motion": valid_motion,
         "valid_appearance": valid_appearance,

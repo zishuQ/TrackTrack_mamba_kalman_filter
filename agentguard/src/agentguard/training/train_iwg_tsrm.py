@@ -7,13 +7,14 @@ import os
 import random
 import subprocess
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 from torch.nn.utils import clip_grad_norm_
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from agentguard.contracts.enums import POLICY_PROTOTYPE_MATRIX
 from agentguard.data.cache_schema import COMPACT_CACHE_SCHEMA_VERSION, FEATURE_SCHEMA_SHA256
@@ -28,8 +29,8 @@ from agentguard.training.loss_iwg_tsrm import compute_iwg_tsrm_loss
 from agentguard.training.scheduler import CosineWarmupScheduler
 
 
-JOINT_MODEL_SCHEMA = "agentguard_iwg_tsrm_v2"
-BASE_MODEL_SCHEMA = "agentguard_iwg_base_v2"
+JOINT_MODEL_SCHEMA = "agentguard_iwg_tsrm_v3"
+BASE_MODEL_SCHEMA = "agentguard_iwg_base_v3"
 
 
 def _sha256_file(path: Path) -> str:
@@ -55,6 +56,19 @@ def _to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
         key: value.to(device, non_blocking=True) if torch.is_tensor(value) else value
         for key, value in batch.items()
     }
+
+
+def sequence_balanced_sample_weights(
+    windows: list[dict[str, Any]],
+) -> torch.DoubleTensor:
+    """Give every sequence equal expected probability within an epoch."""
+    if not windows:
+        raise ValueError("sequence-balanced sampling requires non-empty windows")
+    counts = Counter(str(window["sequence"]) for window in windows)
+    return torch.as_tensor(
+        [1.0 / counts[str(window["sequence"])] for window in windows],
+        dtype=torch.double,
+    )
 
 
 def _model_forward(
@@ -130,19 +144,28 @@ class _MetricAccumulator:
                 (outputs["risk"] - batch["risk_target"]).abs()[risk_mask].detach().cpu()
             )
         if self.training_mode == "joint":
-            if gate_mask.any():
+            endpoint = batch["temporal_endpoint_mask"].unsqueeze(-1)
+            temporal_gate_mask = gate_mask & endpoint
+            endpoint_detection_mask = detection_mask & batch["temporal_endpoint_mask"]
+            if temporal_gate_mask.any():
                 final_error = (outputs["final_gate"] - batch["final_gate_target"]).abs()
                 base_safe_error = (outputs["base_gate"] - batch["final_gate_target"]).abs()
-                self.final_errors.append(final_error[gate_mask].detach().cpu())
-                self.improvements.append(
-                    (base_safe_error - final_error)[gate_mask].detach().cpu()
+                self.final_errors.append(
+                    final_error[temporal_gate_mask].detach().cpu()
                 )
-            self.final_gates.append(outputs["final_gate"][detection_mask].detach().cpu())
+                self.improvements.append(
+                    (base_safe_error - final_error)[temporal_gate_mask].detach().cpu()
+                )
+            self.final_gates.append(
+                outputs["final_gate"][endpoint_detection_mask].detach().cpu()
+            )
             self.corrections.append(
-                outputs["temporal_gate_correction"][detection_mask].detach().cpu()
+                outputs["temporal_gate_correction"][endpoint_detection_mask]
+                .detach()
+                .cpu()
             )
             self.strengths.append(
-                outputs["revision_strength"][detection_mask].detach().cpu()
+                outputs["revision_strength"][endpoint_detection_mask].detach().cpu()
             )
 
     @staticmethod
@@ -454,9 +477,23 @@ def train_iwg_tsrm(config: dict[str, Any]) -> dict[str, Any]:
         "num_workers": int(config["num_workers"]),
         "pin_memory": device.type == "cuda",
     }
-    train_loader = DataLoader(
-        train_dataset, shuffle=True, generator=loader_generator, **loader_kwargs
-    )
+    sampling_policy = str(config.get("sampling_policy", "sequence_balanced"))
+    if sampling_policy == "sequence_balanced":
+        sampler = WeightedRandomSampler(
+            sequence_balanced_sample_weights(train_dataset.windows),
+            num_samples=len(train_dataset),
+            replacement=True,
+            generator=loader_generator,
+        )
+        train_loader = DataLoader(train_dataset, sampler=sampler, **loader_kwargs)
+    elif sampling_policy == "shuffle":
+        train_loader = DataLoader(
+            train_dataset, shuffle=True, generator=loader_generator, **loader_kwargs
+        )
+    else:
+        raise ValueError(
+            "sampling_policy must be 'sequence_balanced' or 'shuffle'"
+        )
     val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
     if training_mode == "joint":
         model: torch.nn.Module = IWGTSRM(

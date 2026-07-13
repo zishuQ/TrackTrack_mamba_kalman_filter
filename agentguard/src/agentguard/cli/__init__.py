@@ -3121,6 +3121,11 @@ def _add_train_iwg_tsrm_parser(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--early-stop-patience", type=int, default=0)
     parser.add_argument("--max-train-windows", type=int, default=0)
     parser.add_argument("--max-val-windows", type=int, default=0)
+    parser.add_argument(
+        "--sampling-policy",
+        choices=["sequence_balanced", "shuffle"],
+        default="sequence_balanced",
+    )
     parser.add_argument("--resume-from", default="")
 
 
@@ -3185,6 +3190,7 @@ def _cmd_train_iwg_tsrm(args: argparse.Namespace) -> None:
         "early_stop_patience": int(args.early_stop_patience),
         "max_train_windows": int(args.max_train_windows),
         "max_val_windows": int(args.max_val_windows),
+        "sampling_policy": str(args.sampling_policy),
         "resume_from": args.resume_from,
     }
     summary = train_iwg_tsrm(config)

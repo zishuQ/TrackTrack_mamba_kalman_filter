@@ -22,7 +22,7 @@ from agentguard.data.label_schema import (
 from agentguard.features.normalization import NormalizationStats
 
 
-JOINT_DATASET_SCHEMA_VERSION = 2
+JOINT_DATASET_SCHEMA_VERSION = 3
 IWG_CONTEXT_SIZE = 6
 IWG_WARMUP_EVENTS = IWG_CONTEXT_SIZE - 1
 MOT17_FRCNN_TRAIN_SEQUENCES = [
@@ -46,6 +46,7 @@ JOINT_DATASET_SCHEMA_DESCRIPTOR = {
     "iwg_warmup_events": IWG_WARMUP_EVENTS,
     "iwg_input": "five_segment_local_warmup_events_plus_tsrm_window",
     "tsrm_input": "formal_window_only",
+    "temporal_supervision": "last_valid_endpoint_only",
     "scalar_dim": 63,
     "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
     "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
@@ -267,6 +268,33 @@ def resolve_joint_sequences(
     return selected, train, validation
 
 
+def limit_windows_sequence_balanced(
+    windows: list[dict[str, Any]], max_windows: int
+) -> list[dict[str, Any]]:
+    """Deterministically round-robin sequence groups for bounded smoke sets."""
+    if max_windows <= 0 or len(windows) <= max_windows:
+        return windows
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for window in windows:
+        grouped[str(window["sequence"])].append(window)
+    selected: list[dict[str, Any]] = []
+    offset = 0
+    sequence_names = sorted(grouped)
+    while len(selected) < max_windows:
+        added = False
+        for sequence in sequence_names:
+            group = grouped[sequence]
+            if offset < len(group):
+                selected.append(group[offset])
+                added = True
+                if len(selected) == max_windows:
+                    break
+        if not added:
+            break
+        offset += 1
+    return selected
+
+
 def build_iwg_tsrm_dataset(
     *,
     dataset: str,
@@ -307,6 +335,7 @@ def build_iwg_tsrm_dataset(
             "window_size": int(window_size),
             "iwg_warmup_events": IWG_WARMUP_EVENTS,
             "iwg_input_size": int(window_size) + IWG_WARMUP_EVENTS,
+            "temporal_supervision": "last_valid_endpoint_only",
             "window_stride": int(window_stride),
             "max_frame_gap": int(max_frame_gap),
         }
@@ -385,6 +414,7 @@ def build_iwg_tsrm_dataset(
         "iwg_context_size": IWG_CONTEXT_SIZE,
         "iwg_warmup_events": IWG_WARMUP_EVENTS,
         "iwg_input_size": int(window_size) + IWG_WARMUP_EVENTS,
+        "temporal_supervision": "last_valid_endpoint_only",
         "window_stride": int(window_stride),
         "max_frame_gap": int(max_frame_gap),
         "reid_dim": reid_dims.pop(),
@@ -428,7 +458,9 @@ class CompactIWGTSRMWindowDataset(torch.utils.data.Dataset):
         with index_path.open() as handle:
             self.windows = [json.loads(line) for line in handle if line.strip()]
         if max_windows > 0:
-            self.windows = self.windows[: int(max_windows)]
+            self.windows = limit_windows_sequence_balanced(
+                self.windows, int(max_windows)
+            )
         selected_sequences = set(self.metadata[f"{split}_sequences"])
         self.labels = {
             key: label
@@ -452,6 +484,7 @@ class CompactIWGTSRMWindowDataset(torch.utils.data.Dataset):
             "iwg_warmup_events": IWG_WARMUP_EVENTS,
             "iwg_input_size": int(self.metadata.get("window_size", 0))
             + IWG_WARMUP_EVENTS,
+            "temporal_supervision": "last_valid_endpoint_only",
         }
         mismatches = {
             key: (self.metadata.get(key), value)
@@ -525,6 +558,7 @@ class CompactIWGTSRMWindowDataset(torch.utils.data.Dataset):
         frame_ids = np.full(length, -1, dtype=np.int64)
         track_ids = np.full(length, -1, dtype=np.int64)
         reset_mask = np.zeros(length, dtype=np.bool_)
+        temporal_endpoint_mask = np.zeros(length, dtype=np.bool_)
 
         reader = self._reader(window["sequence"])
         for position, reference in enumerate(
@@ -599,6 +633,7 @@ class CompactIWGTSRMWindowDataset(torch.utils.data.Dataset):
         scalar_feats[padding_mask] = 0.0
         if pad_left < length:
             reset_mask[pad_left] = True
+            temporal_endpoint_mask[length - 1] = True
         return {
             "track_feats": torch.from_numpy(track_feats),
             "det_feats": torch.from_numpy(det_feats),
@@ -621,6 +656,7 @@ class CompactIWGTSRMWindowDataset(torch.utils.data.Dataset):
             "risk_target": torch.from_numpy(risk_target),
             "sample_weight": torch.from_numpy(sample_weight),
             "reset_mask": torch.from_numpy(reset_mask),
+            "temporal_endpoint_mask": torch.from_numpy(temporal_endpoint_mask),
             "frame_id": torch.from_numpy(frame_ids),
             "track_id": torch.from_numpy(track_ids),
             "sequence": window["sequence"],

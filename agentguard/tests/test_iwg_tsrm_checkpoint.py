@@ -46,13 +46,13 @@ def _checkpoint() -> dict:
     }
 
 
-def test_v2_combined_checkpoint_contract_accepts_warmup_schema():
+def test_v3_combined_checkpoint_contract_accepts_endpoint_schema():
     validate_checkpoint_contract(_checkpoint(), expected_training_mode="joint")
 
 
-def test_v1_combined_checkpoint_is_strictly_rejected():
+def test_v2_combined_checkpoint_is_strictly_rejected():
     checkpoint = copy.deepcopy(_checkpoint())
-    checkpoint["model_schema_version"] = "agentguard_iwg_tsrm_v1"
+    checkpoint["model_schema_version"] = "agentguard_iwg_tsrm_v2"
     with pytest.raises(ValueError, match="schema mismatch"):
         validate_checkpoint_contract(checkpoint, expected_training_mode="joint")
 

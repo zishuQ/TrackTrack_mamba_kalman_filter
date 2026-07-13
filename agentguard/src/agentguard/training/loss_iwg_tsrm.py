@@ -104,15 +104,26 @@ def compute_iwg_tsrm_loss(
         "revision_loss": zero,
     }
     if training_mode == "joint":
+        if "temporal_endpoint_mask" not in batch:
+            raise KeyError("joint loss requires temporal_endpoint_mask")
+        endpoint_mask = batch["temporal_endpoint_mask"].bool()
+        if endpoint_mask.shape != label_mask.shape:
+            raise ValueError(
+                "temporal_endpoint_mask must match label_mask shape: "
+                f"{tuple(endpoint_mask.shape)} != {tuple(label_mask.shape)}"
+            )
+        temporal_gate_weights = gate_weights * endpoint_mask.unsqueeze(-1)
         final_gate = outputs["final_gate"].float()
         final_target = batch["final_gate_target"].float()
         final_bce = _weighted_mean(
             F.binary_cross_entropy(
                 final_gate.clamp(1e-6, 1.0 - 1e-6), final_target, reduction="none"
             ),
-            gate_weights,
+            temporal_gate_weights,
         )
-        final_mse = _weighted_mean((final_gate - final_target).square(), gate_weights)
+        final_mse = _weighted_mean(
+            (final_gate - final_target).square(), temporal_gate_weights
+        )
         final_loss = final_bce + 0.1 * final_mse
 
         correction_target = torch.clamp(
@@ -124,22 +135,27 @@ def compute_iwg_tsrm_loss(
                 correction_target,
                 reduction="none",
             ),
-            gate_weights,
+            temporal_gate_weights,
         )
 
-        scalar = batch["scalar_feats"].float()
-        indices = torch.as_tensor(DYN_SCALAR_INDICES, device=scalar.device)
-        true_next_delta = scalar[:, 1:, indices] - scalar[:, :-1, indices]
-        predicted = outputs["predicted_next_scalar_delta"][:, :-1].float()
         padding = batch["padding_mask"]
-        reset = batch["reset_mask"]
-        dynamics_valid = ~padding[:, :-1] & ~padding[:, 1:] & ~reset[:, 1:]
-        dynamics_per_position = F.smooth_l1_loss(
-            predicted, true_next_delta, reduction="none"
-        ).mean(dim=-1)
-        dynamics_loss = _weighted_mean(dynamics_per_position, dynamics_valid)
+        if float(lambda_dynamics) > 0.0:
+            scalar = batch["scalar_feats"].float()
+            indices = torch.as_tensor(DYN_SCALAR_INDICES, device=scalar.device)
+            true_next_delta = scalar[:, 1:, indices] - scalar[:, :-1, indices]
+            predicted = outputs["predicted_next_scalar_delta"][:, :-1].float()
+            reset = batch["reset_mask"]
+            dynamics_valid = ~padding[:, :-1] & ~padding[:, 1:] & ~reset[:, 1:]
+            dynamics_per_position = F.smooth_l1_loss(
+                predicted, true_next_delta, reduction="none"
+            ).mean(dim=-1)
+            dynamics_loss = _weighted_mean(dynamics_per_position, dynamics_valid)
+        else:
+            dynamics_loss = zero
 
-        revision_valid = ~padding & batch["has_detection_mask"]
+        revision_valid = (
+            endpoint_mask & ~padding & batch["has_detection_mask"]
+        )
         revision_per_position = outputs["temporal_gate_correction"].float().abs().mean(dim=-1)
         revision_loss = _weighted_mean(revision_per_position, revision_valid)
         total = (

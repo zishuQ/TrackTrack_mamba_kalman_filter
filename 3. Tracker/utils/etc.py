@@ -212,18 +212,44 @@ def evaluate(args, trackers_to_eval, dataset):
     metrics_list = [trackeval.metrics.HOTA(), trackeval.metrics.CLEAR(), trackeval.metrics.Identity()]
     res, _ = evaluator.evaluate(dataset_list, metrics_list)
 
-    # Get
-    hota = np.mean(res['MotChallenge2DBox'][trackers_to_eval]['COMBINED_SEQ']['pedestrian']['HOTA']['HOTA']).item()
-    idf1 = res['MotChallenge2DBox'][trackers_to_eval]['COMBINED_SEQ']['pedestrian']['Identity']['IDF1']
-    mota = res['MotChallenge2DBox'][trackers_to_eval]['COMBINED_SEQ']['pedestrian']['CLEAR']['MOTA']
-    assa = np.mean(res['MotChallenge2DBox'][trackers_to_eval]['COMBINED_SEQ']['pedestrian']['HOTA']['AssA']).item()
-    deta = np.mean(res['MotChallenge2DBox'][trackers_to_eval]['COMBINED_SEQ']['pedestrian']['HOTA']['DetA']).item()
+    summary = summarize_trackeval_results(res, trackers_to_eval)
+    combined = summary['combined']
 
     # Print
     print(f'{"HOTA":<10}{"MOTA":<10}{"IDF1":<10}{"DetA":<10}{"AssA":<10}', flush=True)
-    print(f'{hota:<10.6f}{mota:<10.6f}{idf1:<10.6f}{deta:<10.6f}{assa:<10.6f}', flush=True)
+    print(
+        f"{combined['HOTA']:<10.6f}{combined['MOTA']:<10.6f}"
+        f"{combined['IDF1']:<10.6f}{combined['DetA']:<10.6f}"
+        f"{combined['AssA']:<10.6f}",
+        flush=True,
+    )
     if getattr(args, 'print_per_sequence_metrics', False):
         print_per_sequence_metrics(res, trackers_to_eval)
+    return summary
+
+
+def summarize_trackeval_results(res, trackers_to_eval):
+    """Convert TrackEval's nested numpy result into JSON-safe metrics."""
+    tracker_res = res['MotChallenge2DBox'][trackers_to_eval]
+
+    def metrics(sequence_result):
+        pedestrian = sequence_result['pedestrian']
+        return {
+            'HOTA': float(np.mean(pedestrian['HOTA']['HOTA'])),
+            'MOTA': float(pedestrian['CLEAR']['MOTA']),
+            'IDF1': float(pedestrian['Identity']['IDF1']),
+            'DetA': float(np.mean(pedestrian['HOTA']['DetA'])),
+            'AssA': float(np.mean(pedestrian['HOTA']['AssA'])),
+        }
+
+    return {
+        'combined': metrics(tracker_res['COMBINED_SEQ']),
+        'per_sequence': {
+            sequence: metrics(sequence_result)
+            for sequence, sequence_result in tracker_res.items()
+            if sequence != 'COMBINED_SEQ'
+        },
+    }
 
 
 def print_per_sequence_metrics(res, trackers_to_eval):
@@ -267,16 +293,19 @@ def evaluate_sequences(args, trackers_to_eval, dataset, sequences):
         metrics_list = [trackeval.metrics.HOTA(), trackeval.metrics.CLEAR(), trackeval.metrics.Identity()]
         res, _ = evaluator.evaluate(dataset_list, metrics_list)
 
-        hota = np.mean(res['MotChallenge2DBox'][trackers_to_eval]['COMBINED_SEQ']['pedestrian']['HOTA']['HOTA']).item()
-        idf1 = res['MotChallenge2DBox'][trackers_to_eval]['COMBINED_SEQ']['pedestrian']['Identity']['IDF1']
-        mota = res['MotChallenge2DBox'][trackers_to_eval]['COMBINED_SEQ']['pedestrian']['CLEAR']['MOTA']
-        assa = np.mean(res['MotChallenge2DBox'][trackers_to_eval]['COMBINED_SEQ']['pedestrian']['HOTA']['AssA']).item()
-        deta = np.mean(res['MotChallenge2DBox'][trackers_to_eval]['COMBINED_SEQ']['pedestrian']['HOTA']['DetA']).item()
+        summary = summarize_trackeval_results(res, trackers_to_eval)
+        combined = summary['combined']
 
         print(f'{"HOTA":<10}{"MOTA":<10}{"IDF1":<10}{"DetA":<10}{"AssA":<10}', flush=True)
-        print(f'{hota:<10.6f}{mota:<10.6f}{idf1:<10.6f}{deta:<10.6f}{assa:<10.6f}', flush=True)
+        print(
+            f"{combined['HOTA']:<10.6f}{combined['MOTA']:<10.6f}"
+            f"{combined['IDF1']:<10.6f}{combined['DetA']:<10.6f}"
+            f"{combined['AssA']:<10.6f}",
+            flush=True,
+        )
         if getattr(args, 'print_per_sequence_metrics', False):
             print_per_sequence_metrics(res, trackers_to_eval)
+        return summary
     finally:
         try:
             os.unlink(seqmap_tmp.name)

@@ -15,9 +15,11 @@ from agentguard.datasets.joint_window_dataset import (
     CompactIWGTSRMWindowDataset,
     build_window_index,
     event_key,
+    limit_windows_sequence_balanced,
     resolve_joint_sequences,
     segment_track_timelines,
 )
+from agentguard.training.train_iwg_tsrm import sequence_balanced_sample_weights
 
 
 def _record(
@@ -108,9 +110,37 @@ def test_mot17_all_split_ignores_other_detector_directories():
     assert set(selected).isdisjoint(other_detectors)
 
 
-def test_v1_joint_dataset_is_strictly_rejected(tmp_path):
+def test_previous_joint_dataset_schema_is_strictly_rejected(tmp_path):
     (tmp_path / "metadata.json").write_text(
         json.dumps({"joint_dataset_schema_version": JOINT_DATASET_SCHEMA_VERSION - 1})
     )
     with pytest.raises(ValueError, match="schema mismatch"):
         CompactIWGTSRMWindowDataset(tmp_path, "train")
+
+
+def test_sequence_balanced_weights_equalize_sequence_probability():
+    windows = [
+        {"sequence": "large"},
+        {"sequence": "large"},
+        {"sequence": "large"},
+        {"sequence": "small"},
+    ]
+    weights = sequence_balanced_sample_weights(windows)
+    large_mass = weights[:3].sum()
+    small_mass = weights[3:].sum()
+    assert large_mass.item() == pytest.approx(small_mass.item())
+
+
+def test_bounded_window_subset_round_robins_sequences():
+    windows = [
+        *({"sequence": "large", "index": index} for index in range(10)),
+        {"sequence": "small", "index": 0},
+        {"sequence": "small", "index": 1},
+    ]
+    selected = limit_windows_sequence_balanced(windows, 4)
+    assert [window["sequence"] for window in selected] == [
+        "large",
+        "small",
+        "large",
+        "small",
+    ]
