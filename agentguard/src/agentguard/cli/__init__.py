@@ -1853,6 +1853,11 @@ def _add_train_student_v0_parser(subparsers: argparse._SubParsersAction) -> None
         help="Run full validation every N epochs in addition to sampled validation (0=disabled).",
     )
     p.add_argument(
+        "--skip-validation",
+        action="store_true",
+        help="Train for the fixed epoch count without val/best selection; use iwg_last.pt.",
+    )
+    p.add_argument(
         "--tgr-full-val-device",
         default="cpu",
         help="Device used for TGR full validation. CPU avoids long CUDA eval illegal-memory failures.",
@@ -1982,6 +1987,7 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
         "tgr_window_stride": max(int(args.tgr_window_stride), 1),
         "early_stop_patience": max(2, args.epochs + 1),
         "full_val_every": max(0, int(args.full_val_every)),
+        "skip_validation": bool(args.skip_validation),
         "resume_from": args.iwg_resume_checkpoint,
         "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
         "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
@@ -2025,15 +2031,16 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
             metadata["split"],
             feature_builder,
         )
-        iwg_val_ds = CompactV0IWGDataset(
-            val_records,
-            metadata["event_cache_root"],
-            metadata["detection_cache_root"],
-            dataset,
-            metadata["split"],
-            feature_builder,
-        )
-        if args.full_val_every and len(full_val_records) > len(val_records):
+        if not args.skip_validation:
+            iwg_val_ds = CompactV0IWGDataset(
+                val_records,
+                metadata["event_cache_root"],
+                metadata["detection_cache_root"],
+                dataset,
+                metadata["split"],
+                feature_builder,
+            )
+        if not args.skip_validation and args.full_val_every and len(full_val_records) > len(val_records):
             iwg_full_val_ds = CompactV0IWGDataset(
                 full_val_records,
                 metadata["event_cache_root"],
@@ -2051,13 +2058,15 @@ def _cmd_train_student_v0(args: argparse.Namespace) -> None:
             generator=torch.Generator().manual_seed(int(args.seed)),
             **loader_kwargs,
         )
-        iwg_val_loader = DataLoader(
-            iwg_val_ds,
-            batch_size=config["batch_size"],
-            shuffle=False,
-            collate_fn=CompactV0IWGDataset.collate_fn,
-            **loader_kwargs,
-        )
+        iwg_val_loader = None
+        if iwg_val_ds is not None:
+            iwg_val_loader = DataLoader(
+                iwg_val_ds,
+                batch_size=config["batch_size"],
+                shuffle=False,
+                collate_fn=CompactV0IWGDataset.collate_fn,
+                **loader_kwargs,
+            )
         iwg_full_val_loader = None
         if iwg_full_val_ds is not None:
             iwg_full_val_loader = DataLoader(

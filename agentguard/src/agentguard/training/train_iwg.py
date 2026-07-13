@@ -21,7 +21,7 @@ from agentguard.training.optim import build_optimizer, build_scheduler
 def train_iwg(
     model: IWG,
     train_loader: torch.utils.data.DataLoader,
-    val_loader: torch.utils.data.DataLoader,
+    val_loader: Optional[torch.utils.data.DataLoader],
     config: Dict[str, Any],
     output_dir: str,
     norm_mean: Optional[np.ndarray] = None,
@@ -61,6 +61,8 @@ def train_iwg(
         ``event_dim``           128     Event embedding dimensionality.
         ``full_val_every``      0       Evaluate full validation loader every
                                         N epochs when provided. 0 disables it.
+        ``skip_validation``     False   Train for the fixed epoch count and
+                                        use the last checkpoint.
         ======================  ======  =====================================
 
     output_dir : str
@@ -88,6 +90,7 @@ def train_iwg(
         "scalar_dim": 63,
         "event_dim": 128,
         "full_val_every": 0,
+        "skip_validation": False,
         "resume_from": "",
     }
     cfg.update(config)
@@ -256,9 +259,16 @@ def train_iwg(
                 )
 
         # ---- Validation ----
-        val_metrics = _evaluate_iwg_loader(model, val_loader, device, use_amp)
+        if bool(cfg.get("skip_validation", False)):
+            val_metrics = {}
+        else:
+            if val_loader is None:
+                raise ValueError("val_loader is required unless skip_validation=True")
+            val_metrics = _evaluate_iwg_loader(model, val_loader, device, use_amp)
         full_val_metrics = None
         if (
+            not bool(cfg.get("skip_validation", False))
+            and
             full_val_loader is not None
             and int(cfg.get("full_val_every", 0)) > 0
             and (epoch + 1) % int(cfg["full_val_every"]) == 0
@@ -272,26 +282,39 @@ def train_iwg(
         train_metrics = train_tracker.compute()
 
         train_metrics["epoch"] = epoch + 1
-        val_metrics["epoch"] = epoch + 1
+        if val_metrics:
+            val_metrics["epoch"] = epoch + 1
         if full_val_metrics is not None:
             full_val_metrics["epoch"] = epoch + 1
 
         train_metrics_history.append(train_metrics)
-        val_metrics_history.append(val_metrics)
+        if val_metrics:
+            val_metrics_history.append(val_metrics)
 
         current_lr = optimizer.param_groups[0]["lr"]
 
         # Log to console.
-        logger.info(
-            f"Epoch {epoch + 1:2d} — "
-            f"train_loss={train_metrics.get('loss', 0):.4f}  "
-            f"val_loss={val_metrics.get('loss', 0):.4f}  "
-            f"gate_acc={val_metrics.get('gate_accuracy', 0):.3f}  "
-            f"motion_mae={val_metrics.get('motion_mae', 0):.4f}  "
-            f"app_mae={val_metrics.get('appearance_mae', 0):.4f}  "
-            f"lr={current_lr:.2e}  "
-            f"time={epoch_time:.1f}s"
-        )
+        if bool(cfg.get("skip_validation", False)):
+            logger.info(
+                f"Epoch {epoch + 1:2d} — "
+                f"train_loss={train_metrics.get('loss', 0):.4f}  "
+                f"gate_acc={train_metrics.get('gate_accuracy', 0):.3f}  "
+                f"motion_mae={train_metrics.get('motion_mae', 0):.4f}  "
+                f"app_mae={train_metrics.get('appearance_mae', 0):.4f}  "
+                f"lr={current_lr:.2e}  "
+                f"time={epoch_time:.1f}s  train_only=true"
+            )
+        else:
+            logger.info(
+                f"Epoch {epoch + 1:2d} — "
+                f"train_loss={train_metrics.get('loss', 0):.4f}  "
+                f"val_loss={val_metrics.get('loss', 0):.4f}  "
+                f"gate_acc={val_metrics.get('gate_accuracy', 0):.3f}  "
+                f"motion_mae={val_metrics.get('motion_mae', 0):.4f}  "
+                f"app_mae={val_metrics.get('appearance_mae', 0):.4f}  "
+                f"lr={current_lr:.2e}  "
+                f"time={epoch_time:.1f}s"
+            )
         if full_val_metrics is not None:
             logger.info(
                 f"Epoch {epoch + 1:2d} full-val — "
@@ -333,7 +356,10 @@ def train_iwg(
             ])
 
         # ---- Checkpointing & early stopping ----
-        if full_val_loader is not None and int(cfg.get("full_val_every", 0)) > 0:
+        if bool(cfg.get("skip_validation", False)):
+            selection_metrics = None
+            selection_source = "fixed_last_epoch"
+        elif full_val_loader is not None and int(cfg.get("full_val_every", 0)) > 0:
             selection_metrics = full_val_metrics
             selection_source = "full_val"
         else:
@@ -390,10 +416,13 @@ def train_iwg(
                 f"— saved to {best_ckpt_path}"
             )
         elif selection_loss is None:
-            logger.info(
-                "Best model selection skipped this epoch; waiting for full-val "
-                f"every {int(cfg.get('full_val_every', 0))} epoch(s)."
-            )
+            if bool(cfg.get("skip_validation", False)):
+                logger.info("Best model selection disabled for fixed-epoch train-only mode.")
+            else:
+                logger.info(
+                    "Best model selection skipped this epoch; waiting for full-val "
+                    f"every {int(cfg.get('full_val_every', 0))} epoch(s)."
+                )
         else:
             epochs_no_improve += 1
             logger.info(
@@ -414,13 +443,24 @@ def train_iwg(
     # ------------------------------------------------------------------
     metrics_fh.close()
 
-    # Load best model for summary.
+    # Load the selected model for summary. Train-only mode deliberately uses
+    # the fixed final epoch rather than inventing a train-loss "best".
     best_ckpt_path = os.path.join(output_dir, "iwg_best.pt")
-    if os.path.isfile(best_ckpt_path):
+    if bool(cfg.get("skip_validation", False)):
+        best_metadata = load_checkpoint(last_ckpt_path, model)
+        best_epoch = int(best_metadata.get("epoch", -1)) + 1
+        best_val_loss = None
+        best_metric_source = "fixed_last_epoch"
+        best_metrics = dict(train_metrics_history[-1]) if train_metrics_history else {}
+        logger.info(f"Restored fixed final model from epoch {best_epoch}")
+        selected_checkpoint_path = last_ckpt_path
+    elif os.path.isfile(best_ckpt_path):
         best_metadata = load_checkpoint(best_ckpt_path, model)
         logger.info(f"Restored best model from epoch {best_metadata.get('epoch', '?')}")
+        selected_checkpoint_path = best_ckpt_path
     else:
         best_metadata = {"epoch": best_epoch}
+        selected_checkpoint_path = last_ckpt_path
 
     # Build training summary.
     training_summary = {
@@ -434,7 +474,8 @@ def train_iwg(
         "best_metrics": best_metrics,
         "output_dir": output_dir,
         "checkpoints": {
-            "best": best_ckpt_path,
+            "selected": selected_checkpoint_path,
+            "best": None if bool(cfg.get("skip_validation", False)) else best_ckpt_path,
             "last": last_ckpt_path,
         },
     }

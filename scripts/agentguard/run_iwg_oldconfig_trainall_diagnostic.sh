@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PY="${PYTHON_BIN:-${ROOT}/.venv/bin/python}"
 RUN_NAME="${RUN_NAME:-iwg_v3_oldconfig_trainall_seed42}"
 RUN_ROOT="${ROOT}/outputs/agentguard/experiments/${RUN_NAME}"
-DATASET_DIR="${RUN_ROOT}/dataset"
+DATASET_DIR="${DATASET_DIR:-${RUN_ROOT}/dataset}"
 CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
 LABEL_DIR="${ROOT}/outputs/agentguard/experiments/iwg_tsrm_v1_phase_a/labels"
 EVENT_CACHE_ROOT="${ROOT}/outputs/agentguard/event_cache_v3_iwg_v2"
@@ -110,7 +110,7 @@ TRAIN_COMMAND=(
   --dataset MOT17 --mode all --device cuda
   --epochs 100 --batch-size 1024 --lr 0.0001
   --num-workers 2 --seed 42 --tgr-window-stride 1
-  --val-max-samples 20000 --full-val-every 5
+  --skip-validation --full-val-every 0
   --dataset-dir "${DATASET_DIR}" --checkpoint-dir "${CHECKPOINT_DIR}"
   --skip-tgr-training
 )
@@ -121,7 +121,7 @@ printf '%q ' "${TRAIN_COMMAND[@]}" > "${RUN_ROOT}/provenance/train.command.txt"
 printf '\n' >> "${RUN_ROOT}/provenance/train.command.txt"
 "${TRAIN_COMMAND[@]}" 2>&1 | tee "${RUN_ROOT}/logs/train.log"
 
-IWG_CKPT="${CHECKPOINT_DIR}/iwg/iwg_best.pt"
+IWG_CKPT="${CHECKPOINT_DIR}/iwg/iwg_last.pt"
 sha256sum "${DATASET_DIR}/metadata.json" "${IWG_CKPT}" \
   > "${RUN_ROOT}/provenance/artifacts.sha256"
 EVAL_COMMAND=(
