@@ -65,6 +65,56 @@ class IWG(nn.Module):
             "iwg_gate_residual": iwg_gate_residual,
         }
 
+    def _encode_inputs(
+        self,
+        track_feats: torch.Tensor,
+        det_feats: torch.Tensor,
+        scalar_feats: torch.Tensor,
+        mask: torch.BoolTensor | None,
+    ) -> tuple[torch.Tensor, torch.BoolTensor]:
+        batch_size, seq_len, _ = track_feats.shape
+        if seq_len < 1:
+            raise ValueError("IWG sequence length must be positive")
+        if (
+            det_feats.shape[:2] != (batch_size, seq_len)
+            or scalar_feats.shape[:2] != (batch_size, seq_len)
+        ):
+            raise ValueError(
+                "IWG input tensors must share batch and sequence dimensions"
+            )
+        if mask is None:
+            mask = torch.zeros(
+                (batch_size, seq_len),
+                dtype=torch.bool,
+                device=track_feats.device,
+            )
+        elif mask.shape != (batch_size, seq_len):
+            raise ValueError(
+                f"mask must have shape {(batch_size, seq_len)}, got {tuple(mask.shape)}"
+            )
+
+        track_flat = track_feats.reshape(-1, self.encoder.reid_dim)
+        det_flat = det_feats.reshape(-1, self.encoder.reid_dim)
+        scalar_flat = scalar_feats.reshape(-1, scalar_feats.shape[-1])
+        event_embs = self.encoder(track_flat, det_flat, scalar_flat)
+        return event_embs.reshape(batch_size, seq_len, -1), mask
+
+    def _transform_windows(
+        self,
+        windows: torch.Tensor,
+        window_mask: torch.BoolTensor,
+    ) -> torch.Tensor:
+        flat_mask = window_mask.clone()
+        # Attention returns NaN for an all-masked row. Such rows only
+        # represent output positions that are themselves padding.
+        all_padding = flat_mask.all(dim=-1)
+        flat_mask[all_padding, -1] = False
+        transformed = self.transformer(
+            windows + self.position_embedding,
+            src_key_padding_mask=flat_mask,
+        )
+        return transformed[:, -1, :]
+
     def forward_sequence(
         self,
         track_feats: torch.Tensor,
@@ -73,36 +123,20 @@ class IWG(nn.Module):
         mask: torch.BoolTensor | None = None,
     ) -> dict:
         """Evaluate every causal six-event window with one EventEncoder pass."""
-        B, seq_len, _ = track_feats.shape
-        if seq_len < 1:
-            raise ValueError("IWG sequence length must be positive")
-        if det_feats.shape[:2] != (B, seq_len) or scalar_feats.shape[:2] != (B, seq_len):
-            raise ValueError("IWG input tensors must share batch and sequence dimensions")
-        if mask is None:
-            mask = torch.zeros((B, seq_len), dtype=torch.bool, device=track_feats.device)
-        elif mask.shape != (B, seq_len):
-            raise ValueError(f"mask must have shape {(B, seq_len)}, got {tuple(mask.shape)}")
-
-        track_flat = track_feats.reshape(-1, self.encoder.reid_dim)
-        det_flat = det_feats.reshape(-1, self.encoder.reid_dim)
-        scalar_flat = scalar_feats.reshape(-1, scalar_feats.shape[-1])
-        event_embs = self.encoder(track_flat, det_flat, scalar_flat)
-        event_embs = event_embs.reshape(B, seq_len, -1)
+        batch_size, seq_len, _ = track_feats.shape
+        event_embs, mask = self._encode_inputs(
+            track_feats, det_feats, scalar_feats, mask
+        )
 
         left_embeddings = F.pad(event_embs, (0, 0, 5, 0))
         left_mask = F.pad(mask, (5, 0), value=True)
         windows = left_embeddings.unfold(1, 6, 1).permute(0, 1, 3, 2)
         window_mask = left_mask.unfold(1, 6, 1)
-        flat_windows = windows.reshape(B * seq_len, 6, -1)
-        flat_mask = window_mask.reshape(B * seq_len, 6).clone()
-
-        # PyTorch attention returns NaN when every key is masked. These rows
-        # correspond only to output positions that are themselves padding.
-        all_padding = flat_mask.all(dim=-1)
-        flat_mask[all_padding, -1] = False
-        x = flat_windows + self.position_embedding
-        transformed = self.transformer(x, src_key_padding_mask=flat_mask)
-        current = transformed[:, -1, :].reshape(B, seq_len, -1)
+        flat_windows = windows.reshape(batch_size * seq_len, 6, -1)
+        flat_mask = window_mask.reshape(batch_size * seq_len, 6)
+        current = self._transform_windows(flat_windows, flat_mask).reshape(
+            batch_size, seq_len, -1
+        )
         return self._apply_heads(current)
 
     def forward(
@@ -112,19 +146,29 @@ class IWG(nn.Module):
         scalar_feats: torch.Tensor,
         mask: torch.BoolTensor | None = None,
     ) -> dict:
-        sequence_outputs = self.forward_sequence(track_feats, det_feats, scalar_feats, mask)
         batch_size, seq_len = track_feats.shape[:2]
+        event_embs, normalized_mask = self._encode_inputs(
+            track_feats, det_feats, scalar_feats, mask
+        )
         if mask is None:
             last_valid = torch.full(
                 (batch_size,), seq_len - 1, dtype=torch.long, device=track_feats.device
             )
         else:
             positions = torch.arange(seq_len, device=track_feats.device).expand(batch_size, -1)
-            last_valid = positions.masked_fill(mask, -1).max(dim=-1).values
+            last_valid = positions.masked_fill(normalized_mask, -1).max(dim=-1).values
             if (last_valid < 0).any():
                 raise ValueError("IWG forward requires at least one valid event per sample")
-        batch_indices = torch.arange(batch_size, device=track_feats.device)
-        return {
-            key: value[batch_indices, last_valid]
-            for key, value in sequence_outputs.items()
-        }
+
+        left_embeddings = F.pad(event_embs, (0, 0, 5, 0))
+        left_mask = F.pad(normalized_mask, (5, 0), value=True)
+        offsets = torch.arange(6, device=track_feats.device).unsqueeze(0)
+        gather_indices = last_valid.unsqueeze(1) + offsets
+        windows = torch.gather(
+            left_embeddings,
+            1,
+            gather_indices.unsqueeze(-1).expand(-1, -1, event_embs.shape[-1]),
+        )
+        window_mask = torch.gather(left_mask, 1, gather_indices)
+        current = self._transform_windows(windows, window_mask)
+        return self._apply_heads(current)

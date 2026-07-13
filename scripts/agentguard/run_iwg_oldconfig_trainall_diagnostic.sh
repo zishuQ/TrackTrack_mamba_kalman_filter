@@ -3,15 +3,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PY="${PYTHON_BIN:-${ROOT}/.venv/bin/python}"
-RUN_ROOT="${ROOT}/outputs/agentguard/experiments/iwg_v3_oldconfig_trainall_seed42"
+RUN_NAME="${RUN_NAME:-iwg_v3_oldconfig_trainall_seed42}"
+RUN_ROOT="${ROOT}/outputs/agentguard/experiments/${RUN_NAME}"
 DATASET_DIR="${RUN_ROOT}/dataset"
 CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
 LABEL_DIR="${ROOT}/outputs/agentguard/experiments/iwg_tsrm_v1_phase_a/labels"
 EVENT_CACHE_ROOT="${ROOT}/outputs/agentguard/event_cache_v3_iwg_v2"
 DETECTION_CACHE_ROOT="${ROOT}/outputs/agentguard/detection_cache"
 TRACKER_DIR="${ROOT}/3. Tracker"
-TRACKER_SUFFIX="iwg_v3_oldconfig_trainall_seed42"
+TRACKER_SUFFIX="${TRACKER_SUFFIX:-${RUN_NAME}}"
 TRACKER_FOLDER="mot17_all_0.80_${TRACKER_SUFFIX}_agentguard_iwg"
+RESUME_FROM="${RESUME_FROM:-}"
 SEQUENCES=(
   MOT17-02-FRCNN MOT17-04-FRCNN MOT17-05-FRCNN MOT17-09-FRCNN
   MOT17-10-FRCNN MOT17-11-FRCNN MOT17-13-FRCNN
@@ -27,18 +29,30 @@ if [[ -e "${RUN_ROOT}/running" ]]; then
   fi
   rm -f "${RUN_ROOT}/running"
 fi
-[[ ! -e "${RUN_ROOT}/completed" ]] || {
-  echo "Refusing completed old-config diagnostic: ${RUN_ROOT}" >&2
-  exit 2
-}
+if [[ -e "${RUN_ROOT}/completed" ]]; then
+  if [[ -n "${RESUME_FROM}" && ! -e "${RUN_ROOT}/tracking_manifest.json" ]]; then
+    rm -f "${RUN_ROOT}/completed"
+  else
+    echo "Refusing completed old-config diagnostic: ${RUN_ROOT}" >&2
+    exit 2
+  fi
+fi
 rm -f "${RUN_ROOT}/failed"
 echo "$$" > "${RUN_ROOT}/pipeline.pid"
 touch "${RUN_ROOT}/running"
+pipeline_complete=0
 finish() {
   local code=$?
+  if [[ ${pipeline_complete} -eq 0 && ${code} -eq 0 ]]; then
+    code=130
+  fi
   rm -f "${RUN_ROOT}/running"
   echo "${code}" > "${RUN_ROOT}/pipeline.exit_code"
-  [[ ${code} -eq 0 ]] && touch "${RUN_ROOT}/completed" || touch "${RUN_ROOT}/failed"
+  if [[ ${code} -eq 0 && ${pipeline_complete} -eq 1 ]]; then
+    touch "${RUN_ROOT}/completed"
+  else
+    touch "${RUN_ROOT}/failed"
+  fi
   exit "${code}"
 }
 trap finish EXIT
@@ -59,7 +73,37 @@ BUILD_COMMAND=(
 )
 printf '%q ' "${BUILD_COMMAND[@]}" > "${RUN_ROOT}/provenance/build.command.txt"
 printf '\n' >> "${RUN_ROOT}/provenance/build.command.txt"
-"${BUILD_COMMAND[@]}" 2>&1 | tee "${RUN_ROOT}/logs/build.log"
+if [[ -f "${DATASET_DIR}/metadata.json" ]]; then
+  "${PY}" - "${DATASET_DIR}/metadata.json" <<'PY'
+import json
+import sys
+
+metadata = json.load(open(sys.argv[1], encoding="utf-8"))
+expected_sequences = [
+    "MOT17-02-FRCNN", "MOT17-04-FRCNN", "MOT17-05-FRCNN",
+    "MOT17-09-FRCNN", "MOT17-10-FRCNN", "MOT17-11-FRCNN",
+    "MOT17-13-FRCNN",
+]
+checks = {
+    "split_policy": "train_all",
+    "candidate_types": ["A"],
+    "train_sequences": expected_sequences,
+    "val_sequences": expected_sequences,
+    "label_schema_version": 3,
+    "cache_schema_version": 3,
+}
+for field, expected in checks.items():
+    if metadata.get(field) != expected:
+        raise SystemExit(
+            f"Refusing incompatible diagnostic dataset: {field}="
+            f"{metadata.get(field)!r}, expected {expected!r}"
+        )
+PY
+  echo "Reusing strictly validated train-all dataset: ${DATASET_DIR}" \
+    | tee "${RUN_ROOT}/logs/build.log"
+else
+  "${BUILD_COMMAND[@]}" 2>&1 | tee "${RUN_ROOT}/logs/build.log"
+fi
 
 TRAIN_COMMAND=(
   "${PY}" -m agentguard.cli train_student_v0
@@ -70,6 +114,9 @@ TRAIN_COMMAND=(
   --dataset-dir "${DATASET_DIR}" --checkpoint-dir "${CHECKPOINT_DIR}"
   --skip-tgr-training
 )
+if [[ -n "${RESUME_FROM}" ]]; then
+  TRAIN_COMMAND+=(--iwg-resume-checkpoint "${RESUME_FROM}")
+fi
 printf '%q ' "${TRAIN_COMMAND[@]}" > "${RUN_ROOT}/provenance/train.command.txt"
 printf '\n' >> "${RUN_ROOT}/provenance/train.command.txt"
 "${TRAIN_COMMAND[@]}" 2>&1 | tee "${RUN_ROOT}/logs/train.log"
@@ -142,3 +189,4 @@ manifest = {
 )
 print(json.dumps(manifest, indent=2, sort_keys=True))
 PY
+pipeline_complete=1

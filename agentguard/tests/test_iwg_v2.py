@@ -100,6 +100,23 @@ def test_iwg_forward_selects_last_valid_position():
         torch.testing.assert_close(single[key], sequence[key][:, 3], atol=1e-6, rtol=0.0)
 
 
+def test_iwg_single_forward_transforms_one_window_per_sample():
+    model = IWG(reid_dim=16).eval()
+    inputs = _inputs(batch_size=3)
+    transformed_batch_sizes = []
+    handle = model.transformer.register_forward_pre_hook(
+        lambda _module, args: transformed_batch_sizes.append(args[0].shape[0])
+    )
+    try:
+        with torch.no_grad():
+            model(**inputs)
+            model.forward_sequence(**inputs)
+    finally:
+        handle.remove()
+
+    assert transformed_batch_sizes == [3, 18]
+
+
 def test_iwg_v2_heads_have_nonlinearity_and_normalization():
     model = IWG(reid_dim=16)
     for head in (
