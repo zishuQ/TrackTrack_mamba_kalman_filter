@@ -42,6 +42,10 @@ elif 'MOT20' in args.dataset:
         args.data_path = args.data_dir + 'MOT20/train/'
     else:
         args.data_path = args.data_dir + 'MOT20/test/'
+elif 'sportsmot' in args.dataset.lower():
+    args.data_path = args.data_dir + 'SportsMOT/dataset/' + (
+        'val/' if args.mode == 'val' else 'test/'
+    )
 else:
     args.data_path = args.data_dir + 'DanceTrack/' + ('val/' if args.mode == 'val' else 'test/')
 

@@ -71,10 +71,17 @@ def set_parameters(args, vid_name, mode):
             args.det_thr, args.init_thr = 0.40, 0.40
         args.match_thr = 0.55
 
-    elif 'SportsMOT' in vid_name or 'sportsmot' in vid_name.lower():
+    elif (
+        'SportsMOT' in vid_name
+        or 'sportsmot' in vid_name.lower()
+        or vid_name.startswith('v_')
+    ):
         if mode == 'val':
             _set_detection_cache_paths(args, 'sportsmot_val')
             args.data_path = args.data_dir + 'SportsMOT/dataset/val/'
+        elif mode in ('train', 'train_custom', 'all'):
+            _set_detection_cache_paths(args, 'sportsmot_train')
+            args.data_path = args.data_dir + 'SportsMOT/dataset/train/'
         else:
             _set_detection_cache_paths(args, 'sportsmot_test')
             args.data_path = args.data_dir + 'SportsMOT/dataset/test/'
@@ -88,6 +95,9 @@ def set_parameters(args, vid_name, mode):
         if mode == 'val':
             _set_detection_cache_paths(args, 'dance_val')
             args.data_path = args.data_dir + 'DanceTrack/val/'
+        elif mode in ('train', 'train_custom', 'all'):
+            _set_detection_cache_paths(args, 'dance_train')
+            args.data_path = args.data_dir + 'DanceTrack/train/'
         else:
             _set_detection_cache_paths(args, 'dance_test')
             args.data_path = args.data_dir + 'DanceTrack/test/'
@@ -95,7 +105,7 @@ def set_parameters(args, vid_name, mode):
         # Baseline Setting
         args.det_thr = 0.60
         args.init_thr = 0.60
-        args.match_thr = 0.80 if mode == 'val' else 0.60
+        args.match_thr = 0.80 if mode != 'test' else 0.60
 
 
 def write_results(filename, results):

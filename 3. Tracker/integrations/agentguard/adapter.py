@@ -493,6 +493,13 @@ class AgentGuardTrackerAdapter:
                 frame_id=event.frame_id,
                 has_detection=event.has_detection,
             )
+        elif self.runtime.mode == "iwg-attn":
+            result = self.runtime.run_iwg_attn_inference(
+                track_id,
+                seq,
+                frame_id=event.frame_id,
+                has_detection=event.has_detection,
+            )
         else:
             result = self.runtime.run_iwg_inference(seq)
 
@@ -548,6 +555,13 @@ class AgentGuardTrackerAdapter:
 
         if self.runtime.mode == "joint":
             results = self.runtime.run_joint_batch_inference(
+                [track_id for track_id, _event in items],
+                sequences,
+                frame_ids=[event.frame_id for _track_id, event in items],
+                has_detection=[event.has_detection for _track_id, event in items],
+            )
+        elif self.runtime.mode == "iwg-attn":
+            results = self.runtime.run_iwg_attn_batch_inference(
                 [track_id for track_id, _event in items],
                 sequences,
                 frame_ids=[event.frame_id for _track_id, event in items],
@@ -641,15 +655,34 @@ class AgentGuardTrackerAdapter:
             if self.runtime.mode == "full":
                 _event_buffer, window_buffer = self.runtime.get_or_create_buffer(track_id)
 
-        if not is_capture and self.runtime.mode == "joint":
+        if not is_capture and self.runtime.mode in {"joint", "iwg-attn"}:
+            fb = self.runtime.feature_builder
+            rd = self.reid_dim
+            src_state = event.pre_update_state or event.frame_start_state
+            if src_state is not None and src_state.feature.size > 0:
+                event.track_feature = np.asarray(
+                    src_state.feature, dtype=np.float64
+                ).reshape(-1)
+            else:
+                event.track_feature = np.zeros(rd, dtype=np.float64)
+            event.detection_feature = np.zeros(rd, dtype=np.float64)
+            event.scalar_features = fb.compute_scalar(event)
             history = event_buffer.get_sequence()
             sequence = history[-5:] + [event]
-            result = self.runtime.run_joint_inference(
-                track_id,
-                sequence,
-                frame_id=event.frame_id,
-                has_detection=False,
-            )
+            if self.runtime.mode == "joint":
+                result = self.runtime.run_joint_inference(
+                    track_id,
+                    sequence,
+                    frame_id=event.frame_id,
+                    has_detection=False,
+                )
+            else:
+                result = self.runtime.run_iwg_attn_inference(
+                    track_id,
+                    sequence,
+                    frame_id=event.frame_id,
+                    has_detection=False,
+                )
             event.iwg_policy_probs = result["policy_probs"].copy()
 
         event.iwg_gate = np.array([0.0, 0.0], dtype=np.float64)

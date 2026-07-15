@@ -3250,6 +3250,149 @@ def _cmd_validate_iwg_tsrm_checkpoint(args: argparse.Namespace) -> None:
         Path(args.output).write_text(text + "\n")
 
 
+def _add_build_iwg_attn_data_parser(
+    subparsers: argparse._SubParsersAction,
+) -> None:
+    parser = subparsers.add_parser(
+        "build_iwg_attn_data",
+        help="Build train-all causal six-event windows for safe-direct IWG+RG-CMA.",
+    )
+    parser.add_argument(
+        "--dataset",
+        default="MOT17",
+        choices=["MOT17", "MOT20", "DanceTrack", "SportsMOT"],
+    )
+    parser.add_argument(
+        "--mode",
+        default="all",
+        choices=["all", "train", "trainval"],
+        help="Training source split; trainval is supported for SportsMOT only.",
+    )
+    parser.add_argument("--event-cache-root", required=True)
+    parser.add_argument("--detection-cache-root", required=True)
+    parser.add_argument("--label-dir", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--max-frame-gap", type=int, default=30)
+
+
+def _cmd_build_iwg_attn_data(args: argparse.Namespace) -> None:
+    from agentguard.datasets.iwg_attn_dataset import build_iwg_attn_dataset
+
+    metadata = build_iwg_attn_dataset(
+        dataset=args.dataset,
+        split=args.mode,
+        event_cache_root=args.event_cache_root,
+        detection_cache_root=args.detection_cache_root,
+        label_dir=args.label_dir,
+        output_dir=args.output_dir,
+        max_frame_gap=args.max_frame_gap,
+    )
+    print(json.dumps(metadata, indent=2, sort_keys=True))
+
+
+def _add_train_iwg_attn_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "train_iwg_attn",
+        help="Train fixed safe-direct IWG+RG-CMA for 100 or 200 epochs.",
+    )
+    parser.add_argument("--dataset-dir", required=True)
+    parser.add_argument("--checkpoint-dir", required=True)
+    parser.add_argument("--device", default="cuda", choices=["cuda"])
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--batch-size", type=int, default=2048)
+    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--warmup-epochs", type=int, default=1)
+    parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--init-checkpoint",
+        default="",
+        help=(
+            "Strictly warm-start model weights from an IWG RG-CMA checkpoint. "
+            "Optimizer, scheduler, epoch, and normalization are not restored."
+        ),
+    )
+    parser.add_argument("--max-train-samples", type=int, default=0)
+    parser.add_argument(
+        "--memory-shards",
+        type=int,
+        default=1,
+        help="Split every sequence into this many contiguous training fractions.",
+    )
+    parser.add_argument(
+        "--epochs-per-shard",
+        type=int,
+        default=0,
+        help="Epochs per memory shard (0 infers from total epochs and cycles).",
+    )
+    parser.add_argument("--shard-cycles", type=int, default=1)
+
+
+def _cmd_train_iwg_attn(args: argparse.Namespace) -> None:
+    from agentguard.training.train_iwg_rg_cma import train_iwg_rg_cma
+
+    config = {
+        "dataset_dir": str(Path(args.dataset_dir).resolve()),
+        "checkpoint_dir": str(Path(args.checkpoint_dir).resolve()),
+        "device": args.device,
+        "epochs": int(args.epochs),
+        "batch_size": int(args.batch_size),
+        "num_workers": int(args.num_workers),
+        "lr": float(args.lr),
+        "weight_decay": float(args.weight_decay),
+        "warmup_epochs": int(args.warmup_epochs),
+        "grad_clip": float(args.grad_clip),
+        "seed": int(args.seed),
+        "init_checkpoint": (
+            str(Path(args.init_checkpoint).resolve()) if args.init_checkpoint else ""
+        ),
+        "amp": False,
+        "max_train_samples": int(args.max_train_samples),
+        "memory_shards": int(args.memory_shards),
+        "epochs_per_shard": int(args.epochs_per_shard),
+        "shard_cycles": int(args.shard_cycles),
+    }
+    summary = train_iwg_rg_cma(config)
+    checkpoint_dir = Path(config["checkpoint_dir"])
+    (checkpoint_dir / "training_summary.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n"
+    )
+    print(json.dumps(summary, indent=2, sort_keys=True))
+
+
+def _add_validate_iwg_attn_checkpoint_parser(
+    subparsers: argparse._SubParsersAction,
+) -> None:
+    parser = subparsers.add_parser(
+        "validate_iwg_attn_checkpoint",
+        help="Strictly load and evaluate an IWG RG-CMA checkpoint.",
+    )
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--dataset-dir", required=True)
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--max-batches", type=int, default=1)
+    parser.add_argument("--output", default="")
+
+
+def _cmd_validate_iwg_attn_checkpoint(args: argparse.Namespace) -> None:
+    from agentguard.training.train_iwg_rg_cma import (
+        validate_iwg_rg_cma_checkpoint,
+    )
+
+    report = validate_iwg_rg_cma_checkpoint(
+        checkpoint_path=args.checkpoint,
+        dataset_dir=args.dataset_dir,
+        device=args.device,
+        max_batches=args.max_batches,
+    )
+    text = json.dumps(report, indent=2, sort_keys=True)
+    print(text)
+    if args.output:
+        Path(args.output).write_text(text + "\n")
+
+
 # ===================================================================
 # Main entry point
 # ===================================================================
@@ -3298,6 +3441,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     _add_build_iwg_tsrm_data_parser(subparsers)
     _add_train_iwg_tsrm_parser(subparsers)
     _add_validate_iwg_tsrm_checkpoint_parser(subparsers)
+    _add_build_iwg_attn_data_parser(subparsers)
+    _add_train_iwg_attn_parser(subparsers)
+    _add_validate_iwg_attn_checkpoint_parser(subparsers)
 
     parsed = parser.parse_args(argv)
 
@@ -3320,6 +3466,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         "build_iwg_tsrm_data": _cmd_build_iwg_tsrm_data,
         "train_iwg_tsrm": _cmd_train_iwg_tsrm,
         "validate_iwg_tsrm_checkpoint": _cmd_validate_iwg_tsrm_checkpoint,
+        "build_iwg_attn_data": _cmd_build_iwg_attn_data,
+        "train_iwg_attn": _cmd_train_iwg_attn,
+        "validate_iwg_attn_checkpoint": _cmd_validate_iwg_attn_checkpoint,
     }
 
     handler = dispatch.get(parsed.command)

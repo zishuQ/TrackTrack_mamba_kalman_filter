@@ -344,7 +344,11 @@ def build_compact_rollout_labels_for_sequence(
     if not candidate_types:
         candidate_types = {"A"}
 
-    reader = CompactEventCacheReader(event_cache_dir, detection_cache_dir)
+    reader = CompactEventCacheReader(
+        event_cache_dir,
+        detection_cache_dir,
+        max_cached_shards=16,
+    )
     gt_reader = GTReader(str(gt_root), str(reader.manifest["sequence"]))
     motion_model = NSAKalmanFilter()
     vote_state = TrackIdentityVoteState()
@@ -371,7 +375,7 @@ def build_compact_rollout_labels_for_sequence(
                     and event.detection.score >= 0.6
                 ):
                     proto_features[(event.sequence, detection_gt_id)].append(
-                        event.detection.feature.reshape(-1).astype(np.float64)
+                        event.detection.feature.reshape(-1).astype(np.float32)
                     )
             target_info[(int(record["event_shard_id"]), int(record["event_offset"]))] = {
                 "target_gt_id": target_gt_id,
@@ -385,6 +389,7 @@ def build_compact_rollout_labels_for_sequence(
         for key, feats in proto_features.items():
             if len(feats) >= 3:
                 prototypes[key] = IdentityPrototypeBuilder.build_prototype(feats)
+        proto_features.clear()
 
         raw_labels: List[Dict[str, Any]] = []
         motion_benefits: List[float] = []

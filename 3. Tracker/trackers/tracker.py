@@ -132,6 +132,7 @@ class Tracker(object):
                 iwg_model = None
                 tgr_model = None
                 joint_model = None
+                iwg_attn_model = None
                 checkpoint_reid_dim = None
                 checkpoint_norm_stats = None
 
@@ -190,12 +191,39 @@ class Tracker(object):
                     joint_model.load_state_dict(checkpoint['model_state_dict'], strict=True)
                     joint_model.eval()
 
+                if ag_mode == 'iwg-attn':
+                    if joint_ckpt is None:
+                        raise RuntimeError(
+                            "Combined AgentGuard checkpoint required for iwg-attn mode"
+                        )
+                    from agentguard.features.normalization import NormalizationStats
+                    from agentguard.training.train_iwg_rg_cma import (
+                        load_iwg_rg_cma_checkpoint,
+                    )
+
+                    iwg_attn_model, checkpoint = load_iwg_rg_cma_checkpoint(
+                        joint_ckpt, map_location='cpu'
+                    )
+                    checkpoint_reid_dim = int(checkpoint['reid_dim'])
+                    checkpoint_norm_stats = NormalizationStats()
+                    checkpoint_norm_stats.mean = np.asarray(
+                        checkpoint['normalization_mean'], dtype=np.float64
+                    )
+                    checkpoint_norm_stats.std = np.asarray(
+                        checkpoint['normalization_std'], dtype=np.float64
+                    )
+                    runtime_config['iwg_attn_max_frame_gap'] = int(
+                        checkpoint['max_frame_gap']
+                    )
+                    iwg_attn_model.eval()
+
                 runtime = AgentGuardRuntime(
                     runtime_config,
                     iwg_model,
                     tgr_model,
                     device,
                     joint_model=joint_model,
+                    iwg_attn_model=iwg_attn_model,
                 )
                 runtime.event_sink = event_sink
 

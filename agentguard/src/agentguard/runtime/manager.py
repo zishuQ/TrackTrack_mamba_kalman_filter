@@ -36,6 +36,7 @@ class AgentGuardRuntime:
         tgr_model: Optional[torch.nn.Module] = None,
         device: str = "cpu",
         joint_model: Optional[torch.nn.Module] = None,
+        iwg_attn_model: Optional[torch.nn.Module] = None,
     ):
         self.config = config
         self.mode = config.get("mode", "off")
@@ -43,12 +44,19 @@ class AgentGuardRuntime:
         self.iwg = iwg_model
         self.tgr = tgr_model
         self.joint_model = joint_model
+        self.iwg_attn_model = iwg_attn_model
         if self.mode == "joint":
             if self.joint_model is None:
                 raise RuntimeError("joint mode requires a combined IWGTSRM model")
             if self.tgr is not None:
                 raise RuntimeError("joint mode must not instantiate TGR")
             self.iwg = self.joint_model.iwg
+        if self.mode == "iwg-attn":
+            if self.iwg_attn_model is None:
+                raise RuntimeError("iwg-attn mode requires a combined IWG RG-CMA model")
+            if self.tgr is not None or self.joint_model is not None:
+                raise RuntimeError("iwg-attn mode must not instantiate TGR or TSRM")
+            self.iwg = self.iwg_attn_model.iwg
         if self.iwg is not None:
             self.iwg.to(device)
             self.iwg.eval()
@@ -58,6 +66,9 @@ class AgentGuardRuntime:
         if self.joint_model is not None:
             self.joint_model.to(device)
             self.joint_model.eval()
+        if self.iwg_attn_model is not None:
+            self.iwg_attn_model.to(device)
+            self.iwg_attn_model.eval()
 
         # Per-track state
         self.event_buffers: Dict[int, EventBuffer] = {}
@@ -89,6 +100,10 @@ class AgentGuardRuntime:
         if self.joint_window_size < 1:
             raise ValueError("joint_window_size must be positive")
         self.joint_max_frame_gap = int(config.get("joint_max_frame_gap", 30))
+        self.iwg_attn_output = str(config.get("iwg_attn_output", "final"))
+        if self.iwg_attn_output not in {"base", "final"}:
+            raise ValueError("iwg_attn_output must be 'base' or 'final'")
+        self.iwg_attn_max_frame_gap = int(config.get("iwg_attn_max_frame_gap", 30))
 
         # Statistics
         self.stats = RuntimeStatistics()
@@ -180,6 +195,16 @@ class AgentGuardRuntime:
             event_buffer.clear()
         if temporal_buffer is not None:
             temporal_buffer.clear()
+        return True
+
+    def _reset_iwg_attn_history_for_frame(self, track_id: int, frame_id: int) -> bool:
+        event_buffer = self.event_buffers.get(track_id)
+        if event_buffer is None or not event_buffer.events:
+            return False
+        gap = int(frame_id) - int(event_buffer.events[-1].frame_id)
+        if 0 < gap <= self.iwg_attn_max_frame_gap:
+            return False
+        event_buffer.clear()
         return True
 
     # ------------------------------------------------------------------
@@ -564,6 +589,111 @@ class AgentGuardRuntime:
                 "iwg_gate_residual": iwg_gate_residual[i],
             }
             for i in range(len(event_sequences))
+        ]
+
+    def run_iwg_attn_inference(
+        self,
+        track_id: int,
+        events_sequence: List[Optional[TrackEvent]],
+        *,
+        frame_id: int,
+        has_detection: bool,
+    ) -> Dict[str, np.ndarray]:
+        return self.run_iwg_attn_batch_inference(
+            [track_id],
+            [events_sequence],
+            frame_ids=[frame_id],
+            has_detection=[has_detection],
+        )[0]
+
+    def run_iwg_attn_batch_inference(
+        self,
+        track_ids: List[int],
+        event_sequences: List[List[Optional[TrackEvent]]],
+        *,
+        frame_ids: List[int],
+        has_detection: List[bool],
+    ) -> List[Dict[str, np.ndarray]]:
+        if self.mode != "iwg-attn" or self.iwg_attn_model is None:
+            raise RuntimeError("run_iwg_attn_batch_inference requires iwg-attn mode")
+        size = len(track_ids)
+        if not (
+            len(event_sequences) == len(frame_ids) == len(has_detection) == size
+        ):
+            raise ValueError("iwg-attn batch inputs must have equal lengths")
+        if size == 0:
+            return []
+        if len(set(track_ids)) != size:
+            raise ValueError("iwg-attn batch cannot contain duplicate track ids")
+        if self.feature_builder is None:
+            raise RuntimeError("iwg-attn runtime feature builder is not initialized")
+
+        event_sequences = list(event_sequences)
+        for index, (track_id, frame_id) in enumerate(zip(track_ids, frame_ids)):
+            if self._reset_iwg_attn_history_for_frame(track_id, frame_id):
+                sequence = event_sequences[index]
+                if not sequence or sequence[-1] is None:
+                    raise ValueError("iwg-attn sequence must end with the current event")
+                event_sequences[index] = [None] * (len(sequence) - 1) + [sequence[-1]]
+
+        device = next(self.iwg_attn_model.parameters()).device
+        inputs = self.feature_builder.build_iwg_batch_input(event_sequences)
+        padding = inputs["mask"].to(device, non_blocking=True)
+        detection = torch.zeros_like(padding)
+        for batch_index, sequence in enumerate(event_sequences):
+            for position, event in enumerate(sequence):
+                detection[batch_index, position] = bool(
+                    event is not None and event.has_detection
+                )
+        reset = torch.zeros_like(padding)
+        for batch_index in range(size):
+            first_valid = int((~padding[batch_index]).nonzero()[0, 0])
+            reset[batch_index, first_valid] = True
+        with torch.inference_mode():
+            outputs = self.iwg_attn_model(
+                inputs["track_feats"].to(device, non_blocking=True),
+                inputs["det_feats"].to(device, non_blocking=True),
+                inputs["scalar_feats"].to(device, non_blocking=True),
+                padding,
+                detection,
+                reset,
+            )
+        base = outputs["base_gate"].float().cpu().numpy()
+        final = outputs["refined_gate"].float().cpu().numpy()
+        correction = outputs["gate_correction"].float().cpu().numpy()
+        applied = base if self.iwg_attn_output == "base" else final
+        policy = outputs["policy_probs"].float().cpu().numpy()
+        cue = outputs["cue"].float().cpu().numpy()
+        risk = outputs["risk"].float().cpu().numpy()
+        event_embedding = outputs["event_embedding"].float().cpu().numpy()
+        appearance_token = outputs["appearance_token"].float().cpu().numpy()
+        motion_token = outputs["motion_token"].float().cpu().numpy()
+        motion_attention = outputs["motion_attention_weights"].float().cpu().numpy()
+        appearance_attention = outputs[
+            "appearance_attention_weights"
+        ].float().cpu().numpy()
+        cross_attention = outputs[
+            "cross_modal_attention_weights"
+        ].float().cpu().numpy()
+        return [
+            {
+                "gate": applied[index],
+                "base_gate": base[index],
+                "final_gate": final[index],
+                "refined_gate": final[index],
+                "gate_correction": correction[index],
+                "temporal_gate_correction": correction[index],
+                "policy_probs": policy[index],
+                "cue": cue[index],
+                "risk": risk[index],
+                "event_embedding": event_embedding[index],
+                "appearance_token": appearance_token[index],
+                "motion_token": motion_token[index],
+                "motion_attention_weights": motion_attention[index],
+                "appearance_attention_weights": appearance_attention[index],
+                "cross_modal_attention_weights": cross_attention[index],
+            }
+            for index in range(size)
         ]
 
     def run_joint_inference(

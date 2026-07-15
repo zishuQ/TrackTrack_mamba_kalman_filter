@@ -121,8 +121,8 @@ def make_parser():
 
     # AgentGuard parameters
     parser.add_argument("--agentguard-mode", type=str, default="off",
-                       choices=["off", "iwg", "full", "joint"],
-                       help="AgentGuard mode: off, iwg, full replay, or causal joint IWG+TSRM")
+                       choices=["off", "iwg", "full", "joint", "iwg-attn"],
+                       help="AgentGuard mode: off, iwg, full, joint IWG+TSRM, or IWG+RG-CMA")
     parser.add_argument("--iwg-checkpoint", type=str, default=None,
                        help="Path to IWG model checkpoint (.pt)")
     parser.add_argument("--tgr-checkpoint", type=str, default=None,
@@ -131,6 +131,8 @@ def make_parser():
                        help="Path to combined IWG+TSRM checkpoint (.pt)")
     parser.add_argument("--joint-output", choices=["base", "final"], default="final",
                        help="Apply base or TSRM-corrected gate from a combined checkpoint")
+    parser.add_argument("--iwg-attn-output", choices=["base", "final"], default="final",
+                       help="Apply base or RG-CMA-refined gate from an IWG-attn checkpoint")
     parser.add_argument("--agentguard-device", type=str, default="cpu",
                        help="Device for AgentGuard inference (cpu or cuda)")
     parser.add_argument(
@@ -239,7 +241,14 @@ def _agentguard_stats(tracker):
     return {f"agentguard_{key}": value for key, value in stats.summary().items()}
 
 
-def _detection_cache_split(mode):
+def _detection_cache_split(dataset, mode):
+    lowered = str(dataset).lower()
+    if 'dance' in lowered or 'sports' in lowered:
+        if mode in ('train', 'train_custom', 'all'):
+            return 'train'
+        if mode in ('val', 'val_custom'):
+            return 'val'
+        return mode
     if mode in ('val', 'val_custom', 'train', 'train_custom', 'all'):
         return 'all' if mode == 'all' else 'train'
     return mode
@@ -249,7 +258,7 @@ def _sequence_detection_cache_dir(args, vid_name):
     return (
         Path(args.detection_cache_root)
         / args.dataset
-        / _detection_cache_split(args.mode)
+        / _detection_cache_split(args.dataset, args.mode)
         / vid_name
     )
 
@@ -443,14 +452,18 @@ def run():
         trackers_to_eval += '_agentguard_full'
     elif args.agentguard_mode == 'joint':
         trackers_to_eval += f'_agentguard_joint_{args.joint_output}'
+    elif args.agentguard_mode == 'iwg-attn':
+        trackers_to_eval += f'_agentguard_iwg_attn_{args.iwg_attn_output}'
     result_folder_base = os.path.join(args.output_dir, trackers_to_eval)
     if 'dance' in args.dataset.lower() and args.mode == 'test':
         result_folder = os.path.join(result_folder_base, 'tracker')
+        post_result_folder = os.path.join(result_folder_base + '_post', 'tracker')
     else:
         result_folder = result_folder_base
+        post_result_folder = result_folder_base + '_post'
 
     os.makedirs(result_folder, exist_ok=True)
-    os.makedirs(result_folder_base + '_post/', exist_ok=True)
+    os.makedirs(post_result_folder, exist_ok=True)
 
     if _has_sequence_detection_cache(args):
         print(f"Using per-sequence mmap detection cache from {args.detection_cache_root}")
@@ -479,8 +492,8 @@ def run():
         print('Running post-processing...')
         for result_file in os.listdir(result_folder):
             # Set Path
-            path_in = result_folder + '/' + str(result_file)
-            path_out = result_folder + '_post/' + str(result_file)
+            path_in = os.path.join(result_folder, str(result_file))
+            path_out = os.path.join(post_result_folder, str(result_file))
         
             # Link for DanceTrack (AFLink for non-linear dance motion)
             if 'dance' in args.dataset.lower():
@@ -533,6 +546,8 @@ if __name__ == "__main__":
             parser.error("--tgr-checkpoint is required when --agentguard-mode=full")
     if args.agentguard_mode == 'joint' and args.agentguard_checkpoint is None:
         parser.error("--agentguard-checkpoint is required when --agentguard-mode=joint")
+    if args.agentguard_mode == 'iwg-attn' and args.agentguard_checkpoint is None:
+        parser.error("--agentguard-checkpoint is required when --agentguard-mode=iwg-attn")
 
     # Set random seed
     random.seed(args.seed)

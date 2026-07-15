@@ -188,6 +188,7 @@ class CompactEventCacheReader:
         cache_dir: str | os.PathLike[str],
         detection_cache_dir: str | os.PathLike[str] | None = None,
         allow_legacy_schema: bool = False,
+        max_cached_shards: int | None = None,
     ) -> None:
         self.cache_dir = Path(cache_dir)
         with (self.cache_dir / "manifest.json").open("r") as f:
@@ -211,6 +212,9 @@ class CompactEventCacheReader:
         self.association_shards = self._glob("associations", required=False)
         self.frame_shards = self._glob("frames", required=False)
         self._loaded: dict[tuple[str, int], list[dict]] = {}
+        self.max_cached_shards = (
+            None if max_cached_shards is None else max(0, int(max_cached_shards))
+        )
         self._frame_by_index: dict[int, dict] | None = None
 
         self.detection_cache = None
@@ -235,7 +239,9 @@ class CompactEventCacheReader:
         shard_id = int(shard_id)
         key = (kind, shard_id)
         if key in self._loaded:
-            return self._loaded[key]
+            data = self._loaded.pop(key)
+            self._loaded[key] = data
+            return data
         paths = {
             "events": self.event_shards,
             "states": self.state_shards,
@@ -247,7 +253,13 @@ class CompactEventCacheReader:
         data = torch.load(paths[shard_id], weights_only=False, encoding="bytes")
         if not isinstance(data, list):
             raise TypeError(f"{paths[shard_id]} must contain a list, got {type(data).__name__}")
-        self._loaded[key] = data
+        if self.max_cached_shards != 0:
+            self._loaded[key] = data
+            while (
+                self.max_cached_shards is not None
+                and len(self._loaded) > self.max_cached_shards
+            ):
+                self._loaded.pop(next(iter(self._loaded)))
         return data
 
     def iter_event_records(self, limit: int | None = None):

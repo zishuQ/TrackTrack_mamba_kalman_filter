@@ -133,11 +133,13 @@ def run():
     result_folder_base = os.path.join(args.output_dir, trackers_to_eval)
     if 'dance' in args.dataset.lower() and args.mode == 'test':
         result_folder = os.path.join(result_folder_base, 'tracker')
+        post_result_folder = os.path.join(result_folder_base + '_post', 'tracker')
     else:
         result_folder = result_folder_base
+        post_result_folder = result_folder_base + '_post'
 
     os.makedirs(result_folder, exist_ok=True)
-    os.makedirs(result_folder_base + '_post/', exist_ok=True)
+    os.makedirs(post_result_folder, exist_ok=True)
 
     detections, detections_95 = load_detection_pair(args.target_pickle_path, args.pickle_path_95)
 
@@ -152,8 +154,8 @@ def run():
     if args.use_post:
         print('Running post-processing...')
         for result_file in os.listdir(result_folder):
-            path_in = result_folder + '/' + str(result_file)
-            path_out = result_folder + '_post/' + str(result_file)
+            path_in = os.path.join(result_folder, str(result_file))
+            path_out = os.path.join(post_result_folder, str(result_file))
 
             if 'Dance' in args.dataset:
                 model = PostLinker()

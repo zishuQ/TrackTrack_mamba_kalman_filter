@@ -33,7 +33,13 @@ class EventEncoder(nn.Module):
             nn.LayerNorm(128),
         )
 
-    def forward(self, track_feat: torch.Tensor, det_feat: torch.Tensor, scalar_feat: torch.Tensor) -> torch.Tensor:
+    def forward_with_modal_tokens(
+        self,
+        track_feat: torch.Tensor,
+        det_feat: torch.Tensor,
+        scalar_feat: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return the fused embedding and its appearance/motion components."""
         track_emb = self.reid_norm(self.reid_proj(track_feat))
         det_emb = self.reid_norm(self.reid_proj(det_feat))
 
@@ -46,4 +52,15 @@ class EventEncoder(nn.Module):
 
         out = torch.cat([interaction_out, scalar_out], dim=-1)
         out = self.fusion(out)
-        return out
+        return out, interaction_out, scalar_out
+
+    def forward(
+        self,
+        track_feat: torch.Tensor,
+        det_feat: torch.Tensor,
+        scalar_feat: torch.Tensor,
+    ) -> torch.Tensor:
+        fused, _appearance_token, _motion_token = self.forward_with_modal_tokens(
+            track_feat, det_feat, scalar_feat
+        )
+        return fused
