@@ -90,6 +90,57 @@ def test_iwg_rg_cma_checkpoint_strict_roundtrip(tmp_path):
         validate_iwg_rg_cma_checkpoint_contract(unsupported)
 
 
+def test_mamba_hybrid_checkpoint_requires_strict_supervision_provenance():
+    checkpoint = {
+        **_checkpoint(),
+        "motion_target_mode": "mamba_hybrid",
+        "mamba_distill_label_root": "/labels",
+        "mamba_checkpoint_path": "/teacher.pt",
+        "mamba_checkpoint_sha256": "a" * 64,
+        "mamba_teacher_config": {"profile": "MOT20/exp31_1"},
+        "mamba_teacher_config_sha256": "b" * 64,
+        "teacher_sidecar_sha256": "c" * 64,
+        "distill_label_sha256": "d" * 64,
+        "teacher_weight_cap": 0.5,
+        "advantage_horizon": 5,
+        "tau_adv": 0.1,
+        "base_nsa_cache_sha256": "e" * 64,
+        "base_nsa_label_sha256": "f" * 64,
+    }
+    validate_iwg_rg_cma_checkpoint_contract(checkpoint)
+
+    missing = dict(checkpoint)
+    missing.pop("teacher_sidecar_sha256")
+    with pytest.raises(ValueError, match="lacks provenance"):
+        validate_iwg_rg_cma_checkpoint_contract(missing)
+
+    wrong_cap = dict(checkpoint)
+    wrong_cap["teacher_weight_cap"] = 0.75
+    with pytest.raises(ValueError, match="teacher_weight_cap"):
+        validate_iwg_rg_cma_checkpoint_contract(wrong_cap)
+
+
+def test_mamba_native_checkpoint_requires_event_provenance():
+    checkpoint = {
+        **_checkpoint(),
+        "motion_target_mode": "mamba_native",
+        "event_source": "mamba_native",
+        "motion_label_mode": "mamba_native_current",
+        "mamba_checkpoint_path": "/teacher.pt",
+        "mamba_checkpoint_sha256": "a" * 64,
+        "mamba_teacher_config": {"profile": "MOT20/exp31_1"},
+        "mamba_teacher_config_sha256": "b" * 64,
+        "native_event_cache_sha256": "c" * 64,
+        "native_label_sha256": "d" * 64,
+    }
+    validate_iwg_rg_cma_checkpoint_contract(checkpoint)
+
+    missing = dict(checkpoint)
+    missing.pop("native_event_cache_sha256")
+    with pytest.raises(ValueError, match="lacks provenance"):
+        validate_iwg_rg_cma_checkpoint_contract(missing)
+
+
 def test_iwg_rg_cma_formal_batch_size_is_explicit():
     base = {
         "seed": 42,
@@ -150,6 +201,14 @@ def test_iwg_rg_cma_warm_start_has_fixed_finetune_config():
         "shard_cycles": 1,
     }
     assert _validate_formal_config(config) == 1024
+    fifty_epoch = {
+        **config,
+        "epochs": 50,
+        "epochs_per_shard": 50,
+    }
+    assert _validate_formal_config(fifty_epoch) == 1024
+    with pytest.raises(ValueError, match="epochs must be one of"):
+        _validate_formal_config({**config, "epochs": 100, "epochs_per_shard": 100})
     with pytest.raises(ValueError, match="lr=1e-05"):
         _validate_formal_config({**config, "lr": 1e-4})
     with pytest.raises(ValueError, match="one full-data phase"):

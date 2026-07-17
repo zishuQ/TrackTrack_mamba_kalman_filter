@@ -35,8 +35,45 @@ COMPACT_IWG_LABEL_SCHEMA_SHA256 = hashlib.sha256(
         separators=(",", ":"),
     ).encode("utf-8")
 ).hexdigest()
+MAMBA_DISTILL_COMPACT_LABEL_SCHEMA_VERSION = 1
+MAMBA_DISTILL_COMPACT_LABEL_SCHEMA_DESCRIPTOR = {
+    **COMPACT_IWG_LABEL_SCHEMA_DESCRIPTOR,
+    "name": "agentguard_compact_iwg_mamba_hybrid_labels",
+    "version": MAMBA_DISTILL_COMPACT_LABEL_SCHEMA_VERSION,
+    "source": "nsa_safe_labels_plus_nsa_driven_mamba_shadow_v1",
+    "motion_target_mode": "mamba_hybrid",
+    "teacher_weight_cap": 0.5,
+    "advantage_horizon": 5,
+}
+MAMBA_DISTILL_COMPACT_LABEL_SCHEMA_SHA256 = hashlib.sha256(
+    json.dumps(
+        MAMBA_DISTILL_COMPACT_LABEL_SCHEMA_DESCRIPTOR,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+MAMBA_NATIVE_COMPACT_LABEL_SCHEMA_VERSION = 1
+MAMBA_NATIVE_COMPACT_LABEL_SCHEMA_DESCRIPTOR = {
+    **COMPACT_IWG_LABEL_SCHEMA_DESCRIPTOR,
+    "name": "agentguard_compact_iwg_mamba_native_labels",
+    "version": MAMBA_NATIVE_COMPACT_LABEL_SCHEMA_VERSION,
+    "source": "mamba_native_events_current_gt_safe_write_v1",
+    "motion_target_mode": "mamba_native",
+    "motion_label_mode": "mamba_native_current",
+}
+MAMBA_NATIVE_COMPACT_LABEL_SCHEMA_SHA256 = hashlib.sha256(
+    json.dumps(
+        MAMBA_NATIVE_COMPACT_LABEL_SCHEMA_DESCRIPTOR,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
 SUPPORTED_COMPACT_IWG_LABEL_SCHEMA_SHA256 = frozenset(
-    {COMPACT_IWG_LABEL_SCHEMA_SHA256}
+    {
+        COMPACT_IWG_LABEL_SCHEMA_SHA256,
+        MAMBA_DISTILL_COMPACT_LABEL_SCHEMA_SHA256,
+        MAMBA_NATIVE_COMPACT_LABEL_SCHEMA_SHA256,
+    }
 )
 
 COMPACT_LABEL_ARRAY_FILES = {
@@ -47,6 +84,14 @@ COMPACT_LABEL_ARRAY_FILES = {
     "risk_target": "risk_target.npy",
     "valid_channels": "valid_channels.npy",
     "sample_weight": "sample_weight.npy",
+}
+MAMBA_DISTILL_LABEL_ARRAY_FILES = {
+    "teacher_weight": "teacher_weight.npy",
+    "nsa_motion_target": "nsa_motion_target.npy",
+    "hybrid_motion_target": "hybrid_motion_target.npy",
+    "mamba_projection_gate": "mamba_projection_gate.npy",
+    "mamba_advantage": "mamba_advantage.npy",
+    "mamba_coverage": "mamba_coverage.npy",
 }
 
 
@@ -94,6 +139,8 @@ def build_current_rollout_compact_labels_for_sequence(
     gt_root: str | Path,
     output_root: str | Path,
     future_frames: int = 5,
+    motion_label_mode: str = "nsa_rollout",
+    max_events: int = 0,
 ) -> dict[str, Any]:
     from agentguard.v0_pipeline import build_compact_rollout_labels_for_sequence
 
@@ -113,18 +160,35 @@ def build_current_rollout_compact_labels_for_sequence(
         )
     cache_manifest_sha256 = _sha256_file(cache_manifest_path)
     detection_manifest_sha256 = _sha256_file(detection_manifest_path)
+    if motion_label_mode not in {"nsa_rollout", "mamba_native_current"}:
+        raise ValueError(f"unsupported motion_label_mode: {motion_label_mode!r}")
+    if motion_label_mode == "mamba_native_current":
+        if str(cache_manifest.get("event_source", "")) != "mamba_native":
+            raise ValueError(
+                "mamba_native_current labels require an event_source=mamba_native cache"
+            )
+        compact_schema_version = MAMBA_NATIVE_COMPACT_LABEL_SCHEMA_VERSION
+        compact_schema_sha256 = MAMBA_NATIVE_COMPACT_LABEL_SCHEMA_SHA256
+        motion_target_mode = "mamba_native"
+    else:
+        compact_schema_version = COMPACT_IWG_LABEL_SCHEMA_VERSION
+        compact_schema_sha256 = COMPACT_IWG_LABEL_SCHEMA_SHA256
+        motion_target_mode = "nsa"
     manifest_path = final_dir / "manifest.json"
     if manifest_path.is_file():
         existing = json.loads(manifest_path.read_text())
         if (
             existing.get("complete")
             and existing.get("compact_label_schema_sha256")
-            == COMPACT_IWG_LABEL_SCHEMA_SHA256
+            == compact_schema_sha256
             and existing.get("event_cache_manifest_sha256")
             == cache_manifest_sha256
             and existing.get("detection_cache_manifest_sha256")
             == detection_manifest_sha256
             and int(existing.get("future_frames", -1)) == int(future_frames)
+            and existing.get("motion_label_mode", "nsa_rollout")
+            == motion_label_mode
+            and int(existing.get("max_events", 0)) == int(max_events)
         ):
             return existing
         raise FileExistsError(f"refusing to overwrite stale compact labels: {final_dir}")
@@ -137,6 +201,8 @@ def build_current_rollout_compact_labels_for_sequence(
         gt_root,
         future_frames=int(future_frames),
         candidate_types={"A"},
+        motion_label_mode=motion_label_mode,
+        max_events=int(max_events),
     )
     for index, label in enumerate(labels):
         try:
@@ -209,12 +275,16 @@ def build_current_rollout_compact_labels_for_sequence(
         "detection_cache_manifest_sha256": detection_manifest_sha256,
         "gt_root": str(gt_root),
         "future_frames": int(future_frames),
+        "max_events": int(max_events),
+        "event_source": str(cache_manifest.get("event_source", "nsa")),
+        "motion_target_mode": motion_target_mode,
+        "motion_label_mode": motion_label_mode,
         "source_labels": len(labels),
         "retained_labels": len(labels),
         "retention_rate": 1.0,
         "rollout_summary": rollout_summary,
-        "compact_label_schema_version": COMPACT_IWG_LABEL_SCHEMA_VERSION,
-        "compact_label_schema_sha256": COMPACT_IWG_LABEL_SCHEMA_SHA256,
+        "compact_label_schema_version": compact_schema_version,
+        "compact_label_schema_sha256": compact_schema_sha256,
         "label_schema_version": ROLLOUT_LABEL_SCHEMA_VERSION,
         "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
         "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
@@ -222,6 +292,19 @@ def build_current_rollout_compact_labels_for_sequence(
         "array_files": COMPACT_LABEL_ARRAY_FILES,
         "array_sha256": file_hashes,
     }
+    if motion_target_mode == "mamba_native":
+        manifest.update(
+            {
+                "mamba_checkpoint_path": cache_manifest["mamba_checkpoint_path"],
+                "mamba_checkpoint_sha256": cache_manifest[
+                    "mamba_checkpoint_sha256"
+                ],
+                "mamba_teacher_config": cache_manifest["mamba_teacher_config"],
+                "mamba_teacher_config_sha256": cache_manifest[
+                    "mamba_teacher_config_sha256"
+                ],
+            }
+        )
     (temporary / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     )
@@ -258,6 +341,15 @@ def load_compact_label_arrays(
         name: np.load(sequence_dir / filename, mmap_mode="r", allow_pickle=False)
         for name, filename in COMPACT_LABEL_ARRAY_FILES.items()
     }
+    optional_files = manifest.get("distill_array_files", {})
+    for name, filename in optional_files.items():
+        if name not in MAMBA_DISTILL_LABEL_ARRAY_FILES:
+            raise ValueError(f"unknown compact distill label array: {name}")
+        if filename != MAMBA_DISTILL_LABEL_ARRAY_FILES[name]:
+            raise ValueError(f"unexpected compact distill label filename: {filename}")
+        arrays[name] = np.load(
+            sequence_dir / filename, mmap_mode="r", allow_pickle=False
+        )
     count = int(manifest["retained_labels"])
     if any(value.shape[0] != count for value in arrays.values()):
         raise ValueError(f"compact label array length mismatch in {sequence_dir}")

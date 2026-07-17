@@ -129,6 +129,43 @@ class TrackMamba(BaseTrack):
         self.end_frame_id = frame_id
         self.state = TrackState.Tracked if len(self.history.keys()) >= self.args.min_len else TrackState.New
 
+    def snapshot_state(self, compact_history=False):
+        from agentguard.contracts.states import TrackStateSnapshot
+
+        history_copy = {}
+        frame_ids = (
+            sorted(self.history.keys())[-6:]
+            if compact_history
+            else self.history.keys()
+        )
+        for frame_id in frame_ids:
+            item = self.history[frame_id]
+            if compact_history:
+                history_copy[frame_id] = [item[0].copy(), float(item[1])]
+            else:
+                history_copy[frame_id] = [
+                    item[0].copy(),
+                    item[1],
+                    item[2].copy() if item[2] is not None else None,
+                    item[3].copy() if item[3] is not None else None,
+                    item[4].copy(),
+                ]
+
+        return TrackStateSnapshot(
+            track_id=self.track_id,
+            box=self.box.copy(),
+            score=self.score,
+            mean=self.mean.copy() if self.mean is not None else None,
+            covariance=(
+                self.covariance.copy() if self.covariance is not None else None
+            ),
+            velocity=self.velocity.copy(),
+            feature=self.feat.copy(),
+            history=history_copy,
+            end_frame_id=self.end_frame_id,
+            state=self.state,
+        )
+
     @property
     def cxcywh(self):
         # Get current position in bounding box format `(center x, center y, width, height)`.

@@ -46,16 +46,16 @@ REQUIRED_CONFIG = {
     "warmup_epochs": 1,
     "amp": False,
 }
-FINETUNE_CHECKPOINT_EPOCHS = {5, 10, 25}
+FINETUNE_CHECKPOINT_EPOCHS = {5, 10, 25, 50}
 FINETUNE_REQUIRED_CONFIG = {
     "seed": 42,
-    "epochs": 25,
     "num_workers": 4,
     "lr": 1e-5,
     "weight_decay": 1e-4,
     "warmup_epochs": 1,
     "amp": False,
 }
+FINETUNE_ALLOWED_EPOCHS = frozenset({25, 50})
 FORMAL_BATCH_SIZES = {1024, 2048}
 LOW_MEMORY_SAMPLING_POLICY = "sequential_sequence_fractions"
 
@@ -319,7 +319,8 @@ def _checkpoint_payload(
     training_progress: dict[str, Any] | None = None,
     initialization: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    motion_target_mode = str(metadata.get("motion_target_mode", "nsa"))
+    payload = {
         **model_contract(),
         "epoch": int(epoch),
         "model_state_dict": model.state_dict(),
@@ -353,14 +354,54 @@ def _checkpoint_payload(
         "training_config": dict(config),
         "resolved_batch_size": int(resolved_batch_size),
         "validation_policy": (
-            "none_epoch25_warm_start"
+            f"none_epoch{int(config['epochs'])}_warm_start"
             if initialization and initialization.get("mode") == "warm_start"
             else "none_epoch100"
         ),
         "initialization": initialization or {"mode": "random"},
         "training_schedule": training_schedule or {"sampling_policy": "full_shuffle"},
         "training_progress": training_progress or {},
+        "motion_target_mode": motion_target_mode,
     }
+    if motion_target_mode == "mamba_hybrid":
+        supervision_fields = (
+            "mamba_distill_label_root",
+            "mamba_checkpoint_path",
+            "mamba_checkpoint_sha256",
+            "mamba_teacher_config",
+            "mamba_teacher_config_sha256",
+            "teacher_sidecar_sha256",
+            "distill_label_sha256",
+            "teacher_weight_cap",
+            "advantage_horizon",
+            "tau_adv",
+            "base_nsa_cache_sha256",
+            "base_nsa_label_sha256",
+        )
+        missing = [key for key in supervision_fields if key not in metadata]
+        if missing:
+            raise ValueError(
+                f"mamba_hybrid dataset metadata lacks provenance: {missing}"
+            )
+        payload.update({key: metadata[key] for key in supervision_fields})
+    elif motion_target_mode == "mamba_native":
+        supervision_fields = (
+            "event_source",
+            "motion_label_mode",
+            "mamba_checkpoint_path",
+            "mamba_checkpoint_sha256",
+            "mamba_teacher_config",
+            "mamba_teacher_config_sha256",
+            "native_event_cache_sha256",
+            "native_label_sha256",
+        )
+        missing = [key for key in supervision_fields if key not in metadata]
+        if missing:
+            raise ValueError(
+                f"mamba_native dataset metadata lacks provenance: {missing}"
+            )
+        payload.update({key: metadata[key] for key in supervision_fields})
+    return payload
 
 
 def validate_iwg_rg_cma_checkpoint_contract(
@@ -412,6 +453,47 @@ def validate_iwg_rg_cma_checkpoint_contract(
         raise ValueError("checkpoint normalization_std must have shape (63,)")
     if np.asarray(checkpoint.get("policy_prototypes")).shape != (5, 2):
         raise ValueError("checkpoint policy prototypes must have shape (5, 2)")
+    motion_target_mode = str(checkpoint.get("motion_target_mode", "nsa"))
+    if motion_target_mode not in {"nsa", "mamba_hybrid", "mamba_native"}:
+        raise ValueError(f"unsupported checkpoint motion_target_mode={motion_target_mode!r}")
+    if motion_target_mode == "mamba_hybrid":
+        required_distill = {
+            "mamba_distill_label_root",
+            "mamba_checkpoint_path",
+            "mamba_checkpoint_sha256",
+            "mamba_teacher_config",
+            "mamba_teacher_config_sha256",
+            "teacher_sidecar_sha256",
+            "distill_label_sha256",
+            "tau_adv",
+            "base_nsa_cache_sha256",
+            "base_nsa_label_sha256",
+        }
+        missing = sorted(required_distill.difference(checkpoint))
+        if missing:
+            raise ValueError(f"mamba_hybrid checkpoint lacks provenance: {missing}")
+        if float(checkpoint.get("teacher_weight_cap", -1.0)) != 0.5:
+            raise ValueError("mamba_hybrid checkpoint teacher_weight_cap must be 0.5")
+        if int(checkpoint.get("advantage_horizon", -1)) != 5:
+            raise ValueError("mamba_hybrid checkpoint advantage_horizon must be 5")
+    elif motion_target_mode == "mamba_native":
+        required_native = {
+            "event_source",
+            "motion_label_mode",
+            "mamba_checkpoint_path",
+            "mamba_checkpoint_sha256",
+            "mamba_teacher_config",
+            "mamba_teacher_config_sha256",
+            "native_event_cache_sha256",
+            "native_label_sha256",
+        }
+        missing = sorted(required_native.difference(checkpoint))
+        if missing:
+            raise ValueError(f"mamba_native checkpoint lacks provenance: {missing}")
+        if checkpoint.get("event_source") != "mamba_native":
+            raise ValueError("mamba_native checkpoint has an invalid event_source")
+        if checkpoint.get("motion_label_mode") != "mamba_native_current":
+            raise ValueError("mamba_native checkpoint has an invalid motion_label_mode")
 
 
 def load_iwg_rg_cma_checkpoint(
@@ -597,6 +679,11 @@ def _run_training_attempt(
                 cross_matrix = torch.zeros((3, 3), dtype=torch.float64)
                 motion_entropy = 0.0
                 appearance_entropy = 0.0
+                teacher_weight_sum = 0.0
+                teacher_active = 0.0
+                motion_abs_error_to_nsa = 0.0
+                motion_abs_error_to_hybrid = 0.0
+                motion_metric_weight = 0.0
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                 epoch_start = time.time()
@@ -684,6 +771,32 @@ def _run_training_attempt(
                         channel_weight[channel] += float(
                             gate_weights[:, channel].sum()
                         )
+                    motion_weights = gate_weights[:, 0]
+                    refined_motion = outputs["refined_gate"].detach()[:, 0]
+                    teacher_values = batch.get(
+                        "teacher_weight", torch.zeros_like(refined_motion)
+                    )
+                    nsa_values = batch.get(
+                        "nsa_motion_target", batch["safe_gate_target"][:, 0]
+                    )
+                    hybrid_values = batch.get(
+                        "hybrid_motion_target", batch["safe_gate_target"][:, 0]
+                    )
+                    teacher_weight_sum += float(teacher_values.sum())
+                    teacher_active += float((teacher_values > 0.0).sum())
+                    motion_abs_error_to_nsa += float(
+                        (
+                            (refined_motion - nsa_values).abs()
+                            * motion_weights
+                        ).sum()
+                    )
+                    motion_abs_error_to_hybrid += float(
+                        (
+                            (refined_motion - hybrid_values).abs()
+                            * motion_weights
+                        ).sum()
+                    )
+                    motion_metric_weight += float(motion_weights.sum())
                     if batch_index % max(1, len(loader) // 5) == 0:
                         _write_training_log(
                             training_log,
@@ -724,6 +837,12 @@ def _run_training_attempt(
                     / max(channel_weight[0], 1.0),
                     "appearance_mae": channel_abs_error[1]
                     / max(channel_weight[1], 1.0),
+                    "teacher_weight_mean": teacher_weight_sum / max(samples, 1),
+                    "teacher_active_rate": teacher_active / max(samples, 1),
+                    "motion_mae_to_nsa": motion_abs_error_to_nsa
+                    / max(motion_metric_weight, 1.0),
+                    "motion_mae_to_hybrid": motion_abs_error_to_hybrid
+                    / max(motion_metric_weight, 1.0),
                     "motion_attention_entropy": motion_entropy / max(samples, 1),
                     "appearance_attention_entropy": appearance_entropy
                     / max(samples, 1),
@@ -749,6 +868,10 @@ def _run_training_attempt(
                         f"gate_acc={metrics['gate_accuracy']:.3f}  "
                         f"motion_mae={metrics['motion_mae']:.4f}  "
                         f"app_mae={metrics['appearance_mae']:.4f}  "
+                        f"teacher_weight_mean={metrics['teacher_weight_mean']:.4f}  "
+                        f"teacher_active_rate={metrics['teacher_active_rate']:.4f}  "
+                        f"motion_mae_to_nsa={metrics['motion_mae_to_nsa']:.4f}  "
+                        f"motion_mae_to_hybrid={metrics['motion_mae_to_hybrid']:.4f}  "
                         f"lr={metrics['learning_rate']:.2e}  "
                         f"time={epoch_time:.1f}s  train_only=true"
                     ),
@@ -842,10 +965,17 @@ def _validate_formal_config(config: dict[str, Any]) -> int:
             f"{sorted(allowed_batch_sizes)}, got {batch_size}"
         )
     if init_checkpoint:
-        shards, cycles, epochs_per_shard = _resolved_schedule_settings(config)
-        if (shards, cycles, epochs_per_shard) != (1, 1, 25):
+        epochs = int(config.get("epochs", 0))
+        if epochs not in FINETUNE_ALLOWED_EPOCHS:
             raise ValueError(
-                "warm-start IWG-attn training requires one full-data phase for 25 epochs"
+                "warm-start IWG-attn epochs must be one of "
+                f"{sorted(FINETUNE_ALLOWED_EPOCHS)}, got {epochs}"
+            )
+        shards, cycles, epochs_per_shard = _resolved_schedule_settings(config)
+        if (shards, cycles, epochs_per_shard) != (1, 1, epochs):
+            raise ValueError(
+                "warm-start IWG-attn training requires one full-data phase "
+                f"for {epochs} epochs"
             )
     _resolved_schedule_settings(config)
     return batch_size
@@ -862,6 +992,33 @@ def train_iwg_rg_cma(config: dict[str, Any]) -> dict[str, Any]:
         config["dataset_dir"], max_samples=int(config.get("max_train_samples", 0))
     )
     try:
+        requested_mode = str(config.get("motion_target_mode", "nsa"))
+        dataset_mode = str(dataset.metadata.get("motion_target_mode", "nsa"))
+        if requested_mode != dataset_mode:
+            raise ValueError(
+                f"motion_target_mode mismatch: config={requested_mode!r}, "
+                f"dataset={dataset_mode!r}"
+            )
+        requested_label_root = str(
+            config.get("mamba_distill_label_root", "")
+        ).strip()
+        if dataset_mode == "mamba_hybrid":
+            if str(config.get("init_checkpoint", "")).strip():
+                raise ValueError("mamba_hybrid formal training must start from scratch")
+            expected_root = str(dataset.metadata["mamba_distill_label_root"])
+            if str(Path(requested_label_root).resolve()) != expected_root:
+                raise ValueError(
+                    "mamba_distill_label_root does not match dataset metadata"
+                )
+        elif dataset_mode == "mamba_native":
+            if str(config.get("init_checkpoint", "")).strip():
+                raise ValueError("mamba_native formal training must start from scratch")
+            if requested_label_root:
+                raise ValueError(
+                    "mamba_native training does not use a shadow distill label root"
+                )
+        elif requested_label_root:
+            raise ValueError("nsa training must not configure Mamba distill labels")
         return _run_training_attempt(config, dataset=dataset, batch_size=batch_size)
     except torch.cuda.OutOfMemoryError:
         if batch_size != 2048:

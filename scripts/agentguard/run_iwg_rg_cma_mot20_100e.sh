@@ -7,7 +7,7 @@ RUN_NAME="${RUN_NAME:-iwg_rg_cma_v1_mot20_trainall_seed42_bs1024_shard20x2}"
 DATA_RUN_NAME="${DATA_RUN_NAME:-iwg_rg_cma_v1_mot20_trainall_seed42_bs1024}"
 RUN_ROOT="${ROOT}/outputs/agentguard/experiments/${RUN_NAME}"
 DATA_RUN_ROOT="${ROOT}/outputs/agentguard/experiments/${DATA_RUN_NAME}"
-LABEL_DIR="${DATA_RUN_ROOT}/labels_v3_compact"
+LABEL_DIR="${ROOT}/outputs/agentguard/labels/iwg_rg_cma/MOT20/nsa_v3_compact"
 DATASET_DIR="${DATA_RUN_ROOT}/dataset"
 CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
 LOG_DIR="${RUN_ROOT}/logs"
@@ -123,7 +123,7 @@ run_raw_case() {
   local suffix="$2"
   local command=(
     "${PY}" run.py --dataset MOT20 --mode all --sequences "${SEQUENCES[@]}"
-    --seed 10000 --agentguard-mode iwg-attn
+    --seed 10000 --agentguard-mode iwg-attn --legacy-output-naming
     --agentguard-checkpoint "${CHECKPOINT}" --iwg-attn-output "${output}"
     --agentguard-device cpu --detection-cache-root "${DETECTION_CACHE_ROOT}"
     --tracker-suffix "${suffix}" --print-per-sequence-metrics

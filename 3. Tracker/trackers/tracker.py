@@ -24,6 +24,8 @@ class Tracker(object):
         self.tracks = []
         self.frame_id = 0
         self.counter = TrackCounter()
+        # Optional capture-only teacher. Normal tracking never imports Mamba.
+        self.mamba_shadow = getattr(args, 'mamba_shadow', None)
 
         # Set global motion compensation model
         self.cmc = CMC(vid_name)
@@ -252,6 +254,10 @@ class Tracker(object):
         for idx, flag in enumerate(allow_indices):
             if flag:
                 dets[idx].initiate(self.frame_id, self.counter)
+                if self.mamba_shadow is not None:
+                    self.mamba_shadow.initiate_track(
+                        dets[idx].track_id, dets[idx].cxcywh.copy()
+                    )
                 self.tracks.append(dets[idx])
 
     def update(self, dets, dets_95):
@@ -350,6 +356,11 @@ class Tracker(object):
         if self.agentguard_adapter:
             self.agentguard_adapter.set_frame_warp(effective_warp)
 
+        if self.mamba_shadow is not None:
+            self.mamba_shadow.begin_frame(
+                [t.track_id for t in tracked_lost + new], effective_warp
+            )
+
         # Predict the current location with KF
         [t.predict() for t in tracked_lost]
         [t.predict() for t in new]
@@ -385,6 +396,14 @@ class Tracker(object):
                 no_reid=getattr(self.args, 'no_reid', False),
             )
 
+        if self.mamba_shadow is not None:
+            self.mamba_shadow.update_matches(
+                [
+                    (tracked_lost[t_idx].track_id, dets_all[d_idx].cxcywh.copy())
+                    for t_idx, d_idx in matches
+                ]
+            )
+
         # Process matched tracks
         agentguard_matched_batch = []
         for t_idx, d_idx in matches:
@@ -418,6 +437,10 @@ class Tracker(object):
                     track.update(self.frame_id, detection)
                     gate_decision = GateDecision(1.0, 1.0, np.ones(5, dtype=np.float64) / 5.0, 1.0)
                     self.agentguard_adapter.record_event(track.track_id, event, gate_decision)
+                    if self.mamba_shadow is not None:
+                        self.mamba_shadow.record_event(
+                            event, track.x1y1x2y2.copy()
+                        )
                 else:
                     agentguard_matched_batch.append((track, detection, event))
             else:
@@ -453,6 +476,10 @@ class Tracker(object):
                     )
                     event.scalar_features = fb.compute_scalar(event)
                 if self.agentguard_adapter.capture_only:
+                    if self.mamba_shadow is not None:
+                        self.mamba_shadow.record_event(
+                            event, track.x1y1x2y2.copy()
+                        )
                     track.mark_lost()
                     self.agentguard_adapter.record_unmatched_event(track.track_id, event)
                 else:
@@ -475,12 +502,22 @@ class Tracker(object):
                                                          self.args.reduce_step, self.frame_id,
                                                          no_reid=getattr(self.args, 'no_reid', False))
 
+        if self.mamba_shadow is not None:
+            self.mamba_shadow.update_matches(
+                [
+                    (new[t].track_id, dets_high_left[d].cxcywh.copy())
+                    for t, d in matches
+                ]
+            )
+
         # Update matched tracks
         for t, d in matches:
             new[t].update(self.frame_id, dets_high_left[d])
 
         # Mark "remove" to unmatched tracks
         for t in u_tracks:
+            if self.mamba_shadow is not None:
+                self.mamba_shadow.remove_track(new[t].track_id)
             new[t].mark_removed()
 
         # ==============================================================================================================
@@ -489,6 +526,8 @@ class Tracker(object):
             if self.frame_id - track.end_frame_id > self.max_time_lost:
                 if self.agentguard_adapter:
                     self.agentguard_adapter.remove_track(track.track_id)
+                if self.mamba_shadow is not None:
+                    self.mamba_shadow.remove_track(track.track_id)
                 track.mark_removed()
 
         # Filter out the removed tracks
@@ -510,6 +549,10 @@ class Tracker(object):
                 getattr(self.args, 'img_h', 1080)
             )
 
+        dropped_new = [t for t in self.tracks if t.state == TrackState.New]
+        if self.mamba_shadow is not None:
+            for track in dropped_new:
+                self.mamba_shadow.remove_track(track.track_id)
         self.tracks = [t for t in self.tracks if t.state != TrackState.New]
 
         # AgentGuard: save frame_start snapshots for mature tracks (pre-CMC)
@@ -529,6 +572,11 @@ class Tracker(object):
         self._current_warp = effective_warp.copy()
         if self.agentguard_adapter:
             self.agentguard_adapter.set_frame_warp(effective_warp)
+
+        if self.mamba_shadow is not None:
+            self.mamba_shadow.begin_frame(
+                [t.track_id for t in self.tracks], effective_warp
+            )
 
         [t.predict() for t in self.tracks]
 
@@ -575,6 +623,8 @@ class Tracker(object):
                         fb.reid_dim, dtype=np.float64
                     )
                     event.scalar_features = fb.compute_scalar(event)
+                if self.mamba_shadow is not None:
+                    self.mamba_shadow.record_event(event, t.x1y1x2y2.copy())
                 self.agentguard_adapter.record_unmatched_event(t.track_id, event)
                 t.mark_lost()
             else:
@@ -589,6 +639,8 @@ class Tracker(object):
             if self.frame_id - track.end_frame_id > self.max_time_lost:
                 if self.agentguard_adapter:
                     self.agentguard_adapter.remove_track(track.track_id)
+                if self.mamba_shadow is not None:
+                    self.mamba_shadow.remove_track(track.track_id)
                 track.mark_removed()
 
         self.tracks = [t for t in self.tracks if t.state != TrackState.Removed]

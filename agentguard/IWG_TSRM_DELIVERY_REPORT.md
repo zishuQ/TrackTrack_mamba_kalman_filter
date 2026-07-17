@@ -147,7 +147,7 @@ export PYTHONPATH="${ROOT}:${ROOT}/3. Tracker:${ROOT}/agentguard/src:${PYTHONPAT
   --dataset MOT17 --mode all --candidate-types A \
   --event-cache-root outputs/agentguard/event_cache_v3_iwg_v2 \
   --detection-cache-root outputs/agentguard/detection_cache \
-  --label-dir outputs/agentguard/experiments/iwg_tsrm_v1_phase_a/labels \
+  --label-dir outputs/agentguard/labels/iwg_rg_cma/MOT17/nsa_candidate_a_json \
   --output-dir outputs/agentguard/experiments/iwg_tsrm_v3_endpoint_holdout_seed42/dataset \
   --split-policy explicit_sequence_holdout \
   --val-sequences MOT17-02-FRCNN MOT17-11-FRCNN \

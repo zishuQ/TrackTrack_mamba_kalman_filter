@@ -12,7 +12,7 @@ LOG_DIR="${RUN_ROOT}/logs"
 PROVENANCE_DIR="${RUN_ROOT}/provenance"
 EVENT_CACHE_ROOT="${ROOT}/outputs/agentguard/event_cache_v3_iwg_v2"
 DETECTION_CACHE_ROOT="${ROOT}/outputs/agentguard/detection_cache"
-LABEL_DIR="${ROOT}/outputs/agentguard/experiments/iwg_tsrm_v1_phase_a/labels"
+LABEL_DIR="${ROOT}/outputs/agentguard/labels/iwg_rg_cma/MOT17/nsa_candidate_a_json"
 TRACKER_ROOT="${ROOT}/outputs/3. track"
 CHECKPOINT="${CHECKPOINT_DIR}/iwg_rg_cma_last.pt"
 SEQUENCES=(
@@ -105,6 +105,7 @@ run_case() {
   local command=(
     "${PY}" run.py --dataset MOT17 --mode all --sequences "${SEQUENCES[@]}"
     --seed 10000 --agentguard-mode iwg-attn
+    --legacy-output-naming
     --agentguard-checkpoint "${CHECKPOINT}" --iwg-attn-output "${output}"
     --agentguard-device cuda --detection-cache-root "${DETECTION_CACHE_ROOT}"
     --tracker-suffix "${suffix}" --print-per-sequence-metrics
@@ -144,7 +145,7 @@ touch "${RUN_ROOT}/promoted"
 TEST_SUFFIX="${RUN_NAME}_test_final_post"
 TEST_COMMAND=(
   "${PY}" run.py --dataset MOT17 --mode test --seed 10000
-  --agentguard-mode iwg-attn --agentguard-checkpoint "${CHECKPOINT}"
+  --agentguard-mode iwg-attn --legacy-output-naming --agentguard-checkpoint "${CHECKPOINT}"
   --iwg-attn-output final --agentguard-device cuda
   --detection-cache-root "${DETECTION_CACHE_ROOT}"
   --tracker-suffix "${TEST_SUFFIX}" --use_post --skip-eval

@@ -3328,6 +3328,16 @@ def _add_train_iwg_attn_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Epochs per memory shard (0 infers from total epochs and cycles).",
     )
     parser.add_argument("--shard-cycles", type=int, default=1)
+    parser.add_argument(
+        "--motion-target-mode",
+        choices=["nsa", "mamba_hybrid", "mamba_native"],
+        default="nsa",
+    )
+    parser.add_argument(
+        "--mamba-distill-label-root",
+        default="",
+        help="Required provenance root when motion-target-mode=mamba_hybrid.",
+    )
 
 
 def _cmd_train_iwg_attn(args: argparse.Namespace) -> None:
@@ -3353,6 +3363,12 @@ def _cmd_train_iwg_attn(args: argparse.Namespace) -> None:
         "memory_shards": int(args.memory_shards),
         "epochs_per_shard": int(args.epochs_per_shard),
         "shard_cycles": int(args.shard_cycles),
+        "motion_target_mode": str(args.motion_target_mode),
+        "mamba_distill_label_root": (
+            str(Path(args.mamba_distill_label_root).resolve())
+            if args.mamba_distill_label_root
+            else ""
+        ),
     }
     summary = train_iwg_rg_cma(config)
     checkpoint_dir = Path(config["checkpoint_dir"])
@@ -3423,6 +3439,17 @@ def main(argv: Optional[List[str]] = None) -> None:
         required=True,
     )
 
+    from agentguard.cli.mamba_distill_commands import (
+        add_audit_parser,
+        add_build_labels_parser,
+        add_export_parser,
+        add_export_native_events_parser,
+        audit_mamba_shadow_command,
+        build_mamba_distill_labels_command,
+        export_mamba_events,
+        export_mamba_shadow,
+    )
+
     # Register all subcommands
     _add_cache_events_parser(subparsers)
     _add_validate_cache_parser(subparsers)
@@ -3444,6 +3471,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     _add_build_iwg_attn_data_parser(subparsers)
     _add_train_iwg_attn_parser(subparsers)
     _add_validate_iwg_attn_checkpoint_parser(subparsers)
+    add_export_parser(subparsers)
+    add_export_native_events_parser(subparsers)
+    add_audit_parser(subparsers)
+    add_build_labels_parser(subparsers)
 
     parsed = parser.parse_args(argv)
 
@@ -3469,6 +3500,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         "build_iwg_attn_data": _cmd_build_iwg_attn_data,
         "train_iwg_attn": _cmd_train_iwg_attn,
         "validate_iwg_attn_checkpoint": _cmd_validate_iwg_attn_checkpoint,
+        "export_mamba_shadow": export_mamba_shadow,
+        "export_mamba_events": export_mamba_events,
+        "audit_mamba_shadow": audit_mamba_shadow_command,
+        "build_mamba_distill_labels": build_mamba_distill_labels_command,
     }
 
     handler = dispatch.get(parsed.command)

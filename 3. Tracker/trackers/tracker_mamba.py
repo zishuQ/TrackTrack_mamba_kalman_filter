@@ -4,6 +4,13 @@ from trackers.cmc import *
 from trackers.utils import *
 from trackers.track_mamba import *
 
+try:
+    from integrations.agentguard.adapter import AgentGuardTrackerAdapter
+    from agentguard.contracts.outputs import GateDecision
+    _AGENTGUARD_AVAILABLE = True
+except ImportError:
+    _AGENTGUARD_AVAILABLE = False
+
 
 class TrackerMamba(object):
     def __init__(self, args, vid_name):
@@ -26,6 +33,53 @@ class TrackerMamba(object):
         # GPU cache: predicted states from batch_predict, reused in batch_update
         # to skip redundant CPU→GPU transfers for matched tracks
         self._predicted_gpu_cache = None  # (means_gpu, covs_gpu, {track_id: idx})
+
+        # Native Mamba events are captured for offline training only. Online
+        # AgentGuard inference stays attached to the NSA tracker.
+        self.agentguard_adapter = None
+        capture_events = getattr(args, 'capture_agentguard_events', False)
+        if _AGENTGUARD_AVAILABLE and capture_events:
+            from agentguard.runtime.manager import AgentGuardRuntime
+
+            runtime = AgentGuardRuntime({"mode": "off"}, None, None, "cpu")
+            runtime.event_sink = getattr(args, 'event_sink', None)
+            self.agentguard_adapter = AgentGuardTrackerAdapter(
+                args, vid_name, agentguard_runtime=runtime
+            )
+
+    def _initialize_capture_features(self, detections):
+        if not self.agentguard_adapter or not self.agentguard_adapter.capture_only:
+            return
+        runtime = self.agentguard_adapter.runtime
+        if runtime is None or runtime.feature_builder is not None:
+            return
+        first_det = next(iter(detections), None)
+        if first_det is None or getattr(first_det, "feat", None) is None:
+            return
+        reid_dim = int(np.asarray(first_det.feat).reshape(-1).shape[0])
+        runtime.init_feature_builder(reid_dim=reid_dim)
+        if self.agentguard_adapter.event_sink is not None:
+            self.agentguard_adapter.event_sink._reid_dim = reid_dim
+
+    def _populate_capture_features(self, event, track, detection=None):
+        runtime = self.agentguard_adapter.runtime
+        feature_builder = runtime.feature_builder if runtime is not None else None
+        if feature_builder is None:
+            return
+        source = event.pre_update_state or event.frame_start_state
+        event.track_feature = np.asarray(
+            source.feature if source is not None else track.feat,
+            dtype=np.float64,
+        ).reshape(-1)
+        if detection is None:
+            event.detection_feature = np.zeros(
+                feature_builder.reid_dim, dtype=np.float64
+            )
+        else:
+            event.detection_feature = np.asarray(
+                detection.feat, dtype=np.float64
+            ).reshape(-1)
+        event.scalar_features = feature_builder.compute_scalar(event)
 
     def _batch_predict(self, tracks, force_missing=False):
         """
@@ -156,126 +210,320 @@ class TrackerMamba(object):
                 self.tracks.append(dets[idx])
 
     def update(self, dets, dets_95):
-        # ==============================================================================================================
-        # Update frame id
         self.frame_id += 1
 
-        # Get deleted detections &  Encode
-        dets_del = find_deleted_detections(dets, dets_95)
-        dets = [TrackMamba(self.args, d) for d in dets]
-        dets_del = [TrackMamba(self.args, d) for d in dets_del]
+        target_detection_indices = getattr(
+            self.args, "agentguard_target_detection_indices", None
+        )
+        source_detection_indices = getattr(
+            self.args, "agentguard_source_detection_indices", None
+        )
+        if source_detection_indices is not None:
+            dets_del, dets_del_indices = find_deleted_detections(
+                dets,
+                dets_95,
+                source_indices=source_detection_indices,
+                return_indices=True,
+            )
+        else:
+            dets_del = find_deleted_detections(dets, dets_95)
+            dets_del_indices = None
+        dets = [TrackMamba(self.args, detection) for detection in dets]
+        dets_del = [TrackMamba(self.args, detection) for detection in dets_del]
+        if target_detection_indices is not None:
+            for detection, detection_index in zip(
+                dets, target_detection_indices
+            ):
+                detection.frame_detection_index = int(detection_index)
+        else:
+            for detection_index, detection in enumerate(dets):
+                detection.frame_detection_index = int(detection_index)
+        if dets_del_indices is not None:
+            for detection, detection_index in zip(
+                dets_del, dets_del_indices
+            ):
+                detection.frame_detection_index = int(detection_index)
 
-        # Divide detections
         dets_high = [d for d in dets if d.score > self.args.det_thr]
         dets_low = [d for d in dets if d.score <= self.args.det_thr]
         dets_del_high = [d for d in dets_del if d.score > self.args.det_thr]
+        detection_pool = dets_high + dets_low + dets_del_high
 
-        # Split tracks
-        tracked_lost = [t for t in self.tracks if t.state == TrackState.Tracked or t.state == TrackState.Lost]
-        new = [t for t in self.tracks if t.state == TrackState.New]
+        self._initialize_capture_features(detection_pool)
+        if self.agentguard_adapter:
+            self.agentguard_adapter.begin_frame(
+                self.frame_id,
+                getattr(self.args, 'img_w', 1920),
+                getattr(self.args, 'img_h', 1080),
+                detection_pool=detection_pool,
+                detection_sources=[0] * len(dets_high)
+                + [1] * len(dets_low)
+                + [2] * len(dets_del_high),
+            )
 
-        # Camera motion compensation
-        warp_matrix = self.cmc.get_warp_matrix()
-        if not self.disable_gmc:
-            apply_cmc(tracked_lost, warp_matrix)
-            apply_cmc(new, warp_matrix)
+        tracked_lost = [
+            track
+            for track in self.tracks
+            if track.state in (TrackState.Tracked, TrackState.Lost)
+        ]
+        new = [track for track in self.tracks if track.state == TrackState.New]
 
-        no_current_detections = len(dets_high) == 0 and len(dets_low) == 0 and len(dets_del_high) == 0
+        frame_start_snapshots = {}
+        if self.agentguard_adapter:
+            runtime = self.agentguard_adapter.runtime
+            for track in tracked_lost:
+                if runtime and runtime.is_mature_track(track):
+                    frame_start_snapshots[track.track_id] = track.snapshot_state(
+                        compact_history=True
+                    )
 
-        # Predict the current location with KF (OPTIMIZED: batch operation)
-        self._batch_predict(tracked_lost + new, force_missing=no_current_detections)
+        if self.disable_gmc:
+            effective_warp = np.eye(2, 3, dtype=np.float64)
+        else:
+            effective_warp = self.cmc.get_warp_matrix()
+            apply_cmc(tracked_lost, effective_warp)
+            apply_cmc(new, effective_warp)
+        if self.agentguard_adapter:
+            self.agentguard_adapter.set_frame_warp(effective_warp)
 
-        # ==============================================================================================================
-        # Association between (tracked and lost tracks) & (high confidence detections)
-        dets = dets_high + dets_low + dets_del_high
-        matches, u_tracks, u_dets = iterative_assignment(tracked_lost, dets_high, dets_low, dets_del_high,
-                                                         self.args.match_thr, self.args.penalty_p, self.args.penalty_q,
-                                                         self.args.reduce_step, self.frame_id,
-                                                         no_reid=getattr(self.args, 'no_reid', False))
+        no_current_detections = not detection_pool
+        self._batch_predict(
+            tracked_lost + new, force_missing=no_current_detections
+        )
 
-        # Update matched tracks (OPTIMIZED: batch KF update + individual attribute updates)
-        matched_pairs = [(tracked_lost[t], dets[d]) for t, d in matches]
+        pre_update_snapshots = {}
+        if self.agentguard_adapter:
+            runtime = self.agentguard_adapter.runtime
+            for track in tracked_lost:
+                if runtime and runtime.is_mature_track(track):
+                    pre_update_snapshots[track.track_id] = track.snapshot_state(
+                        compact_history=True
+                    )
+
+        use_meta = self.agentguard_adapter is not None
+        result = iterative_assignment(
+            tracked_lost,
+            dets_high,
+            dets_low,
+            dets_del_high,
+            self.args.match_thr,
+            self.args.penalty_p,
+            self.args.penalty_q,
+            self.args.reduce_step,
+            self.frame_id,
+            no_reid=getattr(self.args, 'no_reid', False),
+            return_meta=use_meta,
+        )
+        if use_meta:
+            matches, u_tracks, u_dets, association_meta = result
+            self.agentguard_adapter.set_association_record(
+                track_ids=[track.track_id for track in tracked_lost],
+                detection_pool=detection_pool,
+                association_meta=association_meta,
+                no_reid=getattr(self.args, 'no_reid', False),
+            )
+        else:
+            matches, u_tracks, u_dets = result
+            association_meta = None
+
+        captured_matches = {}
+        if self.agentguard_adapter and association_meta is not None:
+            runtime = self.agentguard_adapter.runtime
+            for track_index, detection_index in matches:
+                track = tracked_lost[track_index]
+                if runtime and runtime.is_mature_track(track):
+                    detection = detection_pool[detection_index]
+                    event = self.agentguard_adapter.build_matched_event(
+                        track,
+                        detection,
+                        track_index,
+                        detection_index,
+                        association_meta,
+                        effective_warp,
+                        frame_start_snapshots.get(track.track_id),
+                        pre_update_snapshots.get(track.track_id),
+                        num_tracks=len(tracked_lost),
+                        num_detections=len(detection_pool),
+                        no_reid=getattr(self.args, 'no_reid', False),
+                    )
+                    self._populate_capture_features(event, track, detection)
+                    captured_matches[track.track_id] = event
+
+        matched_pairs = [
+            (tracked_lost[t], detection_pool[d]) for t, d in matches
+        ]
         self._batch_update(matched_pairs)
-        for t, d in matches:
-            tracked_lost[t].update_after_kf(self.frame_id, dets[d])
+        for track_index, detection_index in matches:
+            track = tracked_lost[track_index]
+            track.update_after_kf(
+                self.frame_id, detection_pool[detection_index]
+            )
+            event = captured_matches.get(track.track_id)
+            if event is not None:
+                decision = GateDecision(
+                    1.0,
+                    1.0,
+                    np.ones(5, dtype=np.float64) / 5.0,
+                    1.0,
+                )
+                self.agentguard_adapter.record_event(
+                    track.track_id, event, decision
+                )
 
-        # Mark "lost" to unmatched tracks
-        for t in u_tracks:
-            tracked_lost[t].mark_lost()
+        for track_index in u_tracks:
+            track = tracked_lost[track_index]
+            if self.agentguard_adapter:
+                runtime = self.agentguard_adapter.runtime
+                if runtime and runtime.is_mature_track(track):
+                    event = self.agentguard_adapter.build_unmatched_event(
+                        track,
+                        effective_warp,
+                        frame_start_snapshots.get(track.track_id),
+                        pre_update_snapshots.get(track.track_id),
+                    )
+                    self._populate_capture_features(event, track)
+                    self.agentguard_adapter.record_unmatched_event(
+                        track.track_id, event
+                    )
+            track.mark_lost()
 
-        # ==============================================================================================================
-        # Get remained high confidence detections
-        dets_high_left = [dets[i] for i in u_dets if i < len(dets_high)]
+        if self.agentguard_adapter:
+            self.agentguard_adapter.finalize_first_stage(tracked_lost)
 
-        # Association between (new tracks) & (left high confidence detections)
-        matches, u_tracks, u_dets = iterative_assignment(new, dets_high_left, [], [], self.args.match_thr,
-                                                         self.args.penalty_p, self.args.penalty_q,
-                                                         self.args.reduce_step, self.frame_id,
-                                                         no_reid=getattr(self.args, 'no_reid', False))
+        dets_high_left = [
+            detection_pool[index]
+            for index in u_dets
+            if index < len(dets_high)
+        ]
+        matches, u_tracks, u_dets = iterative_assignment(
+            new,
+            dets_high_left,
+            [],
+            [],
+            self.args.match_thr,
+            self.args.penalty_p,
+            self.args.penalty_q,
+            self.args.reduce_step,
+            self.frame_id,
+            no_reid=getattr(self.args, 'no_reid', False),
+        )
 
-        # Update matched tracks (OPTIMIZED: batch KF update + individual attribute updates)
-        matched_pairs_new = [(new[t], dets_high_left[d]) for t, d in matches]
+        matched_pairs_new = [
+            (new[t], dets_high_left[d]) for t, d in matches
+        ]
         self._batch_update(matched_pairs_new)
-        for t, d in matches:
-            new[t].update_after_kf(self.frame_id, dets_high_left[d])
+        for track_index, detection_index in matches:
+            new[track_index].update_after_kf(
+                self.frame_id, dets_high_left[detection_index]
+            )
 
-        # Mark "remove" to unmatched tracks
-        for t in u_tracks:
-            new[t].mark_removed()
+        for track_index in u_tracks:
+            new[track_index].mark_removed()
 
-        # ==============================================================================================================
-        # Mark "remove" lost tracks which are too old and add to finished
         for track in self.tracks:
             if self.frame_id - track.end_frame_id > self.max_time_lost:
                 track.mark_removed()
 
-        # Filter out the removed tracks and clean up Mamba states
-        removed_tracks = [t for t in self.tracks if t.state == TrackState.Removed]
+        removed_tracks = [
+            track
+            for track in self.tracks
+            if track.state == TrackState.Removed
+        ]
         for track in removed_tracks:
+            if self.agentguard_adapter:
+                self.agentguard_adapter.remove_track(track.track_id)
             self.shared_kalman_filter.delete_track(track.track_id)
-        
-        self.tracks = [t for t in self.tracks if t.state != TrackState.Removed]
 
-        # Init new tracks
-        self.init_tracks([dets_high_left[udx] for udx in u_dets])
-
-        # Clear GPU cache (free memory, no longer needed this frame)
+        self.tracks = [
+            track
+            for track in self.tracks
+            if track.state != TrackState.Removed
+        ]
+        self.init_tracks([dets_high_left[index] for index in u_dets])
         self._predicted_gpu_cache = None
-
-        return [t for t in self.tracks if t.state == TrackState.Tracked]
+        return [
+            track
+            for track in self.tracks
+            if track.state == TrackState.Tracked
+        ]
 
     def update_without_detections(self):
-        # Update frame id
         self.frame_id += 1
 
-        # Only maintain already tracked and new tracks, Drop all the new tracks
-        self.tracks = [t for t in self.tracks if t.state != TrackState.New]
+        if self.agentguard_adapter:
+            self.agentguard_adapter.begin_frame(
+                self.frame_id,
+                getattr(self.args, 'img_w', 1920),
+                getattr(self.args, 'img_h', 1080),
+            )
 
-        # Camera motion compensation
-        warp_matrix = self.cmc.get_warp_matrix()
-        if not self.disable_gmc:
-            apply_cmc(self.tracks, warp_matrix)
+        self.tracks = [
+            track for track in self.tracks if track.state != TrackState.New
+        ]
+        frame_start_snapshots = {}
+        if self.agentguard_adapter:
+            runtime = self.agentguard_adapter.runtime
+            for track in self.tracks:
+                if runtime and runtime.is_mature_track(track):
+                    frame_start_snapshots[track.track_id] = track.snapshot_state(
+                        compact_history=True
+                    )
 
-        # Predict the current location with KF (OPTIMIZED: batch operation)
+        if self.disable_gmc:
+            effective_warp = np.eye(2, 3, dtype=np.float64)
+        else:
+            effective_warp = self.cmc.get_warp_matrix()
+            apply_cmc(self.tracks, effective_warp)
+        if self.agentguard_adapter:
+            self.agentguard_adapter.set_frame_warp(effective_warp)
+
         self._batch_predict(self.tracks, force_missing=True)
+        pre_update_snapshots = {}
+        if self.agentguard_adapter:
+            runtime = self.agentguard_adapter.runtime
+            for track in self.tracks:
+                if runtime and runtime.is_mature_track(track):
+                    pre_update_snapshots[track.track_id] = track.snapshot_state(
+                        compact_history=True
+                    )
 
-        # Change every track as lost tracks
-        for t in self.tracks:
-            t.mark_lost()
+        for track in self.tracks:
+            if self.agentguard_adapter:
+                runtime = self.agentguard_adapter.runtime
+                if runtime and runtime.is_mature_track(track):
+                    event = self.agentguard_adapter.build_unmatched_event(
+                        track,
+                        effective_warp,
+                        frame_start_snapshots.get(track.track_id),
+                        pre_update_snapshots.get(track.track_id),
+                    )
+                    self._populate_capture_features(event, track)
+                    self.agentguard_adapter.record_unmatched_event(
+                        track.track_id, event
+                    )
+            track.mark_lost()
 
-        # Mark "remove" to lost tracks which are too old
+        if self.agentguard_adapter:
+            self.agentguard_adapter.finalize_first_stage(self.tracks)
+
         for track in self.tracks:
             if self.frame_id - track.end_frame_id > self.max_time_lost:
                 track.mark_removed()
 
-        # Filter out the removed tracks and clean up Mamba states
-        removed_tracks = [t for t in self.tracks if t.state == TrackState.Removed]
+        removed_tracks = [
+            track
+            for track in self.tracks
+            if track.state == TrackState.Removed
+        ]
         for track in removed_tracks:
+            if self.agentguard_adapter:
+                self.agentguard_adapter.remove_track(track.track_id)
             self.shared_kalman_filter.delete_track(track.track_id)
-        
-        self.tracks = [t for t in self.tracks if t.state != TrackState.Removed]
 
-        # Clear GPU cache
+        self.tracks = [
+            track
+            for track in self.tracks
+            if track.state != TrackState.Removed
+        ]
         self._predicted_gpu_cache = None
-
         return []

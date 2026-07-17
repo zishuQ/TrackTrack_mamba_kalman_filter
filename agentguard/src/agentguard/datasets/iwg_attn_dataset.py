@@ -14,7 +14,10 @@ import torch
 
 from agentguard.data.cache_reader import CompactEventCacheReader
 from agentguard.data.cache_schema import COMPACT_CACHE_SCHEMA_VERSION, FEATURE_SCHEMA_SHA256
-from agentguard.data.compact_iwg_labels import load_compact_label_arrays
+from agentguard.data.compact_iwg_labels import (
+    MAMBA_DISTILL_LABEL_ARRAY_FILES,
+    load_compact_label_arrays,
+)
 from agentguard.data.label_schema import (
     ROLLOUT_LABEL_SCHEMA_SHA256,
     ROLLOUT_LABEL_SCHEMA_VERSION,
@@ -322,6 +325,17 @@ COMPACT_SAMPLE_ARRAY_FILES = {
     "valid_channels": "valid_channels.npy",
     "sample_weight": "sample_weight.npy",
 }
+MAMBA_DISTILL_SAMPLE_ARRAY_FILES = {
+    name: MAMBA_DISTILL_LABEL_ARRAY_FILES[name]
+    for name in (
+        "teacher_weight",
+        "nsa_motion_target",
+        "hybrid_motion_target",
+        "mamba_projection_gate",
+        "mamba_advantage",
+        "mamba_coverage",
+    )
+}
 COMPACT_TIMELINE_ARRAY_FILES = {
     "timeline_track_feats": "timeline_track_feats.npy",
     "timeline_scalar_feats": "timeline_scalar_feats.npy",
@@ -420,9 +434,13 @@ def _write_compact_index_arrays(
     arrays: dict[str, np.ndarray],
 ) -> list[Path]:
     paths: list[Path] = []
-    for name, filename in COMPACT_SAMPLE_ARRAY_FILES.items():
+    filenames = {**COMPACT_SAMPLE_ARRAY_FILES, **MAMBA_DISTILL_SAMPLE_ARRAY_FILES}
+    for name, value in arrays.items():
+        if name not in filenames:
+            continue
+        filename = filenames[name]
         path = index_dir / filename
-        np.save(path, arrays[name], allow_pickle=False)
+        np.save(path, value, allow_pickle=False)
         paths.append(path)
     return paths
 
@@ -574,6 +592,9 @@ def _build_compact_sequence_index(
         "valid_channels": np.asarray(labels["valid_channels"]),
         "sample_weight": np.asarray(labels["sample_weight"]),
     }
+    for name in MAMBA_DISTILL_SAMPLE_ARRAY_FILES:
+        if name in labels:
+            arrays[name] = np.asarray(labels[name])
     paths = _write_compact_index_arrays(index_dir, arrays)
     paths.extend(
         index_dir / filename for filename in COMPACT_TIMELINE_ARRAY_FILES.values()
@@ -657,6 +678,8 @@ def build_iwg_attn_dataset(
     timeline_counts: dict[str, dict[str, int]] = {}
     manifest_paths: list[Path] = []
     reid_dims: set[int] = set()
+    motion_target_mode = "nsa"
+    distill_contract: dict[str, Any] = {}
     output_dir.mkdir(parents=True)
     norm_path = output_dir / "norm_stats.npz"
     if dataset == "MOT17":
@@ -709,6 +732,126 @@ def build_iwg_attn_dataset(
         index_metadata = {"train_index_file": index_path.name}
         num_train_samples = len(samples)
     else:
+        label_summary_path = label_dir / "summary.json"
+        if not label_summary_path.is_file():
+            raise FileNotFoundError(f"compact label summary not found: {label_summary_path}")
+        label_summary = json.loads(label_summary_path.read_text())
+        motion_target_mode = str(label_summary.get("motion_target_mode", "nsa"))
+        if motion_target_mode not in {"nsa", "mamba_hybrid", "mamba_native"}:
+            raise ValueError(f"unsupported motion_target_mode: {motion_target_mode}")
+        if motion_target_mode == "mamba_hybrid":
+            required_distill = {
+                "teacher_weight_cap": 0.5,
+                "advantage_horizon": 5,
+            }
+            mismatches = {
+                key: (label_summary.get(key), value)
+                for key, value in required_distill.items()
+                if label_summary.get(key) != value
+            }
+            if mismatches:
+                raise ValueError(f"Mamba distill label contract mismatch: {mismatches}")
+            sequence_label_manifests = {
+                sequence: json.loads(
+                    (label_dir / sequence / "manifest.json").read_text()
+                )
+                for sequence in sequences
+            }
+            teacher_config_hashes = {
+                manifest["teacher_config_sha256"]
+                for manifest in sequence_label_manifests.values()
+            }
+            checkpoint_hashes = {
+                manifest["teacher_checkpoint_sha256"]
+                for manifest in sequence_label_manifests.values()
+            }
+            checkpoint_paths = {
+                manifest["teacher_checkpoint_path"]
+                for manifest in sequence_label_manifests.values()
+            }
+            if not (
+                len(teacher_config_hashes)
+                == len(checkpoint_hashes)
+                == len(checkpoint_paths)
+                == 1
+            ):
+                raise ValueError("Mamba distill labels use inconsistent teachers")
+            first_manifest = sequence_label_manifests[sequences[0]]
+            distill_contract = {
+                "mamba_distill_label_root": str(label_dir),
+                "teacher_weight_cap": 0.5,
+                "advantage_horizon": 5,
+                "tau_adv": float(label_summary["tau_adv"]),
+                "mamba_checkpoint_path": checkpoint_paths.pop(),
+                "mamba_checkpoint_sha256": checkpoint_hashes.pop(),
+                "mamba_teacher_config": first_manifest["teacher_config"],
+                "mamba_teacher_config_sha256": teacher_config_hashes.pop(),
+                "teacher_sidecar_sha256": _canonical_sha256(
+                    {
+                        sequence: manifest["teacher_manifest_sha256"]
+                        for sequence, manifest in sequence_label_manifests.items()
+                    }
+                ),
+                "base_nsa_label_sha256": _canonical_sha256(
+                    {
+                        sequence: manifest[
+                            "source_nsa_label_manifest_sha256"
+                        ]
+                        for sequence, manifest in sequence_label_manifests.items()
+                    }
+                ),
+            }
+        elif motion_target_mode == "mamba_native":
+            if label_summary.get("motion_label_mode") != "mamba_native_current":
+                raise ValueError("Mamba-native labels use an unexpected motion label mode")
+            sequence_label_manifests = {
+                sequence: json.loads(
+                    (label_dir / sequence / "manifest.json").read_text()
+                )
+                for sequence in sequences
+            }
+            checkpoint_hashes = {
+                manifest.get("mamba_checkpoint_sha256")
+                for manifest in sequence_label_manifests.values()
+            }
+            checkpoint_paths = {
+                manifest.get("mamba_checkpoint_path")
+                for manifest in sequence_label_manifests.values()
+            }
+            teacher_config_hashes = {
+                manifest.get("mamba_teacher_config_sha256")
+                for manifest in sequence_label_manifests.values()
+            }
+            if not (
+                len(checkpoint_hashes)
+                == len(checkpoint_paths)
+                == len(teacher_config_hashes)
+                == 1
+                and None not in checkpoint_hashes
+                and None not in checkpoint_paths
+                and None not in teacher_config_hashes
+            ):
+                raise ValueError("Mamba-native labels use inconsistent teachers")
+            if any(
+                manifest.get("event_source") != "mamba_native"
+                for manifest in sequence_label_manifests.values()
+            ):
+                raise ValueError("Mamba-native labels require native event caches")
+            first_manifest = sequence_label_manifests[sequences[0]]
+            distill_contract = {
+                "event_source": "mamba_native",
+                "motion_label_mode": "mamba_native_current",
+                "mamba_checkpoint_path": checkpoint_paths.pop(),
+                "mamba_checkpoint_sha256": checkpoint_hashes.pop(),
+                "mamba_teacher_config": first_manifest["mamba_teacher_config"],
+                "mamba_teacher_config_sha256": teacher_config_hashes.pop(),
+                "native_event_cache_sha256": _canonical_sha256(
+                    {
+                        sequence: manifest["event_cache_manifest_sha256"]
+                        for sequence, manifest in sequence_label_manifests.items()
+                    }
+                ),
+            }
         index_root = output_dir / "compact_index"
         index_root.mkdir()
         compact_index_paths: list[Path] = []
@@ -749,7 +892,14 @@ def build_iwg_attn_dataset(
         label_files_sha256 = _sha256_relative_file_set(label_paths, label_dir)
         index_metadata = {
             "train_index_dir": index_root.name,
-            "compact_index_array_files": COMPACT_INDEX_ARRAY_FILES,
+            "compact_index_array_files": {
+                **COMPACT_INDEX_ARRAY_FILES,
+                **(
+                    MAMBA_DISTILL_SAMPLE_ARRAY_FILES
+                    if motion_target_mode == "mamba_hybrid"
+                    else {}
+                ),
+            },
         }
         num_train_samples = sum(
             counts["labeled_endpoints"] for counts in timeline_counts.values()
@@ -788,6 +938,21 @@ def build_iwg_attn_dataset(
         "split": split,
         "split_policy": "train_all",
         "candidate_types": ["A"],
+        "motion_target_mode": motion_target_mode,
+        **distill_contract,
+        **(
+            {
+                "distill_label_sha256": label_files_sha256,
+                "base_nsa_cache_sha256": _sha256_file_set(manifest_paths),
+            }
+            if motion_target_mode == "mamba_hybrid"
+            else {}
+        ),
+        **(
+            {"native_label_sha256": label_files_sha256}
+            if motion_target_mode == "mamba_native"
+            else {}
+        ),
         "train_sequences": sequences,
         **(
             {"sequence_source_splits": source_splits}
@@ -843,6 +1008,13 @@ class StreamingIWGAttnDataset(torch.utils.data.Dataset):
         elif self.index_format == COMPACT_INDEX_FORMAT:
             total = 0
             index_root = self.dataset_dir / self.metadata["train_index_dir"]
+            sample_array_files = dict(COMPACT_SAMPLE_ARRAY_FILES)
+            if self.metadata.get("motion_target_mode", "nsa") == "mamba_hybrid":
+                sample_array_files.update(MAMBA_DISTILL_SAMPLE_ARRAY_FILES)
+            index_array_files = {
+                **sample_array_files,
+                **COMPACT_TIMELINE_ARRAY_FILES,
+            }
             for sequence in self.metadata["train_sequences"]:
                 sequence_dir = index_root / sequence
                 arrays = {
@@ -851,12 +1023,12 @@ class StreamingIWGAttnDataset(torch.utils.data.Dataset):
                         mmap_mode="r",
                         allow_pickle=False,
                     )
-                    for name, filename in COMPACT_INDEX_ARRAY_FILES.items()
+                    for name, filename in index_array_files.items()
                 }
                 count = int(arrays["track_ids"].shape[0])
                 if any(
                     arrays[name].shape[0] != count
-                    for name in COMPACT_SAMPLE_ARRAY_FILES
+                    for name in sample_array_files
                 ):
                     raise ValueError(f"compact index length mismatch in {sequence_dir}")
                 timeline_count = int(arrays["timeline_track_feats"].shape[0])
@@ -1154,6 +1326,26 @@ class StreamingIWGAttnDataset(torch.utils.data.Dataset):
             segment_id = int(compact["segment_ids"][local_index])
             endpoint_shard, endpoint_offset = references[-1]
             label_key = event_key(sequence, endpoint_shard, endpoint_offset)
+        if self.metadata.get("motion_target_mode", "nsa") == "mamba_hybrid":
+            if self.index_format != COMPACT_INDEX_FORMAT:
+                raise ValueError("mamba_hybrid targets require compact memmap indexes")
+            teacher_weight = float(compact["teacher_weight"][local_index])
+            nsa_motion_target = float(compact["nsa_motion_target"][local_index])
+            hybrid_motion_target = float(
+                compact["hybrid_motion_target"][local_index]
+            )
+            mamba_projection_gate = float(
+                compact["mamba_projection_gate"][local_index]
+            )
+            mamba_advantage = float(compact["mamba_advantage"][local_index])
+            mamba_coverage = float(compact["mamba_coverage"][local_index])
+        else:
+            teacher_weight = 0.0
+            nsa_motion_target = float(safe_gate[0])
+            hybrid_motion_target = float(safe_gate[0])
+            mamba_projection_gate = float(safe_gate[0])
+            mamba_advantage = 0.0
+            mamba_coverage = 0.0
         reid_dim = int(self.metadata["reid_dim"])
         track = np.zeros((IWG_CONTEXT_SIZE, reid_dim), dtype=np.float32)
         detection = np.zeros((IWG_CONTEXT_SIZE, reid_dim), dtype=np.float32)
@@ -1222,6 +1414,18 @@ class StreamingIWGAttnDataset(torch.utils.data.Dataset):
             "valid_motion": torch.tensor(valid_motion),
             "valid_appearance": torch.tensor(valid_appearance),
             "sample_weight": torch.tensor(sample_weight),
+            "teacher_weight": torch.tensor(teacher_weight, dtype=torch.float32),
+            "nsa_motion_target": torch.tensor(
+                nsa_motion_target, dtype=torch.float32
+            ),
+            "hybrid_motion_target": torch.tensor(
+                hybrid_motion_target, dtype=torch.float32
+            ),
+            "mamba_projection_gate": torch.tensor(
+                mamba_projection_gate, dtype=torch.float32
+            ),
+            "mamba_advantage": torch.tensor(mamba_advantage, dtype=torch.float32),
+            "mamba_coverage": torch.tensor(mamba_coverage, dtype=torch.float32),
             "sequence": sequence,
             "track_id": track_id,
             "segment_id": segment_id,

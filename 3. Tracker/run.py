@@ -116,6 +116,14 @@ def make_parser():
                        help="Disable Global Motion Compensation for robustness testing")
     parser.add_argument("--tracker-suffix", type=str, default="",
                        help="Suffix appended to tracker output folder name for unique results")
+    parser.add_argument(
+        "--legacy-output-naming",
+        action="store_true",
+        help=(
+            "Keep the historical AgentGuard output-folder spelling. By default, "
+            "iwg-attn outputs use the shorter '<suffix>_iwg_attn_<base|final>' name."
+        ),
+    )
     parser.add_argument("--sequences", type=str, nargs="+", default=None,
                        help="Only track specific sequences (e.g. --sequences MOT20-01)")
 
@@ -128,7 +136,7 @@ def make_parser():
     parser.add_argument("--tgr-checkpoint", type=str, default=None,
                        help="Path to TGR model checkpoint (.pt)")
     parser.add_argument("--agentguard-checkpoint", type=str, default=None,
-                       help="Path to combined IWG+TSRM checkpoint (.pt)")
+                       help="Path to one combined IWG+RG-CMA checkpoint file (.pt); directories are not accepted")
     parser.add_argument("--joint-output", choices=["base", "final"], default="final",
                        help="Apply base or TSRM-corrected gate from a combined checkpoint")
     parser.add_argument("--iwg-attn-output", choices=["base", "final"], default="final",
@@ -453,7 +461,10 @@ def run():
     elif args.agentguard_mode == 'joint':
         trackers_to_eval += f'_agentguard_joint_{args.joint_output}'
     elif args.agentguard_mode == 'iwg-attn':
-        trackers_to_eval += f'_agentguard_iwg_attn_{args.iwg_attn_output}'
+        if args.legacy_output_naming:
+            trackers_to_eval += f'_agentguard_iwg_attn_{args.iwg_attn_output}'
+        else:
+            trackers_to_eval += f'_iwg_attn_{args.iwg_attn_output}'
     result_folder_base = os.path.join(args.output_dir, trackers_to_eval)
     if 'dance' in args.dataset.lower() and args.mode == 'test':
         result_folder = os.path.join(result_folder_base, 'tracker')

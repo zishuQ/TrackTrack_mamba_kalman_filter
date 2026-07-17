@@ -12,7 +12,7 @@ TRACKER_ROOT="${ROOT}/outputs/3. track"
 
 SPORTS_DATA_NAME="iwg_rg_cma_v1_sportsmot_train_data"
 SPORTS_DATA_ROOT="${EXPERIMENT_ROOT}/${SPORTS_DATA_NAME}"
-SPORTS_LABEL_DIR="${SPORTS_DATA_ROOT}/labels_v3_compact"
+SPORTS_LABEL_DIR="${ROOT}/outputs/agentguard/labels/iwg_rg_cma/SportsMOT/nsa_train_v3_compact"
 SPORTS_DATASET_DIR="${SPORTS_DATA_ROOT}/dataset"
 
 SPORTS_OLD_NAME="iwg_rg_cma_v1_sportsmot_old_shard10x2_seed42_bs1024"
@@ -230,7 +230,7 @@ validate_schedule() {
       local command=(
         "${PY}" run.py --dataset "${dataset}" --mode "${mode}"
         --sequences "${sequences[@]}" --seed 10000
-        --agentguard-mode iwg-attn --agentguard-checkpoint "${checkpoint}"
+        --agentguard-mode iwg-attn --legacy-output-naming --agentguard-checkpoint "${checkpoint}"
         --iwg-attn-output "${gate}" --agentguard-device cpu
         --detection-cache-root "${DETECTION_CACHE_ROOT}"
         --tracker-suffix "${suffix}" --use_post --skip-eval

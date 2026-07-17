@@ -144,7 +144,7 @@ run_val_case() {
   local suffix="${RUN_NAME}_${output}_val"
   local command=(
     "${PY}" run.py --dataset DanceTrack --mode val
-    --sequences "${VAL_SEQUENCES[@]}" --seed 10000
+    --sequences "${VAL_SEQUENCES[@]}" --seed 10000 --legacy-output-naming
     --agentguard-mode iwg-attn --agentguard-checkpoint "${CHECKPOINT}"
     --iwg-attn-output "${output}" --agentguard-device cpu
     --detection-cache-root "${DETECTION_CACHE_ROOT}"

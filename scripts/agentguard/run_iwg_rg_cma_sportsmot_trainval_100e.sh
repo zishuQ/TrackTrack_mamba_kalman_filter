@@ -7,14 +7,14 @@ RUN_NAME="${RUN_NAME:-iwg_rg_cma_v1_sportsmot_trainval_seed42_bs1024_shard10x1}"
 DATA_RUN_NAME="${DATA_RUN_NAME:-iwg_rg_cma_v1_sportsmot_trainval_seed42_bs1024}"
 RUN_ROOT="${ROOT}/outputs/agentguard/experiments/${RUN_NAME}"
 DATA_ROOT="${ROOT}/outputs/agentguard/experiments/${DATA_RUN_NAME}"
-LABEL_DIR="${DATA_ROOT}/labels_v3_compact"
+LABEL_DIR="${ROOT}/outputs/agentguard/labels/iwg_rg_cma/SportsMOT/nsa_trainval_v3_compact"
 DATASET_DIR="${DATA_ROOT}/dataset"
 CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
 LOG_DIR="${RUN_ROOT}/logs"
 PROVENANCE_DIR="${RUN_ROOT}/provenance"
 EVENT_CACHE_ROOT="${ROOT}/outputs/agentguard/event_cache_v3_iwg_v2"
 DETECTION_CACHE_ROOT="${ROOT}/outputs/agentguard/detection_cache"
-EXISTING_TRAIN_LABELS="${ROOT}/outputs/agentguard/experiments/iwg_rg_cma_v1_sportsmot_train_data/labels_v3_compact"
+EXISTING_TRAIN_LABELS="${ROOT}/outputs/agentguard/labels/iwg_rg_cma/SportsMOT/nsa_train_v3_compact"
 LAST_CHECKPOINT="${CHECKPOINT_DIR}/iwg_rg_cma_last.pt"
 EPOCHS="${EPOCHS:-100}"
 MEMORY_SHARDS="${MEMORY_SHARDS:-10}"
@@ -34,7 +34,8 @@ if [[ -e "${RUN_ROOT}/running" || -e "${LAST_CHECKPOINT}" ]]; then
   exit 2
 fi
 
-mkdir -p "${DATA_ROOT}" "${CHECKPOINT_DIR}" "${LOG_DIR}" "${PROVENANCE_DIR}"
+mkdir -p "${DATA_ROOT}" "$(dirname "${LABEL_DIR}")" \
+  "${CHECKPOINT_DIR}" "${LOG_DIR}" "${PROVENANCE_DIR}"
 touch "${RUN_ROOT}/running"
 complete=0
 finish() {

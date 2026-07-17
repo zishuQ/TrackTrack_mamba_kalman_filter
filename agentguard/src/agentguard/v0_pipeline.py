@@ -26,6 +26,7 @@ from agentguard.features.builder import EventFeatureBuilder
 from agentguard.motion.nsa_numpy import NSAKalmanFilter
 from agentguard.rollout.appearance import compute_appearance_benefit
 from agentguard.rollout.context import RolloutContext
+from agentguard.rollout.losses import motion_frame_loss
 from agentguard.rollout.motion import compute_motion_benefit
 from agentguard.rollout_labels import (
     compute_dataset_stats,
@@ -35,6 +36,29 @@ from agentguard.rollout_labels import (
     compute_soft_target,
     hard_gate_from_benefit,
 )
+
+
+def _mamba_native_current_motion_benefit(
+    prior_mean: np.ndarray,
+    detection_box: np.ndarray,
+    current_gt: np.ndarray,
+) -> float:
+    mean = np.asarray(prior_mean, dtype=np.float64).reshape(8)
+    cx, cy, width, height = mean[:4]
+    prior_box = np.asarray(
+        [
+            cx - width / 2.0,
+            cy - height / 2.0,
+            cx + width / 2.0,
+            cy + height / 2.0,
+        ],
+        dtype=np.float64,
+    )
+    detection_box = np.asarray(detection_box, dtype=np.float64).reshape(4)
+    current_gt = np.asarray(current_gt, dtype=np.float64).reshape(4)
+    return motion_frame_loss(current_gt, prior_box) - motion_frame_loss(
+        current_gt, detection_box
+    )
 
 
 SAMPLE_TYPE_TO_ID = {
@@ -336,6 +360,7 @@ def build_compact_rollout_labels_for_sequence(
     max_events: int = 0,
     future_frames: int = 5,
     candidate_types: Optional[set[str]] = None,
+    motion_label_mode: str = "nsa_rollout",
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     candidate_types = {str(t).upper() for t in (candidate_types or {"A"})}
     invalid_types = candidate_types.difference({"A", "B", "C"})
@@ -343,12 +368,21 @@ def build_compact_rollout_labels_for_sequence(
         raise ValueError(f"Unknown candidate type(s): {sorted(invalid_types)}")
     if not candidate_types:
         candidate_types = {"A"}
+    if motion_label_mode not in {"nsa_rollout", "mamba_native_current"}:
+        raise ValueError(f"unsupported motion_label_mode: {motion_label_mode!r}")
+    if motion_label_mode == "mamba_native_current" and candidate_types != {"A"}:
+        raise ValueError("mamba_native_current motion labels support candidate A only")
 
     reader = CompactEventCacheReader(
         event_cache_dir,
         detection_cache_dir,
         max_cached_shards=16,
     )
+    if motion_label_mode == "mamba_native_current":
+        if str(reader.manifest.get("event_source", "")) != "mamba_native":
+            raise ValueError(
+                "mamba_native_current labels require an event_source=mamba_native cache"
+            )
     gt_reader = GTReader(str(gt_root), str(reader.manifest["sequence"]))
     motion_model = NSAKalmanFilter()
     vote_state = TrackIdentityVoteState()
@@ -395,6 +429,7 @@ def build_compact_rollout_labels_for_sequence(
         motion_benefits: List[float] = []
         appearance_benefits: List[float] = []
         summary = {
+            "motion_label_mode": motion_label_mode,
             "reliable_identity_events": 0,
             "candidate_a_count": 0,
             "candidate_b_count": 0,
@@ -476,12 +511,23 @@ def build_compact_rollout_labels_for_sequence(
                 appearance_valid_count = 0
                 if valid_motion:
                     try:
-                        b_m, _, _, m_mask = compute_motion_benefit(
-                            ctx,
-                            motion_model,
-                            future_frames=future_frames,
-                            include_current=True,
-                        )
+                        if motion_label_mode == "mamba_native_current":
+                            state = ctx.pre_update_state
+                            if state is None or state.mean is None:
+                                raise ValueError("Mamba-native event lacks a prior mean")
+                            b_m = _mamba_native_current_motion_benefit(
+                                state.mean,
+                                candidate_event.detection.box,
+                                current_gt,
+                            )
+                            m_mask = np.asarray([True], dtype=bool)
+                        else:
+                            b_m, _, _, m_mask = compute_motion_benefit(
+                                ctx,
+                                motion_model,
+                                future_frames=future_frames,
+                                include_current=True,
+                            )
                         motion_valid_count = int(np.asarray(m_mask, dtype=bool).sum())
                         valid_motion = motion_valid_count > 0
                     except Exception:
@@ -532,11 +578,16 @@ def build_compact_rollout_labels_for_sequence(
                         "detection_gt_id": int(spec["detection_gt_id"]),
                         "detection_gt_iou": float(spec["detection_gt_iou"]),
                         "motion_benefit": float(b_m),
+                        "motion_label_mode": motion_label_mode,
                         "appearance_benefit": float(b_a),
                         "valid_motion": bool(valid_motion),
                         "valid_appearance": bool(valid_appearance),
                         "valid_horizon_count": int(max(motion_valid_count, appearance_valid_count)),
-                        "gt_coverage": float(gt_count / max(future_frames + 1, 1)),
+                        "gt_coverage": (
+                            1.0
+                            if motion_label_mode == "mamba_native_current"
+                            else float(gt_count / max(future_frames + 1, 1))
+                        ),
                         "oracle_detection_coverage": float(oracle_count / max(future_frames, 1)),
                         "sample_type": "matched" if candidate_event.has_detection else "unmatched",
                         "sample_weight": 1.0,
