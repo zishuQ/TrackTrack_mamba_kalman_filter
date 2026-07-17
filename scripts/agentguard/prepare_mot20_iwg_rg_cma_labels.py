@@ -35,11 +35,6 @@ def main() -> None:
     parser.add_argument("--gt-root", default="/home/shang/datasets/MOT20/train")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--sequence", action="append", default=[])
-    parser.add_argument(
-        "--motion-label-mode",
-        choices=["nsa_rollout", "mamba_native_current"],
-        default="nsa_rollout",
-    )
     args = parser.parse_args()
 
     event_cache_root = Path(args.event_cache_root).resolve()
@@ -61,7 +56,6 @@ def main() -> None:
             ),
             gt_root=args.gt_root,
             output_root=output_dir,
-            motion_label_mode=args.motion_label_mode,
         )
         manifests[sequence] = manifest
         print(
@@ -77,17 +71,9 @@ def main() -> None:
             available_manifests[sequence] = json.loads(manifest_path.read_text())
     aggregate = {
         "dataset": "MOT20",
-        "event_source": (
-            "mamba_native"
-            if args.motion_label_mode == "mamba_native_current"
-            else "nsa"
-        ),
-        "motion_target_mode": (
-            "mamba_native"
-            if args.motion_label_mode == "mamba_native_current"
-            else "nsa"
-        ),
-        "motion_label_mode": args.motion_label_mode,
+        "event_source": "nsa",
+        "motion_target_mode": "nsa",
+        "motion_label_mode": "nsa_rollout",
         "complete": set(available_manifests) == set(MOT20_SEQUENCES),
         "sequences": sorted(available_manifests),
         "source_labels": sum(

@@ -132,33 +132,20 @@ def _datasets_dir(dataset: str) -> str:
     return os.path.join(_outputs_dir(), "agentguard", "datasets", dataset)
 
 
-def _parse_candidate_types(value: str) -> set[str]:
-    types = {item.strip().upper() for item in str(value).split(",") if item.strip()}
-    invalid = types.difference({"A", "B", "C"})
+def _label_mode_name(mode: str) -> str:
+    return f"{mode}_a_only"
+
+
+def _validate_candidate_a_records(records: list[dict[str, Any]]) -> None:
+    invalid = sorted(
+        {
+            str(record.get("candidate_type", "A")).upper()
+            for record in records
+            if str(record.get("candidate_type", "A")).upper() != "A"
+        }
+    )
     if invalid:
-        raise ValueError(f"Unknown candidate type(s): {sorted(invalid)}")
-    return types or {"A"}
-
-
-def _parse_candidate_weights(value: str) -> dict[str, float]:
-    weights = {"A": 1.0, "B": 1.0, "C": 1.0}
-    for part in str(value).split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if ":" not in part:
-            raise ValueError(f"Invalid candidate weight {part!r}; expected A:1,B:0.5,C:0.5")
-        key, raw_weight = part.split(":", 1)
-        key = key.strip().upper()
-        if key not in weights:
-            raise ValueError(f"Unknown candidate type in weight: {key!r}")
-        weights[key] = float(raw_weight)
-    return weights
-
-
-def _label_mode_name(mode: str, candidate_types: str) -> str:
-    allowed = _parse_candidate_types(candidate_types)
-    return f"{mode}_a_only" if allowed == {"A"} else mode
+        raise ValueError(f"only candidate A records are supported: {invalid}")
 
 
 def _stable_record_key(record: dict[str, Any]) -> str:
@@ -170,41 +157,6 @@ def _stable_record_key(record: dict[str, Any]) -> str:
             str(record.get("candidate_detection_index", -1)),
         ]
     )
-
-
-def _filter_and_weight_student_records(
-    records: list[dict[str, Any]],
-    *,
-    candidate_types: str,
-    candidate_weights: str,
-    max_per_candidate_type: int,
-) -> list[dict[str, Any]]:
-    allowed = _parse_candidate_types(candidate_types)
-    weights = _parse_candidate_weights(candidate_weights)
-    grouped: dict[str, list[dict[str, Any]]] = {"A": [], "B": [], "C": []}
-    for record in records:
-        ctype = str(record.get("candidate_type", "A")).upper()
-        if ctype not in allowed:
-            continue
-        weight = float(weights.get(ctype, 1.0))
-        if weight <= 0:
-            continue
-        copied = dict(record)
-        copied["candidate_type"] = ctype
-        copied["sample_weight"] = float(copied.get("sample_weight", 1.0)) * weight
-        grouped.setdefault(ctype, []).append(copied)
-
-    selected: list[dict[str, Any]] = []
-    for ctype in sorted(grouped):
-        bucket = grouped[ctype]
-        if max_per_candidate_type > 0 and len(bucket) > max_per_candidate_type:
-            bucket = sorted(
-                bucket,
-                key=lambda r: hashlib.sha256(_stable_record_key(r).encode()).hexdigest(),
-            )[:max_per_candidate_type]
-        selected.extend(bucket)
-    selected.sort(key=_stable_record_key)
-    return selected
 
 
 def _stratified_record_sample(records: list[dict[str, Any]], max_samples: int) -> list[dict[str, Any]]:
@@ -1099,24 +1051,6 @@ def _add_build_rollout_labels_parser(subparsers: argparse._SubParsersAction) -> 
     )
     p.add_argument("--label-dir", default=None, help="Override rollout label directory.")
     p.add_argument("--output-dir", default=None, help="Override Student-V0 dataset index directory.")
-    p.add_argument(
-        "--candidate-types",
-        default="A",
-        help="Comma-separated candidate types to include. Default A; pass A,B,C for TrackTrack-specific ablations.",
-    )
-    p.add_argument(
-        "--candidate-weights",
-        default="A:1",
-        help="Per-candidate sample weights, e.g. A:1,B:0.5,C:0.25.",
-    )
-    p.add_argument(
-        "--max-per-candidate-type",
-        type=int,
-        default=0,
-        help="Deterministically cap each candidate type before splitting (0=all).",
-    )
-
-
 def _cmd_build_rollout_labels(args: argparse.Namespace) -> None:
     from agentguard.v0_pipeline import build_compact_rollout_labels_for_sequence
 
@@ -1126,8 +1060,6 @@ def _cmd_build_rollout_labels(args: argparse.Namespace) -> None:
     cache_root = _event_cache_dir(dataset, mode, args.event_cache_root)
     label_dir = _ensure_dir(_labels_dir(dataset))
     os.environ["AG_GUARD_DATASET"] = dataset
-    candidate_types = _parse_candidate_types(args.candidate_types)
-
     if not os.path.isdir(cache_root):
         raise FileNotFoundError(f"Event cache split directory not found: {cache_root}")
 
@@ -1135,7 +1067,7 @@ def _cmd_build_rollout_labels(args: argparse.Namespace) -> None:
         d for d in os.listdir(cache_root)
         if os.path.isdir(os.path.join(cache_root, d)) and not d.startswith("_")
     )
-    label_mode = _label_mode_name(mode, args.candidate_types)
+    label_mode = _label_mode_name(mode)
     labels_out = _ensure_dir(args.label_dir or os.path.join(label_dir, label_mode))
     gt_root = _gt_root_for_dataset_mode(args.data_dir, dataset, mode)
     total_labels = 0
@@ -1154,7 +1086,6 @@ def _cmd_build_rollout_labels(args: argparse.Namespace) -> None:
             gt_root,
             max_events=limit,
             future_frames=args.future_frames,
-            candidate_types=candidate_types,
         )
         if labels:
             seq_path = os.path.join(labels_out, f"{seq}_labels.json")
@@ -1172,7 +1103,7 @@ def _cmd_build_rollout_labels(args: argparse.Namespace) -> None:
         "mode": mode,
         "split": split,
         "label_mode": label_mode,
-        "candidate_types": sorted(candidate_types),
+        "candidate_types": ["A"],
         "num_labels": total_labels,
         "num_sequences": len(sequence_summaries),
         "sequences": sequence_summaries,
@@ -1501,24 +1432,6 @@ def _add_build_student_v0_data_parser(subparsers: argparse._SubParsersAction) ->
     )
     p.add_argument("--label-dir", default=None, help="Override rollout label directory.")
     p.add_argument("--output-dir", default=None, help="Override Student-V0 dataset index directory.")
-    p.add_argument(
-        "--candidate-types",
-        default="A",
-        help="Comma-separated candidate types to include. Default A; pass A,B,C for TrackTrack-specific ablations.",
-    )
-    p.add_argument(
-        "--candidate-weights",
-        default="A:1",
-        help="Per-candidate sample weights, e.g. A:1,B:0.5,C:0.25.",
-    )
-    p.add_argument(
-        "--max-per-candidate-type",
-        type=int,
-        default=0,
-        help="Deterministically cap each candidate type before splitting (0=all).",
-    )
-
-
 def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
     import numpy as np
 
@@ -1531,7 +1444,7 @@ def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
     dataset = args.dataset
     mode = args.mode
     split = _resolve_split(mode)
-    label_mode = _label_mode_name(mode, args.candidate_types)
+    label_mode = _label_mode_name(mode)
     label_dir = args.label_dir or os.path.join(_labels_dir(dataset), label_mode)
     datasets_dir = _ensure_dir(args.output_dir or os.path.join(_datasets_dir(dataset), mode))
     if not os.path.isdir(label_dir):
@@ -1539,12 +1452,7 @@ def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
 
     records = load_label_records(label_dir, max_samples=args.max_samples)
     records = [r for r in records if r.get("valid_motion") or r.get("valid_appearance")]
-    records = _filter_and_weight_student_records(
-        records,
-        candidate_types=args.candidate_types,
-        candidate_weights=args.candidate_weights,
-        max_per_candidate_type=args.max_per_candidate_type,
-    )
+    _validate_candidate_a_records(records)
     records = _slice_records_by_sequence_ratio(
         records,
         start_ratio=float(args.sample_start_ratio),
@@ -1655,9 +1563,7 @@ def _cmd_build_student_v0_data(args: argparse.Namespace) -> None:
         "split_policy": args.split_policy,
         "sample_start_ratio": float(args.sample_start_ratio),
         "sample_end_ratio": float(args.sample_end_ratio),
-        "candidate_types": sorted({str(r.get("candidate_type", "A")) for r in records}),
-        "candidate_weights": args.candidate_weights,
-        "max_per_candidate_type": int(args.max_per_candidate_type),
+        "candidate_types": ["A"],
         "train_sequences": sorted(train_seqs),
         "val_sequences": sorted(val_seqs),
     }
@@ -3050,206 +2956,6 @@ def _cmd_train_student_v1(args: argparse.Namespace) -> None:
     print(f"V1 training summary saved to {os.path.join(v1_checkpoints_dir, 'training_summary.json')}")
 
 
-# ===================================================================
-# Subcommand: build_iwg_tsrm_data
-# ===================================================================
-
-
-def _add_build_iwg_tsrm_data_parser(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser(
-        "build_iwg_tsrm_data",
-        help="Build causal IWG+TSRM windows from the complete compact timeline.",
-    )
-    parser.add_argument("--dataset", default="MOT17")
-    parser.add_argument("--mode", default="all")
-    parser.add_argument("--candidate-types", default="A")
-    parser.add_argument("--event-cache-root", required=True)
-    parser.add_argument("--detection-cache-root", required=True)
-    parser.add_argument("--label-dir", required=True)
-    parser.add_argument("--output-dir", required=True)
-    parser.add_argument(
-        "--split-policy",
-        choices=["explicit_sequence_holdout"],
-        required=True,
-    )
-    parser.add_argument("--val-sequences", nargs="+", required=True)
-    parser.add_argument("--window-size", type=int, default=16)
-    parser.add_argument("--window-stride", type=int, default=4)
-    parser.add_argument("--max-frame-gap", type=int, default=30)
-
-
-def _cmd_build_iwg_tsrm_data(args: argparse.Namespace) -> None:
-    from agentguard.datasets.joint_window_dataset import build_iwg_tsrm_dataset
-
-    if _parse_candidate_types(args.candidate_types) != {"A"}:
-        raise ValueError("IWG+TSRM v1 supports candidate type A only")
-    metadata = build_iwg_tsrm_dataset(
-        dataset=args.dataset,
-        split=_resolve_split(args.mode),
-        event_cache_root=args.event_cache_root,
-        detection_cache_root=args.detection_cache_root,
-        label_dir=args.label_dir,
-        output_dir=args.output_dir,
-        val_sequences=args.val_sequences,
-        window_size=args.window_size,
-        window_stride=args.window_stride,
-        max_frame_gap=args.max_frame_gap,
-    )
-    print(json.dumps(metadata, indent=2, sort_keys=True))
-
-
-def _add_train_iwg_tsrm_parser(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser(
-        "train_iwg_tsrm", help="Train a base IWG or joint IWG+TSRM checkpoint."
-    )
-    parser.add_argument("--training-mode", choices=["base", "joint"], required=True)
-    parser.add_argument("--dataset-dir", required=True)
-    parser.add_argument("--checkpoint-dir", required=True)
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--amp", action="store_true")
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--warmup-epochs", type=int, default=1)
-    parser.add_argument("--grad-clip", type=float, default=5.0)
-    parser.add_argument("--grad-accum-steps", type=int, default=1)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--window-size", type=int, default=16)
-    parser.add_argument("--delta-max", type=float, default=0.2)
-    parser.add_argument("--lambda-final", type=float, default=1.0)
-    parser.add_argument("--lambda-residual", type=float, default=0.5)
-    parser.add_argument("--lambda-dynamics", type=float, default=0.1)
-    parser.add_argument("--lambda-revision", type=float, default=0.01)
-    parser.add_argument(
-        "--temporal-iwg-gradient-scale",
-        type=float,
-        default=1.0,
-        help="Scale temporal/final gradients reaching IWG without changing forward values.",
-    )
-    parser.add_argument(
-        "--selection-metric",
-        choices=["base_gate_loss", "final_gate_loss"],
-        default=None,
-    )
-    parser.add_argument("--early-stop-patience", type=int, default=0)
-    parser.add_argument("--max-train-windows", type=int, default=0)
-    parser.add_argument("--max-val-windows", type=int, default=0)
-    parser.add_argument(
-        "--sampling-policy",
-        choices=["sequence_balanced", "shuffle"],
-        default="sequence_balanced",
-    )
-    parser.add_argument("--resume-from", default="")
-
-
-def _cmd_train_iwg_tsrm(args: argparse.Namespace) -> None:
-    import subprocess
-    import torch
-
-    from agentguard.training.train_iwg_tsrm import train_iwg_tsrm
-
-    if args.device.startswith("cuda") and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but is not available")
-    metadata = json.loads((Path(args.dataset_dir) / "metadata.json").read_text())
-    if int(metadata["window_size"]) != int(args.window_size):
-        raise ValueError(
-            f"window_size mismatch: dataset={metadata['window_size']} CLI={args.window_size}"
-        )
-    if not 0.0 <= float(args.temporal_iwg_gradient_scale) <= 1.0:
-        raise ValueError("temporal_iwg_gradient_scale must be in [0, 1]")
-    if args.training_mode == "base" and float(args.temporal_iwg_gradient_scale) != 1.0:
-        raise ValueError("temporal_iwg_gradient_scale only applies to joint training")
-    expected_selection = (
-        "final_gate_loss" if args.training_mode == "joint" else "base_gate_loss"
-    )
-    if args.selection_metric is not None and args.selection_metric != expected_selection:
-        raise ValueError(
-            f"{args.training_mode} training requires selection metric {expected_selection}"
-        )
-    checkpoint_dir = Path(args.checkpoint_dir)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    diagnostics_output = checkpoint_dir.parent / "label_diagnostics.json"
-    command = [
-        sys.executable,
-        str(Path(PROJECT_ROOT) / "scripts" / "agentguard" / "label_diagnostics.py"),
-        "--label-dir",
-        str(metadata["label_dir"]),
-        "--dataset",
-        str(metadata["dataset"]),
-        "--mode",
-        str(metadata["split"]),
-        "--output",
-        str(diagnostics_output),
-    ]
-    subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
-    config = {
-        "training_mode": args.training_mode,
-        "dataset_dir": str(Path(args.dataset_dir).resolve()),
-        "checkpoint_dir": str(checkpoint_dir.resolve()),
-        "device": args.device,
-        "amp": bool(args.amp),
-        "epochs": int(args.epochs),
-        "batch_size": int(args.batch_size),
-        "num_workers": int(args.num_workers),
-        "lr": float(args.lr),
-        "weight_decay": float(args.weight_decay),
-        "warmup_epochs": int(args.warmup_epochs),
-        "grad_clip": float(args.grad_clip),
-        "grad_accum_steps": int(args.grad_accum_steps),
-        "seed": int(args.seed),
-        "window_size": int(args.window_size),
-        "delta_max": float(args.delta_max),
-        "lambda_final": float(args.lambda_final),
-        "lambda_residual": float(args.lambda_residual),
-        "lambda_dynamics": float(args.lambda_dynamics),
-        "lambda_revision": float(args.lambda_revision),
-        "temporal_iwg_gradient_scale": float(args.temporal_iwg_gradient_scale),
-        "selection_metric": expected_selection,
-        "early_stop_patience": int(args.early_stop_patience),
-        "max_train_windows": int(args.max_train_windows),
-        "max_val_windows": int(args.max_val_windows),
-        "sampling_policy": str(args.sampling_policy),
-        "resume_from": args.resume_from,
-    }
-    summary = train_iwg_tsrm(config)
-    (checkpoint_dir / "training_summary.json").write_text(
-        json.dumps(summary, indent=2, sort_keys=True) + "\n"
-    )
-    print(json.dumps(summary, indent=2, sort_keys=True))
-
-
-def _add_validate_iwg_tsrm_checkpoint_parser(
-    subparsers: argparse._SubParsersAction,
-) -> None:
-    parser = subparsers.add_parser(
-        "validate_iwg_tsrm_checkpoint", help="Strictly validate and evaluate a joint checkpoint."
-    )
-    parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--dataset-dir", required=True)
-    parser.add_argument("--split", choices=["train", "val"], default="val")
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--max-batches", type=int, default=0)
-    parser.add_argument("--output", default="")
-
-
-def _cmd_validate_iwg_tsrm_checkpoint(args: argparse.Namespace) -> None:
-    from agentguard.training.train_iwg_tsrm import validate_iwg_tsrm_checkpoint
-
-    report = validate_iwg_tsrm_checkpoint(
-        checkpoint_path=args.checkpoint,
-        dataset_dir=args.dataset_dir,
-        split=args.split,
-        device=args.device,
-        max_batches=args.max_batches,
-    )
-    text = json.dumps(report, indent=2, sort_keys=True)
-    print(text)
-    if args.output:
-        Path(args.output).write_text(text + "\n")
-
-
 def _add_build_iwg_attn_data_parser(
     subparsers: argparse._SubParsersAction,
 ) -> None:
@@ -3328,18 +3034,6 @@ def _add_train_iwg_attn_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Epochs per memory shard (0 infers from total epochs and cycles).",
     )
     parser.add_argument("--shard-cycles", type=int, default=1)
-    parser.add_argument(
-        "--motion-target-mode",
-        choices=["nsa", "mamba_hybrid", "mamba_native"],
-        default="nsa",
-    )
-    parser.add_argument(
-        "--mamba-distill-label-root",
-        default="",
-        help="Required provenance root when motion-target-mode=mamba_hybrid.",
-    )
-
-
 def _cmd_train_iwg_attn(args: argparse.Namespace) -> None:
     from agentguard.training.train_iwg_rg_cma import train_iwg_rg_cma
 
@@ -3363,12 +3057,6 @@ def _cmd_train_iwg_attn(args: argparse.Namespace) -> None:
         "memory_shards": int(args.memory_shards),
         "epochs_per_shard": int(args.epochs_per_shard),
         "shard_cycles": int(args.shard_cycles),
-        "motion_target_mode": str(args.motion_target_mode),
-        "mamba_distill_label_root": (
-            str(Path(args.mamba_distill_label_root).resolve())
-            if args.mamba_distill_label_root
-            else ""
-        ),
     }
     summary = train_iwg_rg_cma(config)
     checkpoint_dir = Path(config["checkpoint_dir"])
@@ -3439,17 +3127,6 @@ def main(argv: Optional[List[str]] = None) -> None:
         required=True,
     )
 
-    from agentguard.cli.mamba_distill_commands import (
-        add_audit_parser,
-        add_build_labels_parser,
-        add_export_parser,
-        add_export_native_events_parser,
-        audit_mamba_shadow_command,
-        build_mamba_distill_labels_command,
-        export_mamba_events,
-        export_mamba_shadow,
-    )
-
     # Register all subcommands
     _add_cache_events_parser(subparsers)
     _add_validate_cache_parser(subparsers)
@@ -3465,16 +3142,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     _add_verify_and_fuse_parser(subparsers)
     _add_build_student_v1_data_parser(subparsers)
     _add_train_student_v1_parser(subparsers)
-    _add_build_iwg_tsrm_data_parser(subparsers)
-    _add_train_iwg_tsrm_parser(subparsers)
-    _add_validate_iwg_tsrm_checkpoint_parser(subparsers)
     _add_build_iwg_attn_data_parser(subparsers)
     _add_train_iwg_attn_parser(subparsers)
     _add_validate_iwg_attn_checkpoint_parser(subparsers)
-    add_export_parser(subparsers)
-    add_export_native_events_parser(subparsers)
-    add_audit_parser(subparsers)
-    add_build_labels_parser(subparsers)
 
     parsed = parser.parse_args(argv)
 
@@ -3494,16 +3164,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         "verify_and_fuse": _cmd_verify_and_fuse,
         "build_student_v1_data": _cmd_build_student_v1_data,
         "train_student_v1": _cmd_train_student_v1,
-        "build_iwg_tsrm_data": _cmd_build_iwg_tsrm_data,
-        "train_iwg_tsrm": _cmd_train_iwg_tsrm,
-        "validate_iwg_tsrm_checkpoint": _cmd_validate_iwg_tsrm_checkpoint,
         "build_iwg_attn_data": _cmd_build_iwg_attn_data,
         "train_iwg_attn": _cmd_train_iwg_attn,
         "validate_iwg_attn_checkpoint": _cmd_validate_iwg_attn_checkpoint,
-        "export_mamba_shadow": export_mamba_shadow,
-        "export_mamba_events": export_mamba_events,
-        "audit_mamba_shadow": audit_mamba_shadow_command,
-        "build_mamba_distill_labels": build_mamba_distill_labels_command,
     }
 
     handler = dispatch.get(parsed.command)

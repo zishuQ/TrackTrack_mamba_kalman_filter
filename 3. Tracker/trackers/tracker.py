@@ -24,8 +24,6 @@ class Tracker(object):
         self.tracks = []
         self.frame_id = 0
         self.counter = TrackCounter()
-        # Optional capture-only teacher. Normal tracking never imports Mamba.
-        self.mamba_shadow = getattr(args, 'mamba_shadow', None)
 
         # Set global motion compensation model
         self.cmc = CMC(vid_name)
@@ -43,7 +41,6 @@ class Tracker(object):
             import torch
             from agentguard.runtime.manager import AgentGuardRuntime
             from agentguard.models.iwg import IWG
-            from agentguard.models.iwg_tsrm import IWGTSRM
             from agentguard.models.tgr import TGR
 
             event_sink = getattr(args, 'event_sink', None)
@@ -52,7 +49,7 @@ class Tracker(object):
                 runtime_config = build_runtime_config(args)
                 iwg_ckpt = getattr(args, 'iwg_checkpoint', None)
                 tgr_ckpt = getattr(args, 'tgr_checkpoint', None)
-                joint_ckpt = getattr(args, 'agentguard_checkpoint', None)
+                combined_ckpt = getattr(args, 'agentguard_checkpoint', None)
                 device = getattr(args, 'agentguard_device', 'cpu')
 
                 def _load_checkpoint(ckpt_path):
@@ -133,7 +130,6 @@ class Tracker(object):
 
                 iwg_model = None
                 tgr_model = None
-                joint_model = None
                 iwg_attn_model = None
                 checkpoint_reid_dim = None
                 checkpoint_norm_stats = None
@@ -162,39 +158,8 @@ class Tracker(object):
                     tgr_model.load_state_dict(sd_tgr)
                     tgr_model.eval()
 
-                if ag_mode == 'joint':
-                    if joint_ckpt is None:
-                        raise RuntimeError("Combined AgentGuard checkpoint required for joint mode")
-                    from agentguard.training.train_iwg_tsrm import validate_checkpoint_contract
-                    from agentguard.features.normalization import NormalizationStats
-
-                    checkpoint = torch.load(joint_ckpt, map_location='cpu', weights_only=False)
-                    validate_checkpoint_contract(
-                        checkpoint, expected_training_mode='joint'
-                    )
-                    runtime_config['joint_window_size'] = int(checkpoint['window_size'])
-                    checkpoint_reid_dim = int(checkpoint['reid_dim'])
-                    checkpoint_norm_stats = NormalizationStats()
-                    checkpoint_norm_stats.mean = np.asarray(
-                        checkpoint['normalization_mean'], dtype=np.float64
-                    )
-                    checkpoint_norm_stats.std = np.asarray(
-                        checkpoint['normalization_std'], dtype=np.float64
-                    )
-                    joint_model = IWGTSRM(
-                        reid_dim=checkpoint_reid_dim,
-                        scalar_dim=int(checkpoint['scalar_dim']),
-                        event_dim=int(checkpoint['event_dim']),
-                        delta_max=float(checkpoint['delta_max']),
-                        temporal_iwg_gradient_scale=float(
-                            checkpoint['temporal_iwg_gradient_scale']
-                        ),
-                    )
-                    joint_model.load_state_dict(checkpoint['model_state_dict'], strict=True)
-                    joint_model.eval()
-
                 if ag_mode == 'iwg-attn':
-                    if joint_ckpt is None:
+                    if combined_ckpt is None:
                         raise RuntimeError(
                             "Combined AgentGuard checkpoint required for iwg-attn mode"
                         )
@@ -204,7 +169,7 @@ class Tracker(object):
                     )
 
                     iwg_attn_model, checkpoint = load_iwg_rg_cma_checkpoint(
-                        joint_ckpt, map_location='cpu'
+                        combined_ckpt, map_location='cpu'
                     )
                     checkpoint_reid_dim = int(checkpoint['reid_dim'])
                     checkpoint_norm_stats = NormalizationStats()
@@ -224,7 +189,6 @@ class Tracker(object):
                     iwg_model,
                     tgr_model,
                     device,
-                    joint_model=joint_model,
                     iwg_attn_model=iwg_attn_model,
                 )
                 runtime.event_sink = event_sink
@@ -254,10 +218,6 @@ class Tracker(object):
         for idx, flag in enumerate(allow_indices):
             if flag:
                 dets[idx].initiate(self.frame_id, self.counter)
-                if self.mamba_shadow is not None:
-                    self.mamba_shadow.initiate_track(
-                        dets[idx].track_id, dets[idx].cxcywh.copy()
-                    )
                 self.tracks.append(dets[idx])
 
     def update(self, dets, dets_95):
@@ -356,11 +316,6 @@ class Tracker(object):
         if self.agentguard_adapter:
             self.agentguard_adapter.set_frame_warp(effective_warp)
 
-        if self.mamba_shadow is not None:
-            self.mamba_shadow.begin_frame(
-                [t.track_id for t in tracked_lost + new], effective_warp
-            )
-
         # Predict the current location with KF
         [t.predict() for t in tracked_lost]
         [t.predict() for t in new]
@@ -396,14 +351,6 @@ class Tracker(object):
                 no_reid=getattr(self.args, 'no_reid', False),
             )
 
-        if self.mamba_shadow is not None:
-            self.mamba_shadow.update_matches(
-                [
-                    (tracked_lost[t_idx].track_id, dets_all[d_idx].cxcywh.copy())
-                    for t_idx, d_idx in matches
-                ]
-            )
-
         # Process matched tracks
         agentguard_matched_batch = []
         for t_idx, d_idx in matches:
@@ -437,10 +384,6 @@ class Tracker(object):
                     track.update(self.frame_id, detection)
                     gate_decision = GateDecision(1.0, 1.0, np.ones(5, dtype=np.float64) / 5.0, 1.0)
                     self.agentguard_adapter.record_event(track.track_id, event, gate_decision)
-                    if self.mamba_shadow is not None:
-                        self.mamba_shadow.record_event(
-                            event, track.x1y1x2y2.copy()
-                        )
                 else:
                     agentguard_matched_batch.append((track, detection, event))
             else:
@@ -476,10 +419,6 @@ class Tracker(object):
                     )
                     event.scalar_features = fb.compute_scalar(event)
                 if self.agentguard_adapter.capture_only:
-                    if self.mamba_shadow is not None:
-                        self.mamba_shadow.record_event(
-                            event, track.x1y1x2y2.copy()
-                        )
                     track.mark_lost()
                     self.agentguard_adapter.record_unmatched_event(track.track_id, event)
                 else:
@@ -502,22 +441,12 @@ class Tracker(object):
                                                          self.args.reduce_step, self.frame_id,
                                                          no_reid=getattr(self.args, 'no_reid', False))
 
-        if self.mamba_shadow is not None:
-            self.mamba_shadow.update_matches(
-                [
-                    (new[t].track_id, dets_high_left[d].cxcywh.copy())
-                    for t, d in matches
-                ]
-            )
-
         # Update matched tracks
         for t, d in matches:
             new[t].update(self.frame_id, dets_high_left[d])
 
         # Mark "remove" to unmatched tracks
         for t in u_tracks:
-            if self.mamba_shadow is not None:
-                self.mamba_shadow.remove_track(new[t].track_id)
             new[t].mark_removed()
 
         # ==============================================================================================================
@@ -526,8 +455,6 @@ class Tracker(object):
             if self.frame_id - track.end_frame_id > self.max_time_lost:
                 if self.agentguard_adapter:
                     self.agentguard_adapter.remove_track(track.track_id)
-                if self.mamba_shadow is not None:
-                    self.mamba_shadow.remove_track(track.track_id)
                 track.mark_removed()
 
         # Filter out the removed tracks
@@ -550,9 +477,6 @@ class Tracker(object):
             )
 
         dropped_new = [t for t in self.tracks if t.state == TrackState.New]
-        if self.mamba_shadow is not None:
-            for track in dropped_new:
-                self.mamba_shadow.remove_track(track.track_id)
         self.tracks = [t for t in self.tracks if t.state != TrackState.New]
 
         # AgentGuard: save frame_start snapshots for mature tracks (pre-CMC)
@@ -572,11 +496,6 @@ class Tracker(object):
         self._current_warp = effective_warp.copy()
         if self.agentguard_adapter:
             self.agentguard_adapter.set_frame_warp(effective_warp)
-
-        if self.mamba_shadow is not None:
-            self.mamba_shadow.begin_frame(
-                [t.track_id for t in self.tracks], effective_warp
-            )
 
         [t.predict() for t in self.tracks]
 
@@ -623,8 +542,6 @@ class Tracker(object):
                         fb.reid_dim, dtype=np.float64
                     )
                     event.scalar_features = fb.compute_scalar(event)
-                if self.mamba_shadow is not None:
-                    self.mamba_shadow.record_event(event, t.x1y1x2y2.copy())
                 self.agentguard_adapter.record_unmatched_event(t.track_id, event)
                 t.mark_lost()
             else:
@@ -639,8 +556,6 @@ class Tracker(object):
             if self.frame_id - track.end_frame_id > self.max_time_lost:
                 if self.agentguard_adapter:
                     self.agentguard_adapter.remove_track(track.track_id)
-                if self.mamba_shadow is not None:
-                    self.mamba_shadow.remove_track(track.track_id)
                 track.mark_removed()
 
         self.tracks = [t for t in self.tracks if t.state != TrackState.Removed]

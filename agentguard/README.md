@@ -97,11 +97,9 @@ cd "3. Tracker"
 | `outputs/agentguard/models/tgr/` | TGR model checkpoints |
 | `outputs/agentguard/models/student_v1/` | Student V1 model checkpoints |
 
-Student-V0 defaults to accepted-update A-only rollout labels in
-`outputs/agentguard/labels/<dataset>/<mode>_a_only/`. B/C hard candidates are
-TrackTrack-specific ablations; enable them explicitly with
-`--candidate-types A,B,C` or derive A-only labels from an existing full label
-directory with `scripts/agentguard/derive_a_only_labels.py`.
+Student-V0 uses accepted-update A-only rollout labels in
+`outputs/agentguard/labels/<dataset>/<mode>_a_only/`. Label builders reject
+records with any other candidate type.
 
 ## Configuration
 

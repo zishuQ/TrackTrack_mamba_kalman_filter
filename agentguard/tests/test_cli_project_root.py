@@ -49,9 +49,6 @@ def test_cache_dir_uses_resolved_split():
 
 
 def test_candidate_type_defaults_are_a_only():
-    from agentguard.cli import _label_mode_name, _parse_candidate_types
+    from agentguard.cli import _label_mode_name
 
-    assert _parse_candidate_types("") == {"A"}
-    assert _parse_candidate_types("A") == {"A"}
-    assert _label_mode_name("all", "A") == "all_a_only"
-    assert _label_mode_name("all", "A,B,C") == "all"
+    assert _label_mode_name("all") == "all_a_only"

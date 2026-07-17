@@ -29,6 +29,7 @@ class GTReader:
         self.data_dir = data_dir
         self.sequence_name = sequence_name
         self._gt_by_frame: Dict[int, List[Tuple[np.ndarray, int]]] = {}
+        self._gt_box_by_frame: Dict[int, Dict[int, np.ndarray]] = {}
         self._load()
 
     # ------------------------------------------------------------------
@@ -48,6 +49,7 @@ class GTReader:
             )
 
         self._gt_by_frame.clear()
+        self._gt_box_by_frame.clear()
         data = np.loadtxt(gt_path, delimiter=",", dtype=np.float64)
 
         if data.ndim == 1:
@@ -68,6 +70,7 @@ class GTReader:
 
             box = np.array([x1, y1, x1 + w, y1 + h], dtype=np.float64)
             self._gt_by_frame.setdefault(frame_id, []).append((box, track_id))
+            self._gt_box_by_frame.setdefault(frame_id, {})[track_id] = box
 
     # ------------------------------------------------------------------
     #  Public API
@@ -87,6 +90,10 @@ class GTReader:
             Each element is ``(x1y1x2y2 box, gt_track_id)``.
         """
         return self._gt_by_frame.get(frame_id, [])
+
+    def get_gt_box(self, frame_id: int, track_id: int) -> Optional[np.ndarray]:
+        """Return one track box in O(1) time for a known frame."""
+        return self._gt_box_by_frame.get(int(frame_id), {}).get(int(track_id))
 
     def get_all_frame_ids(self) -> List[int]:
         """Return sorted list of all frame IDs present in the GT."""

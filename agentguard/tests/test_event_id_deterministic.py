@@ -13,9 +13,7 @@ def test_event_id_format():
 def test_candidate_id_format():
     event_id = "MOT17/MOT17-02/000001/000005"
     candidate_a = f"{event_id}/A"
-    candidate_b = f"{event_id}/B"
     assert candidate_a.endswith("/A")
-    assert candidate_b.endswith("/B")
 
 def test_window_id_format():
     window_id = "MOT17-02/5/00100-00103/ORIGINAL"
@@ -27,4 +25,4 @@ def test_window_id_format():
     assert frame_parts[0].isdigit()
     assert frame_parts[1].isdigit()
     # parts[3] is the window type
-    assert parts[3] in ("ORIGINAL", "B_AT_2", "B_AT_3", "B_AT_2_3")
+    assert parts[3] == "ORIGINAL"

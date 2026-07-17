@@ -69,7 +69,6 @@ BUILD_COMMAND=(
   --event-cache-root "${EVENT_CACHE_ROOT}"
   --detection-cache-root "${DETECTION_CACHE_ROOT}"
   --label-dir "${LABEL_DIR}" --output-dir "${DATASET_DIR}"
-  --candidate-types A --candidate-weights A:1 --max-per-candidate-type 0
 )
 printf '%q ' "${BUILD_COMMAND[@]}" > "${RUN_ROOT}/provenance/build.command.txt"
 printf '\n' >> "${RUN_ROOT}/provenance/build.command.txt"

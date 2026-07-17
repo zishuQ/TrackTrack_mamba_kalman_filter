@@ -129,16 +129,14 @@ def make_parser():
 
     # AgentGuard parameters
     parser.add_argument("--agentguard-mode", type=str, default="off",
-                       choices=["off", "iwg", "full", "joint", "iwg-attn"],
-                       help="AgentGuard mode: off, iwg, full, joint IWG+TSRM, or IWG+RG-CMA")
+                       choices=["off", "iwg", "full", "iwg-attn"],
+                       help="AgentGuard mode: off, iwg, full, or IWG+RG-CMA")
     parser.add_argument("--iwg-checkpoint", type=str, default=None,
                        help="Path to IWG model checkpoint (.pt)")
     parser.add_argument("--tgr-checkpoint", type=str, default=None,
                        help="Path to TGR model checkpoint (.pt)")
     parser.add_argument("--agentguard-checkpoint", type=str, default=None,
                        help="Path to one combined IWG+RG-CMA checkpoint file (.pt); directories are not accepted")
-    parser.add_argument("--joint-output", choices=["base", "final"], default="final",
-                       help="Apply base or TSRM-corrected gate from a combined checkpoint")
     parser.add_argument("--iwg-attn-output", choices=["base", "final"], default="final",
                        help="Apply base or RG-CMA-refined gate from an IWG-attn checkpoint")
     parser.add_argument("--agentguard-device", type=str, default="cpu",
@@ -458,8 +456,6 @@ def run():
         trackers_to_eval += '_agentguard_iwg'
     elif args.agentguard_mode == 'full':
         trackers_to_eval += '_agentguard_full'
-    elif args.agentguard_mode == 'joint':
-        trackers_to_eval += f'_agentguard_joint_{args.joint_output}'
     elif args.agentguard_mode == 'iwg-attn':
         if args.legacy_output_naming:
             trackers_to_eval += f'_agentguard_iwg_attn_{args.iwg_attn_output}'
@@ -555,8 +551,6 @@ if __name__ == "__main__":
             parser.error("--iwg-checkpoint is required when --agentguard-mode=full")
         if args.tgr_checkpoint is None:
             parser.error("--tgr-checkpoint is required when --agentguard-mode=full")
-    if args.agentguard_mode == 'joint' and args.agentguard_checkpoint is None:
-        parser.error("--agentguard-checkpoint is required when --agentguard-mode=joint")
     if args.agentguard_mode == 'iwg-attn' and args.agentguard_checkpoint is None:
         parser.error("--agentguard-checkpoint is required when --agentguard-mode=iwg-attn")
 

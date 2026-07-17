@@ -8,7 +8,6 @@ from agentguard.rollout.appearance import (
 )
 from agentguard.rollout.window import (
     compute_tgr_window_labels,
-    generate_window_augmentations,
 )
 from agentguard.rollout.losses import (
     iou_loss,
@@ -26,7 +25,6 @@ __all__ = [
     "ema_update",
     # Window / TGR
     "compute_tgr_window_labels",
-    "generate_window_augmentations",
     # Losses
     "iou_loss",
     "l1_normalized_loss",

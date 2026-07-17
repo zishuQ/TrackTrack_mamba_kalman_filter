@@ -33,7 +33,6 @@ from agentguard.rollout.losses import (
 from agentguard.rollout.motion import compute_motion_benefit, compute_motion_rollout
 from agentguard.rollout.window import (
     compute_tgr_window_labels,
-    generate_window_augmentations,
 )
 from agentguard.rollout_labels import (
     compute_dataset_stats,
@@ -476,20 +475,6 @@ class TestWindowLabels:
         assert result["valid_mask"][0]
         assert result["valid_mask"][2]
         assert result["valid_mask"][3]
-
-    def test_generate_window_augmentations_returns_list(self, make_event):
-        events = [make_event() for _ in range(4)]
-        # Pass a minimal object that mimics CandidateBuilder
-        class MockBuilder:
-            def build_candidates(self, event, cm, g, t, n, l, h):
-                return {"b": None}  # No B candidates available
-
-        variants = generate_window_augmentations(events, MockBuilder())
-        assert len(variants) >= 1
-        assert all(len(v) == 4 for v in variants)
-        # Only original since no B candidates
-        assert len(variants) == 1
-
 
 # =========================================================================
 #  Tests: Labels module

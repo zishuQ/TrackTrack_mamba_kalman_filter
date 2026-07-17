@@ -355,29 +355,6 @@ def collect_rows() -> list[dict[str, Any]]:
         note="官方 test 其余四项未保存在本地。",
     ))
 
-    mamba_native = Experiment(
-        "MOT20", "Mamba-native事件训练RG-CMA", "iwg_rg_cma_mamba_native_mot20_seed42_bs1024_shard5x2",
-        "MOT20 train 全四序列", "Mamba KF 导出事件 + mamba_native motion target", "NSA KF",
-        "旧：同一20%分片连续10轮", 5, 10, 2, 20, 1024, 1e-4, 1e-4, 42,
-    )
-    mamba_results = {
-        (50, "raw"): (0.787636, 0.934492, 0.914958, 0.806062, 0.770204),
-        (50, "post"): (0.791342, 0.938477, 0.916034, 0.810256, 0.773464),
-        (100, "raw"): (0.789268, 0.934761, 0.917063, 0.806180, 0.773275),
-        (100, "post"): (0.792715, 0.938301, 0.918014, 0.810002, 0.776386),
-    }
-    for (epoch, processing), values in mamba_results.items():
-        source = (
-            rel(mamba_native.root / f"logs/eval_e{epoch:03d}_final_all_post.log")
-            if processing == "post"
-            else "2026-07-16 对已有 tracker 结果重跑 TrackEval"
-        )
-        rows.append(build_row(
-            mamba_native, epoch=epoch, gate="final", processing=processing, split="all",
-            metrics=dict(zip(METRICS, values)), source=source,
-            note="训练事件来自 Mamba；在线 tracker 仍使用 NSA KF。",
-        ))
-
     baseline_sports_raw = dict(zip(
         METRICS, (0.814892, 0.982590, 0.832692, 0.913213, 0.727347)
     ))
@@ -565,7 +542,6 @@ def build_notes_sheet(ws, rows: list[dict[str, Any]]) -> None:
         ("旧分片方式", "epochs_per_shard=10：一个内存分片连续训练10轮后再切换。"),
         ("新分片方式", "epochs_per_shard=1：每轮切换分片，使学习率阶段在各时间段上更均衡。"),
         ("shard20x2 / shard10x2", "目录名是历史命名，判断方式以 memory_shards / epochs_per_shard / shard_cycles 三列的真实值为准。"),
-        ("Mamba-native", "只用 Mamba KF 导出的事件和运动目标训练；评测时 tracker 仍使用 NSA KF。"),
         ("MOT17最佳权重", "MOT20旧方式 epoch50 warm-start 后，在 MOT17 全量续训25轮；本地提交 ZIP 没有官方分数。"),
         ("MOT20最佳权重", "旧方式 epoch50；已知 test final+post HOTA=0.6625。"),
         ("SportsMOT最佳权重", "train+val 旧分片方式 epoch200；已知 test final+post HOTA=0.7589。"),

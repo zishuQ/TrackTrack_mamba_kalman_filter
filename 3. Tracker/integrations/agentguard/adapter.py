@@ -486,14 +486,7 @@ class AgentGuardTrackerAdapter:
             hist = buffer.get_sequence()
             seq = hist[-(seq_len - 1):] + [event]
 
-        if self.runtime.mode == "joint":
-            result = self.runtime.run_joint_inference(
-                track_id,
-                seq,
-                frame_id=event.frame_id,
-                has_detection=event.has_detection,
-            )
-        elif self.runtime.mode == "iwg-attn":
+        if self.runtime.mode == "iwg-attn":
             result = self.runtime.run_iwg_attn_inference(
                 track_id,
                 seq,
@@ -553,14 +546,7 @@ class AgentGuardTrackerAdapter:
                 seq = hist[-(seq_len - 1):] + [event]
             sequences.append(seq)
 
-        if self.runtime.mode == "joint":
-            results = self.runtime.run_joint_batch_inference(
-                [track_id for track_id, _event in items],
-                sequences,
-                frame_ids=[event.frame_id for _track_id, event in items],
-                has_detection=[event.has_detection for _track_id, event in items],
-            )
-        elif self.runtime.mode == "iwg-attn":
+        if self.runtime.mode == "iwg-attn":
             results = self.runtime.run_iwg_attn_batch_inference(
                 [track_id for track_id, _event in items],
                 sequences,
@@ -618,8 +604,7 @@ class AgentGuardTrackerAdapter:
         if not is_capture:
             # Save checkpoint for TGR (full mode)
             event_buffer.push(self._lightweight_runtime_event(event, keep_detection=False))
-            if self.runtime.mode != "joint":
-                self.runtime.stats.record_iwg(event.iwg_gate)
+            self.runtime.stats.record_iwg(event.iwg_gate)
             if self.runtime.mode == "full" and event.frame_start_state is not None:
                 self.runtime.checkpoints.save_checkpoint(
                     track_id, event.event_id, event.frame_start_state
@@ -655,7 +640,7 @@ class AgentGuardTrackerAdapter:
             if self.runtime.mode == "full":
                 _event_buffer, window_buffer = self.runtime.get_or_create_buffer(track_id)
 
-        if not is_capture and self.runtime.mode in {"joint", "iwg-attn"}:
+        if not is_capture and self.runtime.mode == "iwg-attn":
             fb = self.runtime.feature_builder
             rd = self.reid_dim
             src_state = event.pre_update_state or event.frame_start_state
@@ -669,20 +654,12 @@ class AgentGuardTrackerAdapter:
             event.scalar_features = fb.compute_scalar(event)
             history = event_buffer.get_sequence()
             sequence = history[-5:] + [event]
-            if self.runtime.mode == "joint":
-                result = self.runtime.run_joint_inference(
-                    track_id,
-                    sequence,
-                    frame_id=event.frame_id,
-                    has_detection=False,
-                )
-            else:
-                result = self.runtime.run_iwg_attn_inference(
-                    track_id,
-                    sequence,
-                    frame_id=event.frame_id,
-                    has_detection=False,
-                )
+            result = self.runtime.run_iwg_attn_inference(
+                track_id,
+                sequence,
+                frame_id=event.frame_id,
+                has_detection=False,
+            )
             event.iwg_policy_probs = result["policy_probs"].copy()
 
         event.iwg_gate = np.array([0.0, 0.0], dtype=np.float64)

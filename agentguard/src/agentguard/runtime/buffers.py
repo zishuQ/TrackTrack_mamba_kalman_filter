@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import List, Optional
 
 import numpy as np
 
@@ -76,31 +76,3 @@ class WindowBuffer:
     def clear(self) -> None:
         """Remove all events."""
         self.events = []
-
-
-class TemporalTokenBuffer:
-    """Per-track causal TSRM token buffer with frame-gap reset."""
-
-    def __init__(self, max_len: int = 16, max_frame_gap: int = 30) -> None:
-        self.max_len = int(max_len)
-        self.max_frame_gap = int(max_frame_gap)
-        self.tokens: List[dict[str, Any]] = []
-
-    def push(self, token: dict[str, Any]) -> bool:
-        frame_id = int(token["frame_id"])
-        reset = not self.tokens
-        if self.tokens:
-            gap = frame_id - int(self.tokens[-1]["frame_id"])
-            if gap <= 0 or gap > self.max_frame_gap:
-                self.clear()
-                reset = True
-        self.tokens.append(token)
-        if len(self.tokens) > self.max_len:
-            self.tokens.pop(0)
-        return reset
-
-    def get_window(self) -> List[dict[str, Any]]:
-        return self.tokens[-self.max_len :]
-
-    def clear(self) -> None:
-        self.tokens = []

@@ -38,33 +38,8 @@ from agentguard.rollout_labels import (
 )
 
 
-def _mamba_native_current_motion_benefit(
-    prior_mean: np.ndarray,
-    detection_box: np.ndarray,
-    current_gt: np.ndarray,
-) -> float:
-    mean = np.asarray(prior_mean, dtype=np.float64).reshape(8)
-    cx, cy, width, height = mean[:4]
-    prior_box = np.asarray(
-        [
-            cx - width / 2.0,
-            cy - height / 2.0,
-            cx + width / 2.0,
-            cy + height / 2.0,
-        ],
-        dtype=np.float64,
-    )
-    detection_box = np.asarray(detection_box, dtype=np.float64).reshape(4)
-    current_gt = np.asarray(current_gt, dtype=np.float64).reshape(4)
-    return motion_frame_loss(current_gt, prior_box) - motion_frame_loss(
-        current_gt, detection_box
-    )
-
-
 SAMPLE_TYPE_TO_ID = {
     "A": 0,
-    "B": 1,
-    "C": 2,
     "matched": 0,
     "unmatched": 3,
 }
@@ -115,6 +90,9 @@ def match_detection_to_gt(
 
 
 def gt_box_for_id(gt_reader: GTReader, frame_id: int, gt_id: int) -> Optional[np.ndarray]:
+    indexed = gt_reader.get_gt_box(int(frame_id), int(gt_id))
+    if indexed is not None:
+        return indexed
     for gt_box, tid in gt_reader.get_gt_for_frame(int(frame_id)):
         if int(tid) == int(gt_id):
             return np.asarray(gt_box, dtype=np.float64)
@@ -186,172 +164,6 @@ def _build_future_context(
     return current_gt, future_gt, future_oracle, future_warps, gt_count, oracle_count
 
 
-def _detection_gt(
-    reader: CompactEventCacheReader,
-    gt_reader: GTReader,
-    frame_id: int,
-    detection_index: int,
-    min_iou: float = 0.5,
-    cache: Optional[Dict[Tuple[int, int], Tuple[int, float, Optional[np.ndarray]]]] = None,
-) -> Tuple[int, float, Optional[np.ndarray]]:
-    key = (int(frame_id), int(detection_index))
-    if cache is not None and key in cache:
-        return cache[key]
-    det = reader.get_detection(int(detection_index))
-    result = match_detection_to_gt(
-        np.asarray(det["box"], dtype=np.float64),
-        gt_reader.get_gt_for_frame(int(frame_id)),
-        min_iou=min_iou,
-    )
-    if cache is not None:
-        cache[key] = result
-    return result
-
-
-def _frame_detection_gt_assignments(
-    reader: CompactEventCacheReader,
-    gt_reader: GTReader,
-    frame_id: int,
-    frame_index: int,
-    cache: Dict[int, Dict[int, Dict[str, Any]]],
-) -> Dict[int, Dict[str, Any]]:
-    frame_index = int(frame_index)
-    if frame_index in cache:
-        return cache[frame_index]
-    if reader.detection_cache is None:
-        cache[frame_index] = {}
-        return cache[frame_index]
-    frame = reader.detection_cache.get_frame(frame_index, view="source")
-    gt_entries = list(gt_reader.get_gt_for_frame(int(frame_id)))
-    assignments: Dict[int, Dict[str, Any]] = {}
-    for det_idx, det_box, source in zip(frame["detection_indices"], frame["boxes"], frame["sources"]):
-        gt_id, gt_iou, gt_box = match_detection_to_gt(
-            np.asarray(det_box, dtype=np.float64),
-            gt_entries,
-            min_iou=0.5,
-        )
-        assignments[int(det_idx)] = {
-            "gt_id": int(gt_id),
-            "gt_iou": float(gt_iou),
-            "gt_box": gt_box,
-            "box": np.asarray(det_box, dtype=np.float64),
-            "source": int(source),
-        }
-    cache[frame_index] = assignments
-    return assignments
-
-
-def _association_candidate_indices(
-    reader: CompactEventCacheReader,
-    record: Dict[str, Any],
-) -> Tuple[Optional[Dict[str, np.ndarray]], int, np.ndarray]:
-    assoc = reader.get_association(
-        int(record.get("association_shard_id", -1)),
-        int(record.get("association_offset", -1)),
-    )
-    row_idx = int(record.get("association_track_row", -1))
-    if assoc is None or row_idx < 0:
-        return None, -1, np.zeros((0,), dtype=np.int64)
-    final_cost = np.asarray(assoc.get("final_cost", []), dtype=np.float64)
-    det_indices = np.asarray(assoc.get("detection_indices", []), dtype=np.int64)
-    if final_cost.ndim != 2 or row_idx >= final_cost.shape[0] or det_indices.size != final_cost.shape[1]:
-        return None, -1, np.zeros((0,), dtype=np.int64)
-    return assoc, row_idx, det_indices
-
-
-def _build_candidate_specs(
-    reader: CompactEventCacheReader,
-    gt_reader: GTReader,
-    record: Dict[str, Any],
-    frame_id: int,
-    frame_index: int,
-    target_gt_id: int,
-    current_gt_box: np.ndarray,
-    frame_assignment_cache: Dict[int, Dict[int, Dict[str, Any]]],
-    candidate_types: set[str],
-) -> List[Dict[str, Any]]:
-    accepted = int(record.get("accepted_detection_index", -1))
-    frame_assignments = _frame_detection_gt_assignments(
-        reader,
-        gt_reader,
-        frame_id,
-        frame_index,
-        frame_assignment_cache,
-    )
-    specs: List[Dict[str, Any]] = []
-    if accepted >= 0 and "A" in candidate_types:
-        assigned = frame_assignments.get(accepted)
-        gt_id = int(assigned["gt_id"]) if assigned is not None else -1
-        gt_iou = float(assigned["gt_iou"]) if assigned is not None else 0.0
-        specs.append(
-            {
-                "candidate_type": "A",
-                "detection_index": accepted,
-                "detection_gt_id": int(gt_id),
-                "detection_gt_iou": float(gt_iou),
-            }
-        )
-
-    assoc, row_idx, det_indices = _association_candidate_indices(reader, record)
-    if assoc is not None and "B" in candidate_types:
-        final_cost = np.asarray(assoc["final_cost"], dtype=np.float64)
-        best_b: Optional[Dict[str, Any]] = None
-        for col_idx, det_idx in enumerate(det_indices.tolist()):
-            det_idx = int(det_idx)
-            if det_idx == accepted:
-                continue
-            assigned = frame_assignments.get(det_idx)
-            if assigned is None:
-                continue
-            gt_id = int(assigned["gt_id"])
-            gt_iou = float(assigned["gt_iou"])
-            if gt_id < 0 or int(gt_id) == int(target_gt_id):
-                continue
-            cost = float(final_cost[row_idx, col_idx])
-            if best_b is None or cost < best_b["final_cost"]:
-                best_b = {
-                    "candidate_type": "B",
-                    "detection_index": det_idx,
-                    "detection_gt_id": int(gt_id),
-                    "detection_gt_iou": float(gt_iou),
-                    "final_cost": cost,
-                }
-        if best_b is not None:
-            specs.append(best_b)
-
-    if frame_assignments and "C" in candidate_types:
-        source_priority = {2: 0, 1: 1, 0: 2}
-        best_c: Optional[Dict[str, Any]] = None
-        for det_idx, assigned in frame_assignments.items():
-            det_idx = int(det_idx)
-            if det_idx == accepted:
-                continue
-            gt_id = int(assigned["gt_id"])
-            gt_iou = float(assigned["gt_iou"])
-            if int(gt_id) != int(target_gt_id):
-                continue
-            priority = int(source_priority.get(int(assigned["source"]), 99))
-            target_iou = box_iou(np.asarray(assigned["box"], dtype=np.float64), current_gt_box)
-            spec = {
-                "candidate_type": "C",
-                "detection_index": det_idx,
-                "detection_gt_id": int(gt_id),
-                "detection_gt_iou": float(gt_iou),
-                "source_priority": priority,
-                "target_iou": float(target_iou),
-            }
-            if (
-                best_c is None
-                or priority < best_c["source_priority"]
-                or (priority == best_c["source_priority"] and target_iou > best_c["target_iou"])
-            ):
-                best_c = spec
-        if best_c is not None:
-            specs.append(best_c)
-
-    return specs
-
-
 def build_compact_rollout_labels_for_sequence(
     event_cache_dir: str | os.PathLike[str],
     detection_cache_dir: str | os.PathLike[str],
@@ -359,36 +171,18 @@ def build_compact_rollout_labels_for_sequence(
     *,
     max_events: int = 0,
     future_frames: int = 5,
-    candidate_types: Optional[set[str]] = None,
-    motion_label_mode: str = "nsa_rollout",
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    candidate_types = {str(t).upper() for t in (candidate_types or {"A"})}
-    invalid_types = candidate_types.difference({"A", "B", "C"})
-    if invalid_types:
-        raise ValueError(f"Unknown candidate type(s): {sorted(invalid_types)}")
-    if not candidate_types:
-        candidate_types = {"A"}
-    if motion_label_mode not in {"nsa_rollout", "mamba_native_current"}:
-        raise ValueError(f"unsupported motion_label_mode: {motion_label_mode!r}")
-    if motion_label_mode == "mamba_native_current" and candidate_types != {"A"}:
-        raise ValueError("mamba_native_current motion labels support candidate A only")
 
     reader = CompactEventCacheReader(
         event_cache_dir,
         detection_cache_dir,
         max_cached_shards=16,
     )
-    if motion_label_mode == "mamba_native_current":
-        if str(reader.manifest.get("event_source", "")) != "mamba_native":
-            raise ValueError(
-                "mamba_native_current labels require an event_source=mamba_native cache"
-            )
     gt_reader = GTReader(str(gt_root), str(reader.manifest["sequence"]))
     motion_model = NSAKalmanFilter()
     vote_state = TrackIdentityVoteState()
     proto_features: Dict[Tuple[str, int], List[np.ndarray]] = defaultdict(list)
     target_info: Dict[Tuple[int, int], Dict[str, Any]] = {}
-    frame_assignment_cache: Dict[int, Dict[int, Dict[str, Any]]] = {}
 
     try:
         for record in reader.iter_event_records():
@@ -429,11 +223,8 @@ def build_compact_rollout_labels_for_sequence(
         motion_benefits: List[float] = []
         appearance_benefits: List[float] = []
         summary = {
-            "motion_label_mode": motion_label_mode,
             "reliable_identity_events": 0,
             "candidate_a_count": 0,
-            "candidate_b_count": 0,
-            "candidate_c_count": 0,
             "valid_motion_labels": 0,
             "valid_appearance_labels": 0,
             "future_gt_coverage_count": 0,
@@ -468,29 +259,24 @@ def build_compact_rollout_labels_for_sequence(
                 continue
 
             proto = prototypes.get((event.sequence, int(target_gt_id)))
-            candidate_specs = _build_candidate_specs(
-                reader,
-                gt_reader,
-                record,
-                event.frame_id,
-                int(record.get("frame_index", event.frame_id - 1)),
-                int(target_gt_id),
-                current_gt,
-                frame_assignment_cache,
-                candidate_types,
+            accepted_detection_index = int(record.get("accepted_detection_index", -1))
+            candidate_specs = (
+                [
+                    {
+                        "candidate_type": "A",
+                        "detection_index": accepted_detection_index,
+                        "detection_gt_id": int(info["detection_gt_id"]),
+                        "detection_gt_iou": float(info["detection_gt_iou"]),
+                    }
+                ]
+                if accepted_detection_index >= 0
+                else []
             )
             wrote_any = False
             for spec in candidate_specs:
                 if max_events > 0 and len(raw_labels) >= max_events:
                     break
-                candidate_event = (
-                    event
-                    if spec["candidate_type"] == "A"
-                    else reader.materialize_training_event(
-                        record,
-                        candidate_detection_index=int(spec["detection_index"]),
-                    )
-                )
+                candidate_event = event
                 ctx = RolloutContext(
                     frame_id=candidate_event.frame_id,
                     target_gt_id=int(target_gt_id),
@@ -511,23 +297,12 @@ def build_compact_rollout_labels_for_sequence(
                 appearance_valid_count = 0
                 if valid_motion:
                     try:
-                        if motion_label_mode == "mamba_native_current":
-                            state = ctx.pre_update_state
-                            if state is None or state.mean is None:
-                                raise ValueError("Mamba-native event lacks a prior mean")
-                            b_m = _mamba_native_current_motion_benefit(
-                                state.mean,
-                                candidate_event.detection.box,
-                                current_gt,
-                            )
-                            m_mask = np.asarray([True], dtype=bool)
-                        else:
-                            b_m, _, _, m_mask = compute_motion_benefit(
-                                ctx,
-                                motion_model,
-                                future_frames=future_frames,
-                                include_current=True,
-                            )
+                        b_m, _, _, m_mask = compute_motion_benefit(
+                            ctx,
+                            motion_model,
+                            future_frames=future_frames,
+                            include_current=True,
+                        )
                         motion_valid_count = int(np.asarray(m_mask, dtype=bool).sum())
                         valid_motion = motion_valid_count > 0
                     except Exception:
@@ -578,16 +353,12 @@ def build_compact_rollout_labels_for_sequence(
                         "detection_gt_id": int(spec["detection_gt_id"]),
                         "detection_gt_iou": float(spec["detection_gt_iou"]),
                         "motion_benefit": float(b_m),
-                        "motion_label_mode": motion_label_mode,
+                        "motion_label_mode": "nsa_rollout",
                         "appearance_benefit": float(b_a),
                         "valid_motion": bool(valid_motion),
                         "valid_appearance": bool(valid_appearance),
                         "valid_horizon_count": int(max(motion_valid_count, appearance_valid_count)),
-                        "gt_coverage": (
-                            1.0
-                            if motion_label_mode == "mamba_native_current"
-                            else float(gt_count / max(future_frames + 1, 1))
-                        ),
+                        "gt_coverage": float(gt_count / max(future_frames + 1, 1)),
                         "oracle_detection_coverage": float(oracle_count / max(future_frames, 1)),
                         "sample_type": "matched" if candidate_event.has_detection else "unmatched",
                         "sample_weight": 1.0,

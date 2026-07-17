@@ -34,7 +34,7 @@ class IWGDataset(torch.utils.data.Dataset):
         - ``appearance_target`` (float): ground-truth appearance gate in [0, 1]
         - ``policy_soft_target`` (np.ndarray, shape ``(5,)``): soft target
           distribution over the 5 write policies.
-        - ``sample_type`` (int): sample category (0=A, 1=B, 2=C, 3=unmatched).
+        - ``sample_type`` (str): ``matched`` or ``unmatched`` event category.
         - ``valid_motion`` (bool): whether the motion target is reliable.
         - ``valid_appearance`` (bool): whether the appearance target is reliable.
         - ``sample_weight`` (float): importance weight for this sample.

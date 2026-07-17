@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import hashlib
 import json
+import os
 import subprocess
+import time
 from pathlib import Path
+from typing import Any
 
 from agentguard.data.compact_iwg_labels import (
     build_current_rollout_compact_labels_for_sequence,
@@ -22,6 +26,40 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _build_sequence_labels(
+    payload: tuple[str, str, str, str, str, str, str, int],
+) -> tuple[str, dict[str, Any]]:
+    """Build one sequence in an isolated worker process."""
+    (
+        sequence,
+        source_split,
+        event_cache_root,
+        detection_cache_root,
+        dataset_root,
+        gt_root_override,
+        output_root,
+        future_frames,
+    ) = payload
+    gt_root = (
+        Path(gt_root_override).resolve()
+        if gt_root_override
+        else Path(dataset_root).resolve() / source_split
+    )
+    manifest = build_current_rollout_compact_labels_for_sequence(
+        sequence=sequence,
+        event_cache_dir=(
+            Path(event_cache_root) / "SportsMOT" / source_split / sequence
+        ),
+        detection_cache_dir=(
+            Path(detection_cache_root) / "SportsMOT" / source_split / sequence
+        ),
+        gt_root=gt_root,
+        output_root=Path(output_root),
+        future_frames=int(future_frames),
+    )
+    return sequence, manifest
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Build SportsMOT candidate-A safe-direct compact labels."
@@ -35,7 +73,23 @@ def main() -> None:
     parser.add_argument("--gt-root", default="")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--sequence", action="append", default=[])
+    parser.add_argument(
+        "--future-frames",
+        type=int,
+        default=5,
+        help="Number of future frames used when constructing rollout labels.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=max(1, min(4, os.cpu_count() or 1)),
+        help="Number of independent sequence workers; use 1 for sequential mode.",
+    )
     args = parser.parse_args()
+    if args.future_frames < 1:
+        raise ValueError("--future-frames must be positive")
+    if args.workers < 1:
+        raise ValueError("--workers must be positive")
     if args.split == "trainval" and args.gt_root:
         raise ValueError(
             "--gt-root cannot represent both official splits; use --dataset-root "
@@ -55,42 +109,66 @@ def main() -> None:
         **{sequence: "train" for sequence in SPORTSMOT_TRAIN_SEQUENCES},
         **{sequence: "val" for sequence in SPORTSMOT_VAL_SEQUENCES},
     }
-    sequences = args.sequence or allowed
+    sequences = list(dict.fromkeys(args.sequence or allowed))
     invalid = sorted(set(sequences).difference(allowed))
     if invalid:
         raise ValueError(f"unsupported SportsMOT {args.split} sequences: {invalid}")
 
-    for sequence in sequences:
-        source_split = source_splits[sequence]
-        gt_root = Path(args.gt_root).resolve() if args.gt_root else (
-            Path(args.dataset_root).resolve() / source_split
+    payloads = [
+        (
+            sequence,
+            source_splits[sequence],
+            str(event_cache_root),
+            str(detection_cache_root),
+            str(Path(args.dataset_root).resolve()),
+            str(Path(args.gt_root).resolve()) if args.gt_root else "",
+            str(output_dir),
+            int(args.future_frames),
         )
-        manifest = build_current_rollout_compact_labels_for_sequence(
-            sequence=sequence,
-            event_cache_dir=(
-                event_cache_root / "SportsMOT" / source_split / sequence
-            ),
-            detection_cache_dir=(
-                detection_cache_root / "SportsMOT" / source_split / sequence
-            ),
-            gt_root=gt_root,
-            output_root=output_dir,
-        )
+        for sequence in sequences
+    ]
+
+    def report(sequence: str, manifest: dict[str, Any]) -> None:
         print(
             f"{sequence}: retained={manifest['retained_labels']}/"
             f"{manifest['source_labels']}",
             flush=True,
         )
 
+    started = time.monotonic()
+    print(
+        f"Building {len(payloads)} SportsMOT sequences with "
+        f"{args.workers} worker(s); completed manifests are reused.",
+        flush=True,
+    )
+    if args.workers == 1 or len(payloads) <= 1:
+        for payload in payloads:
+            sequence, manifest = _build_sequence_labels(payload)
+            report(sequence, manifest)
+    else:
+        with ProcessPoolExecutor(max_workers=args.workers) as executor:
+            futures = {
+                executor.submit(_build_sequence_labels, payload): payload[0]
+                for payload in payloads
+            }
+            for future in as_completed(futures):
+                sequence, manifest = future.result()
+                report(sequence, manifest)
+    print(
+        f"Label workers finished in {time.monotonic() - started:.1f}s.",
+        flush=True,
+    )
+
     available: dict[str, dict] = {}
-    for sequence in allowed:
+    for sequence in sequences:
         path = output_dir / sequence / "manifest.json"
         if path.is_file():
             available[sequence] = json.loads(path.read_text())
     aggregate = {
         "dataset": "SportsMOT",
         "split": args.split,
-        "complete": set(available) == set(allowed),
+        "future_frames": int(args.future_frames),
+        "complete": set(available) == set(sequences),
         "sequences": sorted(available),
         "sequence_source_splits": {
             sequence: source_splits[sequence] for sequence in sorted(available)
@@ -108,6 +186,7 @@ def main() -> None:
             for path in (
                 root / "agentguard/src/agentguard/data/cache_reader.py",
                 root / "agentguard/src/agentguard/data/compact_iwg_labels.py",
+                root / "agentguard/src/agentguard/data/gt_reader.py",
                 root / "agentguard/src/agentguard/rollout_labels.py",
                 root / "agentguard/src/agentguard/v0_pipeline.py",
             )

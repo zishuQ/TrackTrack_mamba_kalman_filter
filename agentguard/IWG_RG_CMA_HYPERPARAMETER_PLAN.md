@@ -97,7 +97,6 @@
 | P3 | CMA 层数 | temporal1 + cross1 | temporal 1/2；cross 1/2 | 增强模态冲突建模 | 放大 reliability token 的错误主导 | 最后才试 |
 | P4 | optimizer | AdamW | AdamW；AdamW beta2=0.95；Lion | 可能改变响应速度和泛化 | Lion 对软标签 gate 可能振荡 | AdamW param groups 优先 |
 | P4 | 跨数据集训练 | 分数据集 | MOT17+MOT20 或三数据集平衡混合 | 增加运动和拥挤场景覆盖 | 域冲突；小数据被大数据吞没 | 必须 dataset-balanced |
-| P4 | Mamba 教师标签 | 已实验 | NSA / Mamba / 混合教师 | 迁移运动教师能力 | 已有 Mamba-native 未显示优势 | 暂停投入 |
 
 ## 公平分片换算
 

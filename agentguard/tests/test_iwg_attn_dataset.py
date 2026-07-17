@@ -24,9 +24,10 @@ from agentguard.datasets.iwg_attn_dataset import (
     SPORTSMOT_VAL_SEQUENCES,
     StreamingIWGAttnDataset,
     build_streaming_sample_index,
+    event_key,
     resolve_iwg_attn_dataset_spec,
+    segment_track_timelines,
 )
-from agentguard.datasets.joint_window_dataset import event_key, segment_track_timelines
 
 
 def _record(frame: int, *, track: int = 1, matched: bool = True, history: int | None = None):

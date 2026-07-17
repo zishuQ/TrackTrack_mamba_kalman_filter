@@ -107,7 +107,6 @@ run.py test（CPU、final、post、无 TrackEval）
 | MOT20 train/all，NSA 事件 | `outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_trainall_seed42_bs1024/dataset` |
 | SportsMOT train | `outputs/agentguard/experiments/iwg_rg_cma_v1_sportsmot_train_data/dataset` |
 | SportsMOT train+val | `outputs/agentguard/experiments/iwg_rg_cma_v1_sportsmot_trainval_seed42_bs1024/dataset` |
-| MOT20 Mamba-native 事件 | `outputs/agentguard/experiments/iwg_rg_cma_mamba_native_mot20_train_data/dataset` |
 
 统一缓存位置：
 
@@ -121,15 +120,11 @@ outputs/agentguard/event_cache_v3_iwg_v2
 ```text
 outputs/agentguard/labels/iwg_rg_cma/MOT17/nsa_candidate_a_json
 outputs/agentguard/labels/iwg_rg_cma/MOT20/nsa_v3_compact
-outputs/agentguard/labels/iwg_rg_cma/MOT20/mamba_native_exp31_1_epoch55_v3_compact
 outputs/agentguard/labels/iwg_rg_cma/SportsMOT/nsa_train_v3_compact
 outputs/agentguard/labels/iwg_rg_cma/SportsMOT/nsa_trainval_v3_compact
-outputs/agentguard/labels/iwg_v2/MOT17/nsa_a_only_json
 ```
 
-MOT20 的第二套标签对应 Mamba-native event，并在目录名中记录 teacher 权重版本。SportsMOT 的 train 与 train+val 是两套不同范围，不能互相覆盖。`iwg_v2` 分支只保存仍被旧 dataset 引用的历史标签。现有 dataset 的 metadata 均直接指向公共目录，旧实验目录不再保存标签或兼容链接。
-
-Mamba-native MOT20 dataset 只用于复现实验。它的 test 结果低于 NSA 事件路线，当前不建议作为默认训练数据。
+SportsMOT 的 train 与 train+val 是两套不同范围，不能互相覆盖。当前标签构建只支持 NSA 事件和 candidate A。
 
 开始训练前可以这样检查 dataset 是否存在：
 
@@ -599,20 +594,7 @@ outputs/3. track/sportsmot_test_0.80_trainval_interleaved_e200_iwg_attn_final_po
 
 ### 12.4 MOT20 权重迁移到 MOT17 test
 
-这组实验用于比较跨数据集泛化，不重新训练。两条命令都使用 MOT17 的 NSA Kalman Filter runtime；区别只在于 checkpoint：第一条是 MOT20 Mamba-native event 训练的 epoch100，第二条是 MOT20 NSA event 旧分片方式的 epoch50。
-
-```bash
-cd "/home/shang/workspace/TrackTrack/3. Tracker"
-"../.venv/bin/python" -u run.py \
-  --dataset MOT17 --mode test \
-  --kf-type nsa \
-  --agentguard-mode iwg-attn \
-  --agentguard-checkpoint \
-    "../outputs/agentguard/experiments/iwg_rg_cma_mamba_native_mot20_seed42_bs1024_shard5x2/checkpoints/iwg_rg_cma_epoch100.pt" \
-  --iwg-attn-output final \
-  --tracker-suffix mot20_mamba_native_e100_to_mot17 \
-  --use_post --skip-eval
-```
+这组实验用于比较跨数据集泛化，不重新训练，使用 MOT17 的 NSA Kalman Filter runtime 和 MOT20 NSA event 旧分片方式的 epoch50 checkpoint。
 
 ```bash
 cd "/home/shang/workspace/TrackTrack/3. Tracker"
@@ -630,7 +612,6 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
 结果目录分别是：
 
 ```text
-outputs/3. track/mot17_test_0.80_mot20_mamba_native_e100_to_mot17_iwg_attn_final_post
 outputs/3. track/mot17_test_0.80_mot20_nsa_old_e050_to_mot17_iwg_attn_final_post
 ```
 
@@ -648,10 +629,10 @@ outputs/3. track/<检测前缀>_0.80_<tracker-suffix>_iwg_attn_<base|final>
 outputs/3. track/<检测前缀>_0.80_<tracker-suffix>_iwg_attn_<base|final>_post
 ```
 
-例如 `--tracker-suffix mot20_mamba_native_e100_to_mot17` 会得到：
+例如 `--tracker-suffix mot20_nsa_old_e050_to_mot17` 会得到：
 
 ```text
-mot17_test_0.80_mot20_mamba_native_e100_to_mot17_iwg_attn_final_post
+mot17_test_0.80_mot20_nsa_old_e050_to_mot17_iwg_attn_final_post
 ```
 
 旧脚本若显式传 `--legacy-output-naming`，才会继续使用带 `agentguard_` 的历史形式。
@@ -771,10 +752,6 @@ Running <dataset> <mode> with nsa Kalman filter...
 
 如果想让命令更显式，可额外加入 `--kf-type nsa`，行为不变。
 
-### 16.8 Mamba-native 权重能否直接在 NSA runtime 跑
-
-技术上 combined checkpoint 可以加载，tracker runtime 仍是 NSA。但已有 MOT20 Mamba-native event 训练结果低于 NSA event 训练结果，说明 teacher event 与 NSA 在线状态之间存在分布错位。除非专门复现实验，默认使用 NSA event dataset 和 NSA runtime。
-
 ## 17. 最短速查
 
 ### 17.1 不使用变量的最短 test 命令
@@ -788,8 +765,8 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
   --dataset MOT17 --mode test \
   --agentguard-mode iwg-attn \
   --agentguard-checkpoint \
-    "../outputs/agentguard/experiments/iwg_rg_cma_mamba_native_mot20_seed42_bs1024_shard5x2/checkpoints/iwg_rg_cma_epoch100.pt" \
-  --tracker-suffix mot20_mamba_native_e100_to_mot17 \
+    "../outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_trainall_seed42_bs1024/checkpoints/iwg_rg_cma_epoch050.pt" \
+  --tracker-suffix mot20_nsa_old_e050_to_mot17 \
   --use_post --skip-eval
 ```
 
