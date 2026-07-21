@@ -13,7 +13,7 @@ CHECKPOINT="${CHECKPOINT_DIR}/iwg_rg_cma_epoch050.pt"
 DATASET_DIR="${ROOT}/outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_jsonl_native_log"
 INIT_CHECKPOINT="${ROOT}/outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_interleaved_shard4x1_seed42_bs1024_100e/checkpoints/iwg_rg_cma_epoch100.pt"
 DETECTION_CACHE_ROOT="${ROOT}/outputs/agentguard/detection_cache"
-TRACKER_ROOT="${ROOT}/3. Tracker"
+TRACKER_ROOT="${ROOT}/outputs/3. track"
 
 SEQUENCES=(
   MOT17-02-FRCNN MOT17-04-FRCNN MOT17-05-FRCNN
