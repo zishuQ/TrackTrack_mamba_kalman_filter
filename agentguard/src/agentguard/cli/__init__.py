@@ -3035,6 +3035,30 @@ def _add_train_iwg_attn_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Number of events passed to IWG/RG-CMA (6 preserves old models).",
     )
     parser.add_argument(
+        "--residual-beta",
+        type=float,
+        default=1.0,
+        help="Smooth-L1 beta for the RG-CMA correction residual loss.",
+    )
+    parser.add_argument(
+        "--residual-weight",
+        type=float,
+        default=0.5,
+        help="Weight of the RG-CMA correction residual loss.",
+    )
+    parser.add_argument(
+        "--revision-weight",
+        type=float,
+        default=0.01,
+        help="L1 penalty on RG-CMA corrections; 0 disables this penalty.",
+    )
+    parser.add_argument(
+        "--hard-example-gain",
+        type=float,
+        default=0.0,
+        help="Extra residual-loss weight for targets near the correction bound.",
+    )
+    parser.add_argument(
         "--init-checkpoint",
         default="",
         help=(
@@ -3087,6 +3111,10 @@ def _cmd_train_iwg_attn(args: argparse.Namespace) -> None:
         "seed": int(args.seed),
         "correction_bound": float(args.correction_bound),
         "context_size": int(args.context_size),
+        "residual_beta": float(args.residual_beta),
+        "residual_weight": float(args.residual_weight),
+        "revision_weight": float(args.revision_weight),
+        "hard_example_gain": float(args.hard_example_gain),
         "init_checkpoint": (
             str(Path(args.init_checkpoint).resolve()) if args.init_checkpoint else ""
         ),

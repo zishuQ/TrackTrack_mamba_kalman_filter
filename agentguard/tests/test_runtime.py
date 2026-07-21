@@ -477,6 +477,24 @@ def test_statistics_multiple_gates():
     assert s["avg_appearance_gate"] == 0.6
 
 
+def test_statistics_rg_cma_correction_diagnostics():
+    stats = RuntimeStatistics()
+    stats.record_iwg(
+        np.array([0.35, 0.65]),
+        base_gate=np.array([0.4, 0.6]),
+        final_gate=np.array([0.35, 0.65]),
+        correction=np.array([-0.05, 0.05]),
+        correction_bound=0.05,
+    )
+    summary = stats.summary()
+    assert summary["avg_iwg_base_motion_gate"] == 0.4
+    assert summary["avg_iwg_final_motion_gate"] == 0.35
+    assert np.isclose(summary["avg_iwg_base_final_abs_diff_motion"], 0.05)
+    assert np.isclose(summary["avg_iwg_correction_abs_appearance"], 0.05)
+    assert summary["iwg_correction_nonzero_rate_motion"] == 1.0
+    assert summary["iwg_correction_saturation_rate_appearance"] == 1.0
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  Main
 # ══════════════════════════════════════════════════════════════════════════════

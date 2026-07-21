@@ -212,7 +212,17 @@ class AgentGuardRuntime:
             gate_decision.appearance_gate,
         )
 
-        self.stats.record_iwg(event.iwg_gate)
+        self.stats.record_iwg(
+            event.iwg_gate,
+            base_gate=gate_decision.base_gate,
+            final_gate=gate_decision.final_gate,
+            correction=gate_decision.gate_correction,
+            correction_bound=(
+                getattr(self.iwg_attn_model, "correction_bound", None)
+                if self.mode == "iwg-attn"
+                else None
+            ),
+        )
 
     def process_unmatched_event(
         self,

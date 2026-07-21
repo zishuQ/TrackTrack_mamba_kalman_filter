@@ -38,7 +38,10 @@ from agentguard.models.iwg_rg_cma import (
     RG_CMA_LEGACY_CORRECTION_BOUND,
     model_contract,
 )
-from agentguard.training.loss_iwg_rg_cma import compute_iwg_rg_cma_loss
+from agentguard.training.loss_iwg_rg_cma import (
+    compute_iwg_rg_cma_loss,
+    validate_iwg_rg_cma_loss_config,
+)
 
 
 FORMAL_CHECKPOINT_EPOCHS = {
@@ -480,6 +483,17 @@ def _move_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
     }
 
 
+def _resolved_loss_settings(config: dict[str, Any]) -> dict[str, float]:
+    settings = {
+        "residual_beta": float(config.get("residual_beta", 1.0)),
+        "residual_weight": float(config.get("residual_weight", 0.5)),
+        "revision_weight": float(config.get("revision_weight", 0.01)),
+        "hard_example_gain": float(config.get("hard_example_gain", 0.0)),
+    }
+    validate_iwg_rg_cma_loss_config(**settings)
+    return settings
+
+
 def _write_training_log(handle, message: str) -> None:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     handle.write(f"{timestamp} | INFO     | {message}\n")
@@ -741,6 +755,7 @@ def _run_training_attempt(
     seed = int(config["seed"])
     _seed_everything(seed)
     device = torch.device(config["device"])
+    loss_settings = _resolved_loss_settings(config)
     training_schedule = build_memory_shard_schedule(dataset, config)
     epoch_plan = [
         (phase, phase_epoch)
@@ -900,7 +915,10 @@ def _run_training_attempt(
                     optimizer.zero_grad(set_to_none=True)
                     outputs = _forward(model, batch)
                     loss, components = compute_iwg_rg_cma_loss(
-                        outputs, batch, correction_bound=model.correction_bound
+                        outputs,
+                        batch,
+                        correction_bound=model.correction_bound,
+                        **loss_settings,
                     )
                     loss.backward()
                     grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -979,6 +997,7 @@ def _run_training_attempt(
                                 f"loss={float(components['loss'].detach()):.6f} | "
                                 f"base_loss={float(components['base_loss'].detach()):.6f} | "
                                 f"final_loss={float(components['final_loss'].detach()):.6f} | "
+                                f"corr_abs={float(components['correction_abs_mean'].detach()):.6f} | "
                                 f"lr={optimizer.param_groups[0]['lr']:.2e}"
                             ),
                         )
@@ -1036,6 +1055,9 @@ def _run_training_attempt(
                         f"gate_acc={metrics['gate_accuracy']:.3f}  "
                         f"motion_mae={metrics['motion_mae']:.4f}  "
                         f"app_mae={metrics['appearance_mae']:.4f}  "
+                        f"corr_abs={metrics['correction_abs_mean']:.4f}  "
+                        f"corr_target={metrics['correction_target_abs_mean']:.4f}  "
+                        f"corr_sign={metrics['correction_sign_agreement']:.3f}  "
                         f"lr={metrics['learning_rate']:.2e}  "
                         f"time={epoch_time:.1f}s  train_only=true"
                     ),
@@ -1111,6 +1133,7 @@ def _run_training_attempt(
 
 def _validate_formal_config(config: dict[str, Any]) -> int:
     _resolve_sequence_sampling(config)
+    _resolved_loss_settings(config)
     model_contract(
         correction_bound=float(
             config.get("correction_bound", RG_CMA_CORRECTION_BOUND)
@@ -1244,7 +1267,12 @@ def validate_iwg_rg_cma_checkpoint(
                 batch = _move_batch(raw_batch, torch.device(device))
                 outputs = _forward(model, batch)
                 _loss, components = compute_iwg_rg_cma_loss(
-                    outputs, batch, correction_bound=float(checkpoint["correction_bound"])
+                    outputs,
+                    batch,
+                    correction_bound=float(checkpoint["correction_bound"]),
+                    **_resolved_loss_settings(
+                        checkpoint.get("training_config", {})
+                    ),
                 )
                 size = int(batch["track_feats"].shape[0])
                 count += size

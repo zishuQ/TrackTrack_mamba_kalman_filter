@@ -501,6 +501,9 @@ class AgentGuardTrackerAdapter:
             appearance_gate=float(result["gate"][1]),
             policy_probs=result["policy_probs"],
             confidence=float(np.mean(result["cue"])),
+            base_gate=result.get("base_gate"),
+            final_gate=result.get("final_gate"),
+            gate_correction=result.get("gate_correction"),
         )
 
     def get_iwg_decisions_batch(
@@ -561,6 +564,9 @@ class AgentGuardTrackerAdapter:
                 appearance_gate=float(result["gate"][1]),
                 policy_probs=result["policy_probs"],
                 confidence=float(np.mean(result["cue"])),
+                base_gate=result.get("base_gate"),
+                final_gate=result.get("final_gate"),
+                gate_correction=result.get("gate_correction"),
             )
             for result in results
         ]
@@ -604,7 +610,17 @@ class AgentGuardTrackerAdapter:
         if not is_capture:
             # Save checkpoint for TGR (full mode)
             event_buffer.push(self._lightweight_runtime_event(event, keep_detection=False))
-            self.runtime.stats.record_iwg(event.iwg_gate)
+            self.runtime.stats.record_iwg(
+                event.iwg_gate,
+                base_gate=gate_decision.base_gate,
+                final_gate=gate_decision.final_gate,
+                correction=gate_decision.gate_correction,
+                correction_bound=(
+                    getattr(self.runtime.iwg_attn_model, "correction_bound", None)
+                    if self.runtime.mode == "iwg-attn"
+                    else None
+                ),
+            )
             if self.runtime.mode == "full" and event.frame_start_state is not None:
                 self.runtime.checkpoints.save_checkpoint(
                     track_id, event.event_id, event.frame_start_state

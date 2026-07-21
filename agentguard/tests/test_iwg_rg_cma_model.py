@@ -225,3 +225,51 @@ def test_production_loss_gradients_and_iwg_gradient_isolation():
     assert _has_finite_nonzero_grad(model.iwg.risk_head)
     assert _has_finite_nonzero_grad(model.motion_temporal_attention)
     assert _has_finite_nonzero_grad(model.cross_modal_attention)
+
+
+def test_loss_v2_is_explicit_and_reports_correction_diagnostics():
+    torch.manual_seed(23)
+    model = IWGRGCMA(16).eval()
+    batch = _batch()
+    with torch.no_grad():
+        for head in (model.motion_correction_head, model.appearance_correction_head):
+            torch.nn.init.normal_(head[-1].weight, std=0.02)
+            torch.nn.init.normal_(head[-1].bias, std=0.02)
+        outputs = _forward(model, batch)
+
+    default_loss, default_components = compute_iwg_rg_cma_loss(outputs, batch)
+    explicit_old_loss, explicit_old_components = compute_iwg_rg_cma_loss(
+        outputs,
+        batch,
+        residual_beta=1.0,
+        residual_weight=0.5,
+        revision_weight=0.01,
+        hard_example_gain=0.0,
+    )
+    torch.testing.assert_close(default_loss, explicit_old_loss)
+    for key in default_components:
+        torch.testing.assert_close(default_components[key], explicit_old_components[key])
+
+    loss_v2, components_v2 = compute_iwg_rg_cma_loss(
+        outputs,
+        batch,
+        residual_beta=0.01,
+        residual_weight=1.0,
+        revision_weight=0.0,
+        hard_example_gain=2.0,
+    )
+    assert torch.isfinite(loss_v2)
+    for key in (
+        "correction_abs_mean",
+        "correction_abs_p50",
+        "correction_abs_p95",
+        "correction_target_abs_mean",
+        "correction_nonzero_rate",
+        "correction_saturation_rate",
+        "correction_sign_agreement",
+    ):
+        assert key in components_v2
+        assert torch.isfinite(components_v2[key])
+    assert components_v2["correction_abs_p95"] >= components_v2["correction_abs_p50"]
+    assert 0.0 <= components_v2["correction_nonzero_rate"] <= 1.0
+    assert 0.0 <= components_v2["correction_saturation_rate"] <= 1.0
