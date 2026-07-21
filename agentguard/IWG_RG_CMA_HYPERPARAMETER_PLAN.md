@@ -30,7 +30,7 @@
 | 模块 | 当前配置 |
 |---|---|
 | 输入 | track ReID 2048、detection ReID 2048、scalar63 |
-| 历史 | 最近 6 个真实在线事件，包含 unmatched 历史 |
+| 输入历史 | 最近 6 个真实在线事件，包含 unmatched 历史；8-event 版本使用独立 dataset/model schema |
 | EventEncoder | ReID 2048 -> 64；appearance 256 -> 128 -> 64；scalar 63 -> 128 -> 64 |
 | Base IWG | d_model=128，2 层，4 heads，FFN=256，dropout=0.1 |
 | RG-CMA | temporal attention 1 层；cross-modal 1 层；4 heads；FFN=256 |
@@ -38,7 +38,7 @@
 | 参数量 | 总计约 811,086；Base IWG 约 501,580；RG-CMA 约 309,506 |
 | 优化 | AdamW，lr=1e-4，weight_decay=1e-4，batch=1024 |
 | 调度 | warmup=1 epoch，cosine decay to zero，grad clip=1.0 |
-| 标签 | future horizon=5，policy temperature=0.1 |
+| 标签 | future horizon=5，policy temperature=0.1；horizon 与输入历史长度是两个独立变量 |
 | 损失 | base=1.0，policy=0.1，cue=0.2，risk=0.1，final=1.0，residual=0.5，revision=0.01 |
 
 ### 梯度边界
@@ -187,7 +187,7 @@ SportsMOT: 4-shard e200  vs 5-shard e250  vs 10-shard e500  （均 50 full passe
 - cross-modal 3x3 attention，特别是 reliability token 占比。
 - 每个序列和 shard 的样本数、optimizer steps、平均 LR 和访问顺序。
 
-只有当大量目标 residual 被 0.05 截断、CMA 修正方向正确且实际 correction 接近边界时，才应把 correction bound 提高到 0.10。若 correction 很少接近边界，扩大 bound 不会解决问题。
+本轮 SportsMOT trainval 的 residual 分析显示，约 46% 的有效通道目标 residual 超过 0.045，但旧模型实际 correction 最大仅约 0.025。因此先将 RG-CMA v2 的 bound 从 0.05 提高到 0.10，观察更宽监督范围是否能让 correction 增大；不直接跳到 0.20。若新模型实际 correction 仍明显低于 0.10，下一步应优先检查 correction head 的梯度/损失权重，而不是继续扩大 bound。
 
 ## Checkpoint 与数据兼容性
 

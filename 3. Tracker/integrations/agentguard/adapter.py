@@ -478,7 +478,7 @@ class AgentGuardTrackerAdapter:
         event.scalar_features = fb.compute_scalar(event)
 
         # Build inference sequence from buffer + current event
-        seq_len = 6
+        seq_len = self.runtime.iwg_context_size
         buffer = self.runtime.event_buffers.get(track_id)
         if buffer is None:
             seq = [None] * (seq_len - 1) + [event]
@@ -537,7 +537,7 @@ class AgentGuardTrackerAdapter:
 
             event.scalar_features = fb.compute_scalar(event)
 
-            seq_len = 6
+            seq_len = self.runtime.iwg_context_size
             buffer = self.runtime.event_buffers.get(track_id)
             if buffer is None:
                 seq = [None] * (seq_len - 1) + [event]
@@ -653,7 +653,8 @@ class AgentGuardTrackerAdapter:
             event.detection_feature = np.zeros(rd, dtype=np.float64)
             event.scalar_features = fb.compute_scalar(event)
             history = event_buffer.get_sequence()
-            sequence = history[-5:] + [event]
+            seq_len = self.runtime.iwg_context_size
+            sequence = history[-(seq_len - 1) :] + [event]
             result = self.runtime.run_iwg_attn_inference(
                 track_id,
                 sequence,

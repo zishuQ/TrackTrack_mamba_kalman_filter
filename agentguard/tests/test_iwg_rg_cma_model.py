@@ -4,7 +4,11 @@ import torch
 import torch.nn.functional as F
 
 from agentguard.models.event_encoder import EventEncoder
-from agentguard.models.iwg_rg_cma import IWGRGCMA, SafeDirectIWG
+from agentguard.models.iwg_rg_cma import (
+    IWGRGCMA,
+    RG_CMA_CORRECTION_BOUND,
+    SafeDirectIWG,
+)
 from agentguard.training.loss_iwg_rg_cma import compute_iwg_rg_cma_loss
 
 
@@ -122,7 +126,7 @@ def test_rg_cma_zero_init_masks_and_correction_bound():
             head[-1].weight.fill_(50.0)
             head[-1].bias.fill_(50.0)
         bounded = _forward(model, batch)
-    assert bounded["gate_correction"].abs().max() <= 0.05
+    assert bounded["gate_correction"].abs().max() <= RG_CMA_CORRECTION_BOUND + 1e-6
 
 
 def test_rg_cma_sequence_is_strictly_causal():
@@ -198,7 +202,9 @@ def test_production_loss_gradients_and_iwg_gradient_isolation():
     model.zero_grad(set_to_none=True)
     outputs = _forward(model, batch)
     correction_target = torch.clamp(
-        batch["safe_gate_target"] - outputs["base_gate"].detach(), -0.05, 0.05
+        batch["safe_gate_target"] - outputs["base_gate"].detach(),
+        -RG_CMA_CORRECTION_BOUND,
+        RG_CMA_CORRECTION_BOUND,
     )
     isolated = (
         F.binary_cross_entropy_with_logits(outputs["cue_logits"], batch["cue_target"])

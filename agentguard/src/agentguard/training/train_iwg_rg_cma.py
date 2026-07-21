@@ -8,13 +8,14 @@ import os
 import random
 import subprocess
 import time
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
-from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, Sampler, Subset
 
 from agentguard.contracts.enums import POLICY_PROTOTYPE_MATRIX
 from agentguard.data.cache_schema import COMPACT_CACHE_SCHEMA_VERSION, FEATURE_SCHEMA_SHA256
@@ -24,10 +25,17 @@ from agentguard.datasets.iwg_attn_dataset import (
     StreamingIWGAttnDataset,
 )
 from agentguard.models.iwg_rg_cma import (
+    IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA,
+    IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA_SHA256,
+    IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA,
+    IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA_SHA256,
+    IWG_RG_CMA_LEGACY_MODEL_SCHEMA,
+    IWG_RG_CMA_LEGACY_MODEL_SCHEMA_SHA256,
     IWG_RG_CMA_MODEL_SCHEMA,
     IWG_RG_CMA_MODEL_SCHEMA_SHA256,
     IWGRGCMA,
     RG_CMA_CORRECTION_BOUND,
+    RG_CMA_LEGACY_CORRECTION_BOUND,
     model_contract,
 )
 from agentguard.training.loss_iwg_rg_cma import compute_iwg_rg_cma_loss
@@ -58,6 +66,11 @@ FINETUNE_REQUIRED_CONFIG = {
 FINETUNE_ALLOWED_EPOCHS = frozenset({25, 50})
 FORMAL_BATCH_SIZES = {1024, 2048}
 LOW_MEMORY_SAMPLING_POLICY = "sequential_sequence_fractions"
+SEQUENCE_SAMPLING_SAMPLE_PROPORTIONAL = "sample-proportional"
+SEQUENCE_SAMPLING_SQRT_SIZE = "sqrt-size"
+SUPPORTED_SEQUENCE_SAMPLING = frozenset(
+    {SEQUENCE_SAMPLING_SAMPLE_PROPORTIONAL, SEQUENCE_SAMPLING_SQRT_SIZE}
+)
 
 
 def _seed_everything(seed: int) -> None:
@@ -119,6 +132,7 @@ def _loader(
     num_workers: int,
     seed: int,
     low_memory: bool = False,
+    sampler: Sampler[int] | None = None,
 ) -> DataLoader:
     generator = torch.Generator().manual_seed(seed)
     loader_kwargs: dict[str, Any] = {}
@@ -129,7 +143,8 @@ def _loader(
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=True,
         drop_last=False,
@@ -138,6 +153,144 @@ def _loader(
         generator=generator,
         **loader_kwargs,
     )
+
+
+def _resolve_sequence_sampling(config: dict[str, Any]) -> str:
+    policy = str(
+        config.get(
+            "sequence_sampling",
+            SEQUENCE_SAMPLING_SAMPLE_PROPORTIONAL,
+        )
+    ).strip().lower()
+    if policy not in SUPPORTED_SEQUENCE_SAMPLING:
+        raise ValueError(
+            "unsupported sequence_sampling policy: "
+            f"{policy!r}; expected one of {sorted(SUPPORTED_SEQUENCE_SAMPLING)}"
+        )
+    return policy
+
+
+def _sequence_sampling_weights(
+    counts: dict[str, int],
+    *,
+    power: float,
+) -> dict[str, float]:
+    active = [sequence for sequence, count in counts.items() if int(count) > 0]
+    if not active:
+        raise ValueError("sequence sampling requires at least one non-empty sequence")
+    raw = {
+        sequence: float(counts[sequence]) ** float(power)
+        for sequence in active
+    }
+    total = sum(raw.values())
+    if not math.isfinite(total) or total <= 0.0:
+        raise ValueError("sequence sampling weights must have a positive finite sum")
+    return {sequence: value / total for sequence, value in raw.items()}
+
+
+def _allocate_sequence_sample_counts(
+    *,
+    num_samples: int,
+    sequence_counts: dict[str, int],
+    active_sequences: list[str],
+    power: float,
+) -> dict[str, int]:
+    if num_samples < 0:
+        raise ValueError(f"num_samples must be non-negative, got {num_samples}")
+    if not active_sequences:
+        if num_samples:
+            raise ValueError("cannot allocate samples without active sequences")
+        return {}
+    weights = _sequence_sampling_weights(
+        {sequence: sequence_counts[sequence] for sequence in active_sequences},
+        power=power,
+    )
+    raw = {
+        sequence: float(num_samples) * weights[sequence]
+        for sequence in active_sequences
+    }
+    allocated = {sequence: math.floor(value) for sequence, value in raw.items()}
+    remaining = int(num_samples - sum(allocated.values()))
+    remainder_order = sorted(
+        active_sequences,
+        key=lambda sequence: (
+            -(raw[sequence] - allocated[sequence]),
+            active_sequences.index(sequence),
+        ),
+    )
+    for sequence in remainder_order[:remaining]:
+        allocated[sequence] += 1
+    if sum(allocated.values()) != int(num_samples):
+        raise AssertionError("sequence sample allocation changed the phase budget")
+    return allocated
+
+
+class SequenceSqrtSampler(Sampler[int]):
+    """Sample phase indices with exact sqrt-size sequence quotas.
+
+    The sampler operates on phase-local indices, so it works for both a full
+    dataset and a ``ConcatDataset`` of contiguous shard subsets. Sampling within
+    each sequence is with replacement because the phase budget is preserved
+    while smaller sequences receive more updates than their raw sample share.
+    """
+
+    def __init__(
+        self,
+        ranges: list[dict[str, Any]],
+        target_counts: dict[str, int],
+        *,
+        num_samples: int,
+        seed: int,
+    ) -> None:
+        self._ranges: list[tuple[str, int, int]] = []
+        phase_offset = 0
+        for item in ranges:
+            count = int(item["samples"])
+            if count < 0:
+                raise ValueError("sequence phase range has a negative sample count")
+            sequence = str(item["sequence"])
+            if count:
+                self._ranges.append((sequence, phase_offset, phase_offset + count))
+            phase_offset += count
+        if phase_offset != int(num_samples):
+            raise ValueError(
+                "sequence sampler phase budget mismatch: "
+                f"ranges={phase_offset}, requested={num_samples}"
+            )
+        self._target_counts = {
+            str(sequence): int(count) for sequence, count in target_counts.items()
+        }
+        if sum(self._target_counts.values()) != int(num_samples):
+            raise ValueError("sequence sampler target counts do not match phase budget")
+        range_sequences = {sequence for sequence, _start, _end in self._ranges}
+        if set(self._target_counts) != range_sequences:
+            raise ValueError(
+                "sequence sampler targets do not match non-empty phase ranges"
+            )
+        self._num_samples = int(num_samples)
+        self._seed = int(seed)
+        self._epoch = 0
+
+    @property
+    def target_counts(self) -> dict[str, int]:
+        return dict(self._target_counts)
+
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch = int(epoch)
+
+    def __iter__(self) -> Iterator[int]:
+        rng = random.Random(self._seed + self._epoch * 1_000_003)
+        indices: list[int] = []
+        for sequence, start, end in self._ranges:
+            indices.extend(
+                rng.randrange(start, end)
+                for _ in range(self._target_counts[sequence])
+            )
+        rng.shuffle(indices)
+        return iter(indices)
+
+    def __len__(self) -> int:
+        return self._num_samples
 
 
 def _shutdown_loader(loader: DataLoader | None) -> None:
@@ -175,6 +328,7 @@ def build_memory_shard_schedule(
     config: dict[str, Any],
 ) -> dict[str, Any]:
     shards, cycles, epochs_per_shard = _resolved_schedule_settings(config)
+    sequence_sampling = _resolve_sequence_sampling(config)
     sequences = list(dataset.metadata["train_sequences"])
     source_counts = {
         sequence: int(
@@ -203,9 +357,26 @@ def build_memory_shard_schedule(
         sequence_offsets[sequence] = offset
         offset += counts[sequence]
 
+    sampling_power = (
+        0.5
+        if sequence_sampling == SEQUENCE_SAMPLING_SQRT_SIZE
+        else 1.0
+    )
+    sequence_sampling_weights = _sequence_sampling_weights(
+        counts,
+        power=sampling_power,
+    )
+
+    randomize_shard_order = bool(config.get("randomize_shard_order", False))
+    order_rng = random.Random(int(config.get("seed", 42)))
+    shard_orders: list[list[int]] = []
     phases: list[dict[str, Any]] = []
     for cycle in range(cycles):
-        for shard in range(shards):
+        shard_order = list(range(shards))
+        if randomize_shard_order:
+            order_rng.shuffle(shard_order)
+        shard_orders.append([shard + 1 for shard in shard_order])
+        for shard in shard_order:
             ranges: list[dict[str, Any]] = []
             for sequence in sequences:
                 count = counts[sequence]
@@ -223,27 +394,51 @@ def build_memory_shard_schedule(
                         "samples": global_end - global_start,
                     }
                 )
-            phases.append(
-                {
-                    "phase": len(phases) + 1,
-                    "cycle": cycle + 1,
-                    "shard": shard + 1,
-                    "fraction_start": shard / shards,
-                    "fraction_end": (shard + 1) / shards,
-                    "epochs": epochs_per_shard,
-                    "samples": sum(item["samples"] for item in ranges),
-                    "ranges": ranges,
-                }
-            )
+            phase_samples = sum(item["samples"] for item in ranges)
+            phase = {
+                "phase": len(phases) + 1,
+                "cycle": cycle + 1,
+                "shard": shard + 1,
+                "fraction_start": shard / shards,
+                "fraction_end": (shard + 1) / shards,
+                "epochs": epochs_per_shard,
+                "samples": phase_samples,
+                "ranges": ranges,
+            }
+            if sequence_sampling == SEQUENCE_SAMPLING_SQRT_SIZE:
+                active_sequences = [
+                    str(item["sequence"])
+                    for item in ranges
+                    if int(item["samples"]) > 0
+                ]
+                phase["sequence_sampling_target_counts"] = (
+                    _allocate_sequence_sample_counts(
+                        num_samples=phase_samples,
+                        sequence_counts=counts,
+                        active_sequences=active_sequences,
+                        power=sampling_power,
+                    )
+                )
+            phases.append(phase)
     return {
         "sampling_policy": (
-            "full_shuffle" if shards == 1 else LOW_MEMORY_SAMPLING_POLICY
+            "sequence_sqrt_size_with_replacement"
+            if sequence_sampling == SEQUENCE_SAMPLING_SQRT_SIZE
+            else ("full_shuffle" if shards == 1 else LOW_MEMORY_SAMPLING_POLICY)
+        ),
+        "sequence_sampling": sequence_sampling,
+        "sequence_sampling_power": sampling_power,
+        "sequence_sampling_weights": sequence_sampling_weights,
+        "sequence_sampling_replacement": (
+            sequence_sampling == SEQUENCE_SAMPLING_SQRT_SIZE
         ),
         "memory_shards": shards,
         "shard_cycles": cycles,
         "epochs_per_shard": epochs_per_shard,
         "nominal_epochs": int(config["epochs"]),
         "effective_full_epochs": epochs_per_shard * cycles,
+        "randomize_shard_order": randomize_shard_order,
+        "shard_order_per_cycle": shard_orders,
         "phases": phases,
     }
 
@@ -260,6 +455,22 @@ def _phase_dataset(
     if not subsets:
         raise ValueError("memory shard phase contains no samples")
     return subsets[0] if len(subsets) == 1 else ConcatDataset(subsets)
+
+
+def _phase_sampler(
+    training_schedule: dict[str, Any],
+    phase: dict[str, Any],
+    *,
+    seed: int,
+) -> Sampler[int] | None:
+    if training_schedule["sequence_sampling"] != SEQUENCE_SAMPLING_SQRT_SIZE:
+        return None
+    return SequenceSqrtSampler(
+        phase["ranges"],
+        phase["sequence_sampling_target_counts"],
+        num_samples=int(phase["samples"]),
+        seed=seed,
+    )
 
 
 def _move_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
@@ -320,7 +531,10 @@ def _checkpoint_payload(
     initialization: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = {
-        **model_contract(),
+        **model_contract(
+            correction_bound=float(model.correction_bound),
+            context_size=int(model.context_size),
+        ),
         "epoch": int(epoch),
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
@@ -334,7 +548,7 @@ def _checkpoint_payload(
         "split": str(metadata["split"]),
         "train_sequences": list(metadata["train_sequences"]),
         "index_format": str(metadata.get("index_format", "jsonl_v1")),
-        "correction_bound": RG_CMA_CORRECTION_BOUND,
+        "correction_bound": float(model.correction_bound),
         "policy_prototypes": np.asarray(POLICY_PROTOTYPE_MATRIX).tolist(),
         "dataset_schema_sha256": str(metadata["dataset_schema_sha256"]),
         "dataset_sha256": str(metadata["dataset_sha256"]),
@@ -369,14 +583,47 @@ def validate_iwg_rg_cma_checkpoint_contract(
     *,
     expected_dataset_sha256: str | None = None,
 ) -> None:
+    model_contract_key = (
+        str(checkpoint.get("model_schema", "")),
+        str(checkpoint.get("model_schema_sha256", "")),
+    )
+    supported_model_contracts = {
+        (IWG_RG_CMA_MODEL_SCHEMA, IWG_RG_CMA_MODEL_SCHEMA_SHA256): (
+            RG_CMA_CORRECTION_BOUND,
+            6,
+        ),
+        (IWG_RG_CMA_LEGACY_MODEL_SCHEMA, IWG_RG_CMA_LEGACY_MODEL_SCHEMA_SHA256): (
+            RG_CMA_LEGACY_CORRECTION_BOUND,
+            6,
+        ),
+        (
+            IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA,
+            IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA_SHA256,
+        ): (
+            RG_CMA_CORRECTION_BOUND,
+            8,
+        ),
+        (
+            IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA,
+            IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA_SHA256,
+        ): (
+            RG_CMA_LEGACY_CORRECTION_BOUND,
+            8,
+        ),
+    }
+    expected_contract = supported_model_contracts.get(model_contract_key)
+    if expected_contract is None:
+        raise ValueError(
+            "IWG RG-CMA checkpoint contract mismatch: unsupported model contract "
+            f"{model_contract_key!r}"
+        )
+    expected_bound, expected_context_size = expected_contract
     required = {
-        "model_schema": IWG_RG_CMA_MODEL_SCHEMA,
-        "model_schema_sha256": IWG_RG_CMA_MODEL_SCHEMA_SHA256,
         "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
         "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
         "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
-        "correction_bound": RG_CMA_CORRECTION_BOUND,
-        "context_size": 6,
+        "correction_bound": expected_bound,
+        "context_size": expected_context_size,
     }
     mismatches = {
         key: (checkpoint.get(key), value)
@@ -429,6 +676,7 @@ def load_iwg_rg_cma_checkpoint(
         scalar_dim=int(checkpoint["scalar_dim"]),
         event_dim=int(checkpoint["event_dim"]),
         correction_bound=float(checkpoint["correction_bound"]),
+        context_size=int(checkpoint["context_size"]),
     )
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     return model, checkpoint
@@ -445,6 +693,20 @@ def initialize_iwg_rg_cma_model(
         raise FileNotFoundError(f"initial checkpoint not found: {path}")
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     validate_iwg_rg_cma_checkpoint_contract(checkpoint)
+    checkpoint_bound = float(checkpoint["correction_bound"])
+    if not math.isclose(
+        float(model.correction_bound), checkpoint_bound, rel_tol=0.0, abs_tol=1e-12
+    ):
+        raise ValueError(
+            "initial checkpoint correction bound does not match the requested "
+            f"training bound: {checkpoint_bound} != {model.correction_bound}"
+        )
+    checkpoint_context_size = int(checkpoint["context_size"])
+    if int(model.context_size) != checkpoint_context_size:
+        raise ValueError(
+            "initial checkpoint context size does not match the requested "
+            f"training context: {checkpoint_context_size} != {model.context_size}"
+        )
     expected_dims = {
         "reid_dim": int(dataset_metadata["reid_dim"]),
         "scalar_dim": int(dataset_metadata["scalar_dim"]),
@@ -501,6 +763,10 @@ def _run_training_attempt(
         reid_dim=int(dataset.metadata["reid_dim"]),
         scalar_dim=int(dataset.metadata["scalar_dim"]),
         event_dim=int(dataset.metadata["event_dim"]),
+        correction_bound=float(
+            config.get("correction_bound", RG_CMA_CORRECTION_BOUND)
+        ),
+        context_size=int(config.get("context_size", 6)),
     ).to(device)
     init_checkpoint = str(config.get("init_checkpoint", "")).strip()
     initialization = (
@@ -530,6 +796,7 @@ def _run_training_attempt(
     total_samples_seen = 0
     loader: DataLoader | None = None
     phase_dataset: Dataset | None = None
+    phase_sampler: Sampler[int] | None = None
     active_phase = 0
     with metrics_path.open("w") as metrics_file, training_log_path.open("w") as training_log:
         _write_training_log(training_log, "=" * 60)
@@ -556,6 +823,7 @@ def _run_training_attempt(
                     _shutdown_loader(loader)
                     loader = None
                     phase_dataset = None
+                    phase_sampler = None
                     gc.collect()
                     released = dataset.release_cached_pages()
                     if device.type == "cuda":
@@ -565,12 +833,25 @@ def _run_training_attempt(
                         if int(training_schedule["memory_shards"]) == 1
                         else _phase_dataset(dataset, phase)
                     )
+                    phase_seed = (
+                        seed
+                        + (int(phase["cycle"]) - 1)
+                        * int(training_schedule["memory_shards"])
+                        + int(phase["shard"])
+                        - 1
+                    )
+                    phase_sampler = _phase_sampler(
+                        training_schedule,
+                        phase,
+                        seed=phase_seed,
+                    )
                     loader = _loader(
                         phase_dataset,
                         batch_size=batch_size,
                         num_workers=int(config["num_workers"]),
-                        seed=seed + int(phase["phase"]) - 1,
+                        seed=phase_seed,
                         low_memory=int(training_schedule["memory_shards"]) > 1,
+                        sampler=phase_sampler,
                     )
                     if len(loader) != int(phase["steps_per_epoch"]):
                         raise AssertionError("phase loader length changed unexpectedly")
@@ -588,6 +869,8 @@ def _run_training_attempt(
                     )
                 if loader is None:
                     raise AssertionError("phase loader was not created")
+                if phase_sampler is not None:
+                    phase_sampler.set_epoch(epoch)
 
                 model.train()
                 totals: dict[str, float] = {}
@@ -595,8 +878,9 @@ def _run_training_attempt(
                 channel_abs_error = [0.0, 0.0]
                 channel_correct = [0.0, 0.0]
                 channel_weight = [0.0, 0.0]
-                motion_positions = torch.zeros(6, dtype=torch.float64)
-                appearance_positions = torch.zeros(6, dtype=torch.float64)
+                context_size = int(config.get("context_size", model.context_size))
+                motion_positions = torch.zeros(context_size, dtype=torch.float64)
+                appearance_positions = torch.zeros(context_size, dtype=torch.float64)
                 cross_matrix = torch.zeros((3, 3), dtype=torch.float64)
                 motion_entropy = 0.0
                 appearance_entropy = 0.0
@@ -616,7 +900,7 @@ def _run_training_attempt(
                     optimizer.zero_grad(set_to_none=True)
                     outputs = _forward(model, batch)
                     loss, components = compute_iwg_rg_cma_loss(
-                        outputs, batch, correction_bound=RG_CMA_CORRECTION_BOUND
+                        outputs, batch, correction_bound=model.correction_bound
                     )
                     loss.backward()
                     grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -826,6 +1110,13 @@ def _run_training_attempt(
 
 
 def _validate_formal_config(config: dict[str, Any]) -> int:
+    _resolve_sequence_sampling(config)
+    model_contract(
+        correction_bound=float(
+            config.get("correction_bound", RG_CMA_CORRECTION_BOUND)
+        ),
+        context_size=int(config.get("context_size", 6)),
+    )
     init_checkpoint = str(config.get("init_checkpoint", "")).strip()
     required = FINETUNE_REQUIRED_CONFIG if init_checkpoint else REQUIRED_CONFIG
     for key, expected in required.items():
@@ -872,6 +1163,13 @@ def train_iwg_rg_cma(config: dict[str, Any]) -> dict[str, Any]:
         config["dataset_dir"], max_samples=int(config.get("max_train_samples", 0))
     )
     try:
+        dataset_context_size = int(dataset.metadata["context_size"])
+        configured_context_size = int(config.get("context_size", 6))
+        if dataset_context_size != configured_context_size:
+            raise ValueError(
+                "training context_size does not match dataset metadata: "
+                f"{configured_context_size} != {dataset_context_size}"
+            )
         return _run_training_attempt(config, dataset=dataset, batch_size=batch_size)
     except torch.cuda.OutOfMemoryError:
         if batch_size != 2048:
@@ -923,6 +1221,8 @@ def validate_iwg_rg_cma_checkpoint(
     validate_iwg_rg_cma_checkpoint_contract(
         checkpoint, expected_dataset_sha256=dataset.metadata["dataset_sha256"]
     )
+    if int(checkpoint["context_size"]) != int(dataset.metadata["context_size"]):
+        raise ValueError("checkpoint context_size does not match dataset metadata")
     if checkpoint["dataset_schema_sha256"] != dataset.metadata["dataset_schema_sha256"]:
         raise ValueError("checkpoint dataset schema does not match the requested dataset")
     model.to(device).eval()
@@ -943,7 +1243,9 @@ def validate_iwg_rg_cma_checkpoint(
                     break
                 batch = _move_batch(raw_batch, torch.device(device))
                 outputs = _forward(model, batch)
-                _loss, components = compute_iwg_rg_cma_loss(outputs, batch)
+                _loss, components = compute_iwg_rg_cma_loss(
+                    outputs, batch, correction_bound=float(checkpoint["correction_bound"])
+                )
                 size = int(batch["track_feats"].shape[0])
                 count += size
                 for key, value in components.items():
@@ -959,7 +1261,7 @@ def validate_iwg_rg_cma_checkpoint(
             "epoch": int(checkpoint["epoch"]),
             "samples": count,
             "max_abs_correction": max_correction,
-            "correction_bound": RG_CMA_CORRECTION_BOUND,
+            "correction_bound": float(checkpoint["correction_bound"]),
             "metrics": {key: value / count for key, value in totals.items()},
             "dataset_sha256": checkpoint["dataset_sha256"],
             "model_schema": checkpoint["model_schema"],

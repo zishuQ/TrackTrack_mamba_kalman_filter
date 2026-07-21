@@ -4,11 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PY="${PYTHON_BIN:-${ROOT}/.venv/bin/python}"
 RUN_NAME="${RUN_NAME:-iwg_rg_cma_v1_mot20_trainall_seed42_bs1024_shard20x2}"
-DATA_RUN_NAME="${DATA_RUN_NAME:-iwg_rg_cma_v1_mot20_trainall_seed42_bs1024}"
 RUN_ROOT="${ROOT}/outputs/agentguard/experiments/${RUN_NAME}"
-DATA_RUN_ROOT="${ROOT}/outputs/agentguard/experiments/${DATA_RUN_NAME}"
+DATASET_ROOT="${ROOT}/outputs/agentguard/datasets/iwg_rg_cma/MOT20"
 LABEL_DIR="${ROOT}/outputs/agentguard/labels/iwg_rg_cma/MOT20/nsa_v3_compact"
-DATASET_DIR="${DATA_RUN_ROOT}/dataset"
+DATASET_DIR="${DATASET_DIR:-${DATASET_ROOT}/nsa_all_v3_compact}"
 CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
 LOG_DIR="${RUN_ROOT}/logs"
 PROVENANCE_DIR="${RUN_ROOT}/provenance"
@@ -49,7 +48,7 @@ trap finish EXIT
 
 git -C "${ROOT}" rev-parse HEAD > "${PROVENANCE_DIR}/git_commit.txt"
 git -C "${ROOT}" status --porcelain > "${PROVENANCE_DIR}/git_status_porcelain.txt"
-printf '%s\n' "${DATA_RUN_NAME}" > "${PROVENANCE_DIR}/data_run_name.txt"
+printf '%s\n' "${DATASET_DIR}" > "${PROVENANCE_DIR}/dataset_dir.txt"
 sha256sum \
   "${ROOT}/agentguard/src/agentguard/models/event_encoder.py" \
   "${ROOT}/agentguard/src/agentguard/models/iwg.py" \

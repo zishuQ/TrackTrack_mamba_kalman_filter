@@ -4,11 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PY="${PYTHON_BIN:-${ROOT}/.venv/bin/python}"
 RUN_NAME="${RUN_NAME:-iwg_rg_cma_v1_sportsmot_trainval_seed42_bs1024_shard10x1}"
-DATA_RUN_NAME="${DATA_RUN_NAME:-iwg_rg_cma_v1_sportsmot_trainval_seed42_bs1024}"
 RUN_ROOT="${ROOT}/outputs/agentguard/experiments/${RUN_NAME}"
-DATA_ROOT="${ROOT}/outputs/agentguard/experiments/${DATA_RUN_NAME}"
+DATASET_ROOT="${ROOT}/outputs/agentguard/datasets/iwg_rg_cma/SportsMOT"
 LABEL_DIR="${ROOT}/outputs/agentguard/labels/iwg_rg_cma/SportsMOT/nsa_trainval_v3_compact"
-DATASET_DIR="${DATA_ROOT}/dataset"
+DATASET_DIR="${DATASET_DIR:-${DATASET_ROOT}/nsa_trainval_v3_compact}"
 CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
 LOG_DIR="${RUN_ROOT}/logs"
 PROVENANCE_DIR="${RUN_ROOT}/provenance"
@@ -27,14 +26,14 @@ if (( MEMORY_SHARDS * EPOCHS_PER_SHARD * SHARD_CYCLES != EPOCHS )); then
   echo "Invalid schedule: ${MEMORY_SHARDS} shards * ${EPOCHS_PER_SHARD} epochs/shard * ${SHARD_CYCLES} cycles != ${EPOCHS} epochs" >&2
   exit 2
 fi
-echo "Reusable SportsMOT trainval data: ${DATA_ROOT}"
+echo "Reusable SportsMOT trainval data: ${DATASET_DIR}"
 echo "Training schedule: ${MEMORY_SHARDS} shards x ${EPOCHS_PER_SHARD} epochs/shard x ${SHARD_CYCLES} cycles = ${EPOCHS} nominal epochs ($(( EPOCHS / MEMORY_SHARDS )) effective full-data epochs)"
 if [[ -e "${RUN_ROOT}/running" || -e "${LAST_CHECKPOINT}" ]]; then
   echo "Refusing to overwrite or duplicate run: ${RUN_ROOT}" >&2
   exit 2
 fi
 
-mkdir -p "${DATA_ROOT}" "$(dirname "${LABEL_DIR}")" \
+mkdir -p "${DATASET_ROOT}" "$(dirname "${LABEL_DIR}")" \
   "${CHECKPOINT_DIR}" "${LOG_DIR}" "${PROVENANCE_DIR}"
 touch "${RUN_ROOT}/running"
 complete=0

@@ -18,8 +18,17 @@ def make_head(in_dim: int, hidden_dim: int, out_dim: int) -> nn.Sequential:
 class IWG(nn.Module):
     """Instance-wise Gate network."""
 
-    def __init__(self, reid_dim: int, scalar_dim: int = 63, event_dim: int = 128):
+    def __init__(
+        self,
+        reid_dim: int,
+        scalar_dim: int = 63,
+        event_dim: int = 128,
+        context_size: int = 6,
+    ):
         super().__init__()
+        self.context_size = int(context_size)
+        if self.context_size < 1:
+            raise ValueError(f"context_size must be positive, got {context_size}")
         self.encoder = EventEncoder(reid_dim)
 
         encoder_layer = nn.TransformerEncoderLayer(
@@ -33,7 +42,9 @@ class IWG(nn.Module):
         self.risk_head = make_head(event_dim, 64, 4)
         self.cue_head = make_head(event_dim, 32, 3)
 
-        self.position_embedding = nn.Parameter(torch.zeros(1, 6, event_dim))
+        self.position_embedding = nn.Parameter(
+            torch.zeros(1, self.context_size, event_dim)
+        )
         nn.init.normal_(self.position_embedding, mean=0.0, std=0.02)
 
     def _apply_heads(self, event_embedding: torch.Tensor) -> dict:
@@ -122,18 +133,19 @@ class IWG(nn.Module):
         scalar_feats: torch.Tensor,
         mask: torch.BoolTensor | None = None,
     ) -> dict:
-        """Evaluate every causal six-event window with one EventEncoder pass."""
+        """Evaluate every causal context window with one EventEncoder pass."""
         batch_size, seq_len, _ = track_feats.shape
         event_embs, mask = self._encode_inputs(
             track_feats, det_feats, scalar_feats, mask
         )
 
-        left_embeddings = F.pad(event_embs, (0, 0, 5, 0))
-        left_mask = F.pad(mask, (5, 0), value=True)
-        windows = left_embeddings.unfold(1, 6, 1).permute(0, 1, 3, 2)
-        window_mask = left_mask.unfold(1, 6, 1)
-        flat_windows = windows.reshape(batch_size * seq_len, 6, -1)
-        flat_mask = window_mask.reshape(batch_size * seq_len, 6)
+        left = self.context_size - 1
+        left_embeddings = F.pad(event_embs, (0, 0, left, 0))
+        left_mask = F.pad(mask, (left, 0), value=True)
+        windows = left_embeddings.unfold(1, self.context_size, 1).permute(0, 1, 3, 2)
+        window_mask = left_mask.unfold(1, self.context_size, 1)
+        flat_windows = windows.reshape(batch_size * seq_len, self.context_size, -1)
+        flat_mask = window_mask.reshape(batch_size * seq_len, self.context_size)
         current = self._transform_windows(flat_windows, flat_mask).reshape(
             batch_size, seq_len, -1
         )
@@ -160,9 +172,10 @@ class IWG(nn.Module):
             if (last_valid < 0).any():
                 raise ValueError("IWG forward requires at least one valid event per sample")
 
-        left_embeddings = F.pad(event_embs, (0, 0, 5, 0))
-        left_mask = F.pad(normalized_mask, (5, 0), value=True)
-        offsets = torch.arange(6, device=track_feats.device).unsqueeze(0)
+        left = self.context_size - 1
+        left_embeddings = F.pad(event_embs, (0, 0, left, 0))
+        left_mask = F.pad(normalized_mask, (left, 0), value=True)
+        offsets = torch.arange(self.context_size, device=track_feats.device).unsqueeze(0)
         gather_indices = last_valid.unsqueeze(1) + offsets
         windows = torch.gather(
             left_embeddings,

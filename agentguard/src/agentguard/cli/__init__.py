@@ -2961,7 +2961,7 @@ def _add_build_iwg_attn_data_parser(
 ) -> None:
     parser = subparsers.add_parser(
         "build_iwg_attn_data",
-        help="Build train-all causal six-event windows for safe-direct IWG+RG-CMA.",
+        help="Build train-all causal context windows for safe-direct IWG+RG-CMA.",
     )
     parser.add_argument(
         "--dataset",
@@ -2979,6 +2979,13 @@ def _add_build_iwg_attn_data_parser(
     parser.add_argument("--label-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--max-frame-gap", type=int, default=30)
+    parser.add_argument(
+        "--context-size",
+        type=int,
+        choices=[6, 8],
+        default=6,
+        help="Number of events passed to IWG/RG-CMA (6 preserves old datasets).",
+    )
 
 
 def _cmd_build_iwg_attn_data(args: argparse.Namespace) -> None:
@@ -2992,6 +2999,7 @@ def _cmd_build_iwg_attn_data(args: argparse.Namespace) -> None:
         label_dir=args.label_dir,
         output_dir=args.output_dir,
         max_frame_gap=args.max_frame_gap,
+        context_size=args.context_size,
     )
     print(json.dumps(metadata, indent=2, sort_keys=True))
 
@@ -3012,6 +3020,20 @@ def _add_train_iwg_attn_parser(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--warmup-epochs", type=int, default=1)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--correction-bound",
+        type=float,
+        choices=[0.05, 0.10],
+        default=0.10,
+        help="RG-CMA correction bound; 0.05 preserves the legacy contract.",
+    )
+    parser.add_argument(
+        "--context-size",
+        type=int,
+        choices=[6, 8],
+        default=6,
+        help="Number of events passed to IWG/RG-CMA (6 preserves old models).",
+    )
     parser.add_argument(
         "--init-checkpoint",
         default="",
@@ -3034,6 +3056,20 @@ def _add_train_iwg_attn_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Epochs per memory shard (0 infers from total epochs and cycles).",
     )
     parser.add_argument("--shard-cycles", type=int, default=1)
+    parser.add_argument(
+        "--randomize-shard-order",
+        action="store_true",
+        help="Shuffle shard order independently for each cycle using --seed.",
+    )
+    parser.add_argument(
+        "--sequence-sampling",
+        choices=["sample-proportional", "sqrt-size"],
+        default="sample-proportional",
+        help=(
+            "Sequence sampling policy. sqrt-size keeps the phase sample/step "
+            "budget and samples within sequences with replacement."
+        ),
+    )
 def _cmd_train_iwg_attn(args: argparse.Namespace) -> None:
     from agentguard.training.train_iwg_rg_cma import train_iwg_rg_cma
 
@@ -3049,6 +3085,8 @@ def _cmd_train_iwg_attn(args: argparse.Namespace) -> None:
         "warmup_epochs": int(args.warmup_epochs),
         "grad_clip": float(args.grad_clip),
         "seed": int(args.seed),
+        "correction_bound": float(args.correction_bound),
+        "context_size": int(args.context_size),
         "init_checkpoint": (
             str(Path(args.init_checkpoint).resolve()) if args.init_checkpoint else ""
         ),
@@ -3057,6 +3095,8 @@ def _cmd_train_iwg_attn(args: argparse.Namespace) -> None:
         "memory_shards": int(args.memory_shards),
         "epochs_per_shard": int(args.epochs_per_shard),
         "shard_cycles": int(args.shard_cycles),
+        "randomize_shard_order": bool(args.randomize_shard_order),
+        "sequence_sampling": str(args.sequence_sampling),
     }
     summary = train_iwg_rg_cma(config)
     checkpoint_dir = Path(config["checkpoint_dir"])

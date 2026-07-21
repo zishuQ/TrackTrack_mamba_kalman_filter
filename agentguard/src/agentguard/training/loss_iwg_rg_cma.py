@@ -3,6 +3,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from agentguard.models.iwg_rg_cma import RG_CMA_CORRECTION_BOUND
+
 
 def _weighted_mean(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     weights = weights.to(dtype=values.dtype)
@@ -34,7 +36,7 @@ def compute_iwg_rg_cma_loss(
     outputs: dict[str, torch.Tensor],
     batch: dict[str, torch.Tensor],
     *,
-    correction_bound: float = 0.05,
+    correction_bound: float = RG_CMA_CORRECTION_BOUND,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     valid_channels = torch.stack(
         [batch["valid_motion"], batch["valid_appearance"]], dim=-1

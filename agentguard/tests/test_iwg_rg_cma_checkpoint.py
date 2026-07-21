@@ -14,15 +14,20 @@ from agentguard.datasets.iwg_attn_dataset import (
     SPORTSMOT_TRAINVAL_IWG_ATTN_DATASET_SCHEMA_SHA256,
 )
 from agentguard.models.iwg_rg_cma import (
+    IWG_RG_CMA_LEGACY_MODEL_SCHEMA,
+    IWG_RG_CMA_LEGACY_MODEL_SCHEMA_SHA256,
     IWG_RG_CMA_MODEL_SCHEMA,
     IWG_RG_CMA_MODEL_SCHEMA_SHA256,
     IWGRGCMA,
+    RG_CMA_CORRECTION_BOUND,
+    RG_CMA_LEGACY_CORRECTION_BOUND,
 )
 from agentguard.training.train_iwg_rg_cma import (
     FORMAL_CHECKPOINT_EPOCHS,
     _phase_dataset,
     _run_training_attempt,
     _validate_formal_config,
+    SequenceSqrtSampler,
     build_memory_shard_schedule,
     initialize_iwg_rg_cma_model,
     load_iwg_rg_cma_checkpoint,
@@ -42,7 +47,7 @@ def _checkpoint() -> dict:
         "event_dim": 128,
         "context_size": 6,
         "max_frame_gap": 30,
-        "correction_bound": 0.05,
+        "correction_bound": RG_CMA_CORRECTION_BOUND,
         "policy_prototypes": np.asarray(POLICY_PROTOTYPE_MATRIX).tolist(),
         "dataset_schema_sha256": IWG_ATTN_DATASET_SCHEMA_SHA256,
         "dataset_sha256": "dataset-hash",
@@ -73,6 +78,24 @@ def test_iwg_rg_cma_checkpoint_strict_roundtrip(tmp_path):
     invalid["correction_bound"] = 0.2
     with pytest.raises(ValueError, match="contract mismatch"):
         validate_iwg_rg_cma_checkpoint_contract(invalid)
+
+    legacy = dict(checkpoint)
+    legacy_model = IWGRGCMA(16, correction_bound=RG_CMA_LEGACY_CORRECTION_BOUND)
+    legacy.update(
+        {
+            "model_schema": IWG_RG_CMA_LEGACY_MODEL_SCHEMA,
+            "model_schema_sha256": IWG_RG_CMA_LEGACY_MODEL_SCHEMA_SHA256,
+            "model_state_dict": legacy_model.state_dict(),
+            "correction_bound": RG_CMA_LEGACY_CORRECTION_BOUND,
+        }
+    )
+    validate_iwg_rg_cma_checkpoint_contract(
+        legacy, expected_dataset_sha256="dataset-hash"
+    )
+    legacy_path = tmp_path / "legacy_checkpoint.pt"
+    torch.save(legacy, legacy_path)
+    legacy_loaded, _ = load_iwg_rg_cma_checkpoint(legacy_path)
+    assert legacy_loaded.correction_bound == RG_CMA_LEGACY_CORRECTION_BOUND
 
     mot20 = dict(checkpoint)
     mot20["dataset_schema_sha256"] = MOT20_IWG_ATTN_DATASET_SCHEMA_SHA256
@@ -230,6 +253,142 @@ def test_mot20_memory_shards_cover_each_sequence_once_per_cycle():
         assert len(indices) == len(set(indices))
 
 
+def test_randomized_shard_order_is_seeded_and_preserves_each_cycle():
+    class DatasetStub:
+        metadata = {
+            "dataset": "MOT20",
+            "index_format": "compact_memmap_v1",
+            "train_sequences": ["MOT20-A", "MOT20-B"],
+            "timeline_counts": {
+                "MOT20-A": {"labeled_endpoints": 11},
+                "MOT20-B": {"labeled_endpoints": 7},
+            },
+        }
+
+        def __len__(self):
+            return 18
+
+    config = {
+        "epochs": 12,
+        "memory_shards": 3,
+        "epochs_per_shard": 1,
+        "shard_cycles": 4,
+        "seed": 42,
+        "randomize_shard_order": True,
+    }
+    schedule = build_memory_shard_schedule(DatasetStub(), config)
+    repeated = build_memory_shard_schedule(DatasetStub(), config)
+    fixed = build_memory_shard_schedule(
+        DatasetStub(), {**config, "randomize_shard_order": False}
+    )
+
+    assert schedule["randomize_shard_order"] is True
+    assert schedule["shard_order_per_cycle"] == repeated[
+        "shard_order_per_cycle"
+    ]
+    assert schedule["shard_order_per_cycle"] != fixed["shard_order_per_cycle"]
+    assert all(
+        sorted(order) == [1, 2, 3]
+        for order in schedule["shard_order_per_cycle"]
+    )
+
+    for cycle in range(1, 5):
+        phases = [
+            phase for phase in schedule["phases"] if phase["cycle"] == cycle
+        ]
+        assert [phase["shard"] for phase in phases] == schedule[
+            "shard_order_per_cycle"
+        ][cycle - 1]
+        indices = []
+        for phase in phases:
+            indices.extend(list(_phase_dataset(list(range(18)), phase)))
+        assert sorted(indices) == list(range(18))
+        assert len(indices) == len(set(indices))
+
+
+def test_sqrt_size_sampling_preserves_phase_budget_and_uses_exact_quotas():
+    class DatasetStub:
+        metadata = {
+            "dataset": "MOT20",
+            "index_format": "compact_memmap_v1",
+            "train_sequences": ["MOT20-A", "MOT20-B", "MOT20-C"],
+            "timeline_counts": {
+                "MOT20-A": {"labeled_endpoints": 2},
+                "MOT20-B": {"labeled_endpoints": 8},
+                "MOT20-C": {"labeled_endpoints": 50},
+            },
+        }
+
+        def __len__(self):
+            return 60
+
+    dataset = DatasetStub()
+    sqrt_schedule = build_memory_shard_schedule(
+        dataset,
+        {
+            "epochs": 2,
+            "memory_shards": 2,
+            "epochs_per_shard": 1,
+            "shard_cycles": 1,
+            "sequence_sampling": "sqrt-size",
+            "seed": 42,
+        },
+    )
+    proportional_schedule = build_memory_shard_schedule(
+        dataset,
+        {
+            "epochs": 2,
+            "memory_shards": 2,
+            "epochs_per_shard": 1,
+            "shard_cycles": 1,
+            "sequence_sampling": "sample-proportional",
+            "seed": 42,
+        },
+    )
+
+    assert sqrt_schedule["sampling_policy"] == (
+        "sequence_sqrt_size_with_replacement"
+    )
+    assert sqrt_schedule["sequence_sampling_replacement"] is True
+    assert sqrt_schedule["sequence_sampling_weights"]["MOT20-A"] < (
+        sqrt_schedule["sequence_sampling_weights"]["MOT20-B"]
+        < sqrt_schedule["sequence_sampling_weights"]["MOT20-C"]
+    )
+    assert [phase["samples"] for phase in sqrt_schedule["phases"]] == [
+        phase["samples"] for phase in proportional_schedule["phases"]
+    ]
+    assert sum(
+        (int(phase["samples"]) + 3) // 4
+        for phase in sqrt_schedule["phases"]
+    ) == sum(
+        (int(phase["samples"]) + 3) // 4
+        for phase in proportional_schedule["phases"]
+    )
+
+    phase = sqrt_schedule["phases"][0]
+    sampler = SequenceSqrtSampler(
+        phase["ranges"],
+        phase["sequence_sampling_target_counts"],
+        num_samples=int(phase["samples"]),
+        seed=42,
+    )
+    indices = list(sampler)
+    assert len(indices) == int(phase["samples"])
+    observed = {sequence: 0 for sequence in phase["sequence_sampling_target_counts"]}
+    for index in indices:
+        offset = 0
+        for item in phase["ranges"]:
+            end = offset + int(item["samples"])
+            if offset <= index < end:
+                observed[str(item["sequence"])] += 1
+                break
+            offset = end
+        else:
+            raise AssertionError(f"sampler produced an out-of-range index: {index}")
+    assert observed == phase["sequence_sampling_target_counts"]
+    assert len(set(indices)) < len(indices)
+
+
 def test_low_memory_training_switches_phases_without_resetting_progress(tmp_path):
     class TinyDataset(torch.utils.data.Dataset):
         metadata = {
@@ -294,6 +453,7 @@ def test_low_memory_training_switches_phases_without_resetting_progress(tmp_path
         "warmup_epochs": 1,
         "grad_clip": 1.0,
         "amp": False,
+        "sequence_sampling": "sqrt-size",
         "checkpoint_dir": str(tmp_path),
         "memory_shards": 2,
         "epochs_per_shard": 1,

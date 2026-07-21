@@ -10,7 +10,7 @@ from agentguard.contracts.events import TrackEvent
 class EventBuffer:
     """
     Per-track event buffer for IWG.
-    Maintains up to 6 most recent events (current + 5 historical).
+    Maintains a fixed number of most recent events (current plus history).
     """
 
     def __init__(self, max_len: int = 6):

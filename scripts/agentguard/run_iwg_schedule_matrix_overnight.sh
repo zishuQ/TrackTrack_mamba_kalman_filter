@@ -6,14 +6,14 @@ PY="${PYTHON_BIN:-${ROOT}/.venv/bin/python}"
 MASTER_NAME="${MASTER_NAME:-iwg_schedule_matrix_20260715}"
 MASTER_ROOT="${ROOT}/outputs/agentguard/overnight/${MASTER_NAME}"
 EXPERIMENT_ROOT="${ROOT}/outputs/agentguard/experiments"
+DATASET_ROOT="${ROOT}/outputs/agentguard/datasets/iwg_rg_cma"
 EVENT_CACHE_ROOT="${ROOT}/outputs/agentguard/event_cache_v3_iwg_v2"
 DETECTION_CACHE_ROOT="${ROOT}/outputs/agentguard/detection_cache"
 TRACKER_ROOT="${ROOT}/outputs/3. track"
 
-SPORTS_DATA_NAME="iwg_rg_cma_v1_sportsmot_train_data"
-SPORTS_DATA_ROOT="${EXPERIMENT_ROOT}/${SPORTS_DATA_NAME}"
+SPORTS_DATASET_DIR="${DATASET_ROOT}/SportsMOT/nsa_train_v3_compact"
+SPORTS_DATA_LOG_ROOT="${MASTER_ROOT}/data_build/sportsmot"
 SPORTS_LABEL_DIR="${ROOT}/outputs/agentguard/labels/iwg_rg_cma/SportsMOT/nsa_train_v3_compact"
-SPORTS_DATASET_DIR="${SPORTS_DATA_ROOT}/dataset"
 
 SPORTS_OLD_NAME="iwg_rg_cma_v1_sportsmot_old_shard10x2_seed42_bs1024"
 SPORTS_NEW_NAME="iwg_rg_cma_v1_sportsmot_interleaved_shard1x20_seed42_bs1024"
@@ -25,8 +25,8 @@ SPORTS_NEW_ROOT="${EXPERIMENT_ROOT}/${SPORTS_NEW_NAME}"
 DANCE_NEW_ROOT="${EXPERIMENT_ROOT}/${DANCE_NEW_NAME}"
 MOT20_NEW_ROOT="${EXPERIMENT_ROOT}/${MOT20_NEW_NAME}"
 
-DANCE_DATASET_DIR="${EXPERIMENT_ROOT}/iwg_rg_cma_v1_dancetrack_train_seed42_bs1024_shard20x2/dataset"
-MOT20_DATASET_DIR="${EXPERIMENT_ROOT}/iwg_rg_cma_v1_mot20_trainall_seed42_bs1024/dataset"
+DANCE_DATASET_DIR="${DATASET_ROOT}/DanceTrack/nsa_train_v3_compact"
+MOT20_DATASET_DIR="${DATASET_ROOT}/MOT20/nsa_all_v3_compact"
 
 export PYTHONPATH="${ROOT}:${ROOT}/3. Tracker:${ROOT}/agentguard/src:${PYTHONPATH:-}"
 
@@ -101,18 +101,18 @@ ensure_detection_cache() {
 }
 
 prepare_sportsmot_data() {
-  mkdir -p "${SPORTS_DATA_ROOT}/logs"
+  mkdir -p "${SPORTS_DATA_LOG_ROOT}/logs"
   stage "SportsMOT data: build/verify train and val mmap detection caches"
   ensure_detection_cache \
     SportsMOT train 45 \
     "${ROOT}/outputs/2. det_feat/sportsmot_train_0.95.pickle" \
     "${ROOT}/outputs/2. det_feat/sportsmot_train_0.80.pickle" \
-    "${SPORTS_DATA_ROOT}/logs/detection_train.log"
+    "${SPORTS_DATA_LOG_ROOT}/logs/detection_train.log"
   ensure_detection_cache \
     SportsMOT val 45 \
     "${ROOT}/outputs/2. det_feat/sportsmot_val_0.95.pickle" \
     "${ROOT}/outputs/2. det_feat/sportsmot_val_0.80.pickle" \
-    "${SPORTS_DATA_ROOT}/logs/detection_val.log"
+    "${SPORTS_DATA_LOG_ROOT}/logs/detection_val.log"
 
   stage "SportsMOT data: cache complete train timelines"
   "${PY}" -u -m agentguard.cli cache_events \
@@ -120,7 +120,7 @@ prepare_sportsmot_data() {
     --event-cache-root "${EVENT_CACHE_ROOT}" \
     --detection-cache-root "${DETECTION_CACHE_ROOT}" \
     --data-dir /home/shang/datasets/ \
-    2>&1 | tee "${SPORTS_DATA_ROOT}/logs/cache_events.log"
+    2>&1 | tee "${SPORTS_DATA_LOG_ROOT}/logs/cache_events.log"
 
   local labels_ready=false
   if [[ -f "${SPORTS_LABEL_DIR}/summary.json" ]]; then
@@ -133,10 +133,10 @@ prepare_sportsmot_data() {
       --detection-cache-root "${DETECTION_CACHE_ROOT}" \
       --gt-root /home/shang/datasets/SportsMOT/dataset/train \
       --output-dir "${SPORTS_LABEL_DIR}" \
-      2>&1 | tee "${SPORTS_DATA_ROOT}/logs/prepare_labels.log"
+      2>&1 | tee "${SPORTS_DATA_LOG_ROOT}/logs/prepare_labels.log"
   else
     "${PY}" -c "import json; x=json.load(open('${SPORTS_LABEL_DIR}/summary.json')); print('complete labels', x['retained_labels'], 'sequences', len(x['sequences']))" \
-      2>&1 | tee "${SPORTS_DATA_ROOT}/logs/prepare_labels.log"
+      2>&1 | tee "${SPORTS_DATA_LOG_ROOT}/logs/prepare_labels.log"
   fi
 
   stage "SportsMOT data: build/verify streaming six-event dataset"
@@ -147,10 +147,10 @@ prepare_sportsmot_data() {
       --detection-cache-root "${DETECTION_CACHE_ROOT}" \
       --label-dir "${SPORTS_LABEL_DIR}" --output-dir "${SPORTS_DATASET_DIR}" \
       --max-frame-gap 30 \
-      2>&1 | tee "${SPORTS_DATA_ROOT}/logs/build.log"
+      2>&1 | tee "${SPORTS_DATA_LOG_ROOT}/logs/build.log"
   else
     "${PY}" -c "from agentguard.datasets.iwg_attn_dataset import StreamingIWGAttnDataset; d=StreamingIWGAttnDataset('${SPORTS_DATASET_DIR}', max_samples=1); print(d.metadata['dataset_sha256'], d.metadata['num_train_samples']); d.close()" \
-      2>&1 | tee "${SPORTS_DATA_ROOT}/logs/build.log"
+      2>&1 | tee "${SPORTS_DATA_LOG_ROOT}/logs/build.log"
   fi
 }
 

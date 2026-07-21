@@ -182,6 +182,9 @@ class Tracker(object):
                     runtime_config['iwg_attn_max_frame_gap'] = int(
                         checkpoint['max_frame_gap']
                     )
+                    runtime_config['iwg_context_size'] = int(
+                        checkpoint['context_size']
+                    )
                     iwg_attn_model.eval()
 
                 runtime = AgentGuardRuntime(

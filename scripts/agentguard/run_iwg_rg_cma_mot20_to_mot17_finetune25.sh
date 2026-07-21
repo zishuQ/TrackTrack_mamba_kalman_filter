@@ -8,7 +8,7 @@ RUN_ROOT="${ROOT}/outputs/agentguard/experiments/${RUN_NAME}"
 CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
 LOG_DIR="${RUN_ROOT}/logs"
 PROVENANCE_DIR="${RUN_ROOT}/provenance"
-DATASET_DIR="${MOT17_DATASET_DIR:-${ROOT}/outputs/agentguard/experiments/iwg_rg_cma_v1_trainall_seed42_bs1024_native_log/dataset}"
+DATASET_DIR="${MOT17_DATASET_DIR:-${ROOT}/outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_jsonl}"
 INIT_CHECKPOINT="${MOT20_INIT_CHECKPOINT:-${ROOT}/outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_trainall_seed42_bs1024_shard20x2/checkpoints/iwg_rg_cma_epoch050.pt}"
 LAST_CHECKPOINT="${CHECKPOINT_DIR}/iwg_rg_cma_last.pt"
 

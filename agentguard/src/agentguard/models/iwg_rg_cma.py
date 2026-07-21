@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Any
 
 import torch
@@ -13,29 +14,71 @@ from agentguard.models.iwg import IWG, make_head
 
 
 IWG_CONTEXT_SIZE = 6
+SUPPORTED_IWG_CONTEXT_SIZES = frozenset({6, 8})
 RG_CMA_DIM = 128
 RG_CMA_HEADS = 4
-RG_CMA_CORRECTION_BOUND = 0.05
-IWG_RG_CMA_MODEL_SCHEMA = "agentguard_iwg_rg_cma_v1"
-IWG_RG_CMA_MODEL_DESCRIPTOR = {
-    "name": IWG_RG_CMA_MODEL_SCHEMA,
-    "iwg_context_size": IWG_CONTEXT_SIZE,
-    "modal_token_dim": 64,
-    "attention_dim": RG_CMA_DIM,
-    "attention_heads": RG_CMA_HEADS,
-    "attention_dropout": 0.1,
-    "cross_modal_tokens": ["motion", "appearance", "reliability"],
-    "correction_bound": RG_CMA_CORRECTION_BOUND,
-    "base_heads": "linear_linear",
-    "gradient_contract": "safe_direct_base_detached_rg_cma",
-}
-IWG_RG_CMA_MODEL_SCHEMA_SHA256 = hashlib.sha256(
-    json.dumps(
-        IWG_RG_CMA_MODEL_DESCRIPTOR,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-).hexdigest()
+RG_CMA_LEGACY_CORRECTION_BOUND = 0.05
+RG_CMA_CORRECTION_BOUND = 0.10
+
+
+def _model_descriptor(
+    name: str,
+    correction_bound: float,
+    context_size: int = IWG_CONTEXT_SIZE,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "iwg_context_size": int(context_size),
+        "modal_token_dim": 64,
+        "attention_dim": RG_CMA_DIM,
+        "attention_heads": RG_CMA_HEADS,
+        "attention_dropout": 0.1,
+        "cross_modal_tokens": ["motion", "appearance", "reliability"],
+        "correction_bound": correction_bound,
+        "base_heads": "linear_linear",
+        "gradient_contract": "safe_direct_base_detached_rg_cma",
+    }
+
+
+def _descriptor_sha256(descriptor: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(descriptor, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+IWG_RG_CMA_LEGACY_MODEL_SCHEMA = "agentguard_iwg_rg_cma_v1"
+IWG_RG_CMA_LEGACY_MODEL_DESCRIPTOR = _model_descriptor(
+    IWG_RG_CMA_LEGACY_MODEL_SCHEMA, RG_CMA_LEGACY_CORRECTION_BOUND
+)
+IWG_RG_CMA_LEGACY_MODEL_SCHEMA_SHA256 = _descriptor_sha256(
+    IWG_RG_CMA_LEGACY_MODEL_DESCRIPTOR
+)
+
+IWG_RG_CMA_MODEL_SCHEMA = "agentguard_iwg_rg_cma_v2"
+IWG_RG_CMA_MODEL_DESCRIPTOR = _model_descriptor(
+    IWG_RG_CMA_MODEL_SCHEMA, RG_CMA_CORRECTION_BOUND
+)
+IWG_RG_CMA_MODEL_SCHEMA_SHA256 = _descriptor_sha256(IWG_RG_CMA_MODEL_DESCRIPTOR)
+
+IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA = "agentguard_iwg_rg_cma_v3"
+IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_DESCRIPTOR = _model_descriptor(
+    IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA,
+    RG_CMA_LEGACY_CORRECTION_BOUND,
+    context_size=8,
+)
+IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA_SHA256 = _descriptor_sha256(
+    IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_DESCRIPTOR
+)
+
+IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA = "agentguard_iwg_rg_cma_v4"
+IWG_RG_CMA_CONTEXT8_MODEL_DESCRIPTOR = _model_descriptor(
+    IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA,
+    RG_CMA_CORRECTION_BOUND,
+    context_size=8,
+)
+IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA_SHA256 = _descriptor_sha256(
+    IWG_RG_CMA_CONTEXT8_MODEL_DESCRIPTOR
+)
 
 
 def _linear_head(in_dim: int, hidden_dim: int, out_dim: int) -> nn.Sequential:
@@ -71,19 +114,24 @@ def _causal_windows(
     values: torch.Tensor,
     padding_mask: torch.BoolTensor,
     reset_mask: torch.BoolTensor | None,
+    context_size: int,
 ) -> tuple[torch.Tensor, torch.BoolTensor]:
-    """Build left-padded six-event windows without crossing reset points."""
+    """Build left-padded causal windows without crossing reset points."""
+    context_size = int(context_size)
+    if context_size < 1:
+        raise ValueError(f"context_size must be positive, got {context_size}")
     if values.shape[:2] != padding_mask.shape:
         raise ValueError("values and padding_mask must share batch/sequence dimensions")
     reset = _validate_sequence_masks(padding_mask, reset_mask)
-    left_values = F.pad(values, (0, 0, IWG_CONTEXT_SIZE - 1, 0))
+    left = context_size - 1
+    left_values = F.pad(values, (0, 0, left, 0))
     left_padding = F.pad(
-        padding_mask, (IWG_CONTEXT_SIZE - 1, 0), value=True
+        padding_mask, (left, 0), value=True
     )
-    left_reset = F.pad(reset, (IWG_CONTEXT_SIZE - 1, 0), value=False)
-    windows = left_values.unfold(1, IWG_CONTEXT_SIZE, 1).permute(0, 1, 3, 2)
-    window_mask = left_padding.unfold(1, IWG_CONTEXT_SIZE, 1)
-    reset_windows = left_reset.unfold(1, IWG_CONTEXT_SIZE, 1)
+    left_reset = F.pad(reset, (left, 0), value=False)
+    windows = left_values.unfold(1, context_size, 1).permute(0, 1, 3, 2)
+    window_mask = left_padding.unfold(1, context_size, 1)
+    reset_windows = left_reset.unfold(1, context_size, 1)
     return windows, _mask_before_last_reset(window_mask, reset_windows)
 
 
@@ -103,8 +151,19 @@ def _gather_position(value: torch.Tensor, indices: torch.LongTensor) -> torch.Te
 class SafeDirectIWG(IWG):
     """IWG with the verified linear gate heads and isolated auxiliary heads."""
 
-    def __init__(self, reid_dim: int, scalar_dim: int = 63, event_dim: int = 128):
-        super().__init__(reid_dim=reid_dim, scalar_dim=scalar_dim, event_dim=event_dim)
+    def __init__(
+        self,
+        reid_dim: int,
+        scalar_dim: int = 63,
+        event_dim: int = 128,
+        context_size: int = IWG_CONTEXT_SIZE,
+    ):
+        super().__init__(
+            reid_dim=reid_dim,
+            scalar_dim=scalar_dim,
+            event_dim=event_dim,
+            context_size=context_size,
+        )
         self.policy_head = _linear_head(event_dim, 64, 5)
         self.iwg_gate_residual_head = _linear_head(event_dim, 64, 2)
 
@@ -185,11 +244,13 @@ class SafeDirectIWG(IWG):
         event, appearance, motion, padding = self._encode_modal_inputs(
             track_feats, det_feats, scalar_feats, mask
         )
-        windows, window_mask = _causal_windows(event, padding, reset_mask)
+        windows, window_mask = _causal_windows(
+            event, padding, reset_mask, self.context_size
+        )
         batch_size, seq_len = padding.shape
         current = self._transform_windows(
-            windows.reshape(batch_size * seq_len, IWG_CONTEXT_SIZE, -1),
-            window_mask.reshape(batch_size * seq_len, IWG_CONTEXT_SIZE),
+            windows.reshape(batch_size * seq_len, self.context_size, -1),
+            window_mask.reshape(batch_size * seq_len, self.context_size),
         ).reshape(batch_size, seq_len, -1)
         outputs = self._apply_safe_heads(current)
         outputs.update(
@@ -213,7 +274,9 @@ class SafeDirectIWG(IWG):
             track_feats, det_feats, scalar_feats, mask
         )
         indices = _last_valid_indices(padding)
-        event_windows, window_mask = _causal_windows(event, padding, reset_mask)
+        event_windows, window_mask = _causal_windows(
+            event, padding, reset_mask, self.context_size
+        )
         current = self._transform_windows(
             _gather_position(event_windows, indices),
             _gather_position(window_mask, indices),
@@ -268,22 +331,35 @@ class IWGRGCMA(nn.Module):
         scalar_dim: int = 63,
         event_dim: int = 128,
         correction_bound: float = RG_CMA_CORRECTION_BOUND,
+        context_size: int = IWG_CONTEXT_SIZE,
     ) -> None:
         super().__init__()
-        if float(correction_bound) != RG_CMA_CORRECTION_BOUND:
+        correction_bound = float(correction_bound)
+        context_size = int(context_size)
+        if context_size not in SUPPORTED_IWG_CONTEXT_SIZES:
             raise ValueError(
-                f"RG-CMA correction bound is fixed at {RG_CMA_CORRECTION_BOUND}"
+                "unsupported RG-CMA context_size: "
+                f"{context_size}; expected one of {sorted(SUPPORTED_IWG_CONTEXT_SIZES)}"
+            )
+        if not math.isfinite(correction_bound) or not 0.0 < correction_bound <= 1.0:
+            raise ValueError(
+                "RG-CMA correction bound must be finite and in (0, 1], got "
+                f"{correction_bound}"
             )
         self.scalar_dim = int(scalar_dim)
-        self.correction_bound = float(correction_bound)
+        self.correction_bound = correction_bound
+        self.context_size = context_size
         self.iwg = SafeDirectIWG(
-            reid_dim=reid_dim, scalar_dim=scalar_dim, event_dim=event_dim
+            reid_dim=reid_dim,
+            scalar_dim=scalar_dim,
+            event_dim=event_dim,
+            context_size=context_size,
         )
         self.motion_projection = nn.Linear(64, RG_CMA_DIM)
         self.appearance_projection = nn.Linear(64, RG_CMA_DIM)
         self.modality_embedding = nn.Parameter(torch.zeros(2, RG_CMA_DIM))
         self.relative_position_embedding = nn.Parameter(
-            torch.zeros(IWG_CONTEXT_SIZE, RG_CMA_DIM)
+            torch.zeros(context_size, RG_CMA_DIM)
         )
         nn.init.normal_(self.modality_embedding, mean=0.0, std=0.02)
         nn.init.normal_(self.relative_position_embedding, mean=0.0, std=0.02)
@@ -447,10 +523,10 @@ class IWGRGCMA(nn.Module):
         has_current = _gather_position(detection_sequence, indices)
         base = self._apply_unmatched_sentinel(base, has_current)
         motion_windows, window_mask = _causal_windows(
-            motion_history, history_padding, reset_mask
+            motion_history, history_padding, reset_mask, self.context_size
         )
         appearance_windows, appearance_mask = _causal_windows(
-            appearance_history, history_padding, reset_mask
+            appearance_history, history_padding, reset_mask, self.context_size
         )
         if not torch.equal(window_mask, appearance_mask):
             raise AssertionError("motion and appearance history masks diverged")
@@ -487,10 +563,10 @@ class IWGRGCMA(nn.Module):
             detection = has_detection_mask.bool() & ~padding
         base = self._apply_unmatched_sentinel(base, detection)
         motion_windows, window_mask = _causal_windows(
-            base["motion_token"], padding, reset_mask
+            base["motion_token"], padding, reset_mask, self.context_size
         )
         appearance_windows, appearance_mask = _causal_windows(
-            base["appearance_token"], padding, reset_mask
+            base["appearance_token"], padding, reset_mask, self.context_size
         )
         if not torch.equal(window_mask, appearance_mask):
             raise AssertionError("motion and appearance sequence masks diverged")
@@ -501,12 +577,14 @@ class IWGRGCMA(nn.Module):
         }
         refine = self._refine_flat(
             motion_windows=motion_windows.reshape(
-                batch_size * seq_len, IWG_CONTEXT_SIZE, -1
+                batch_size * seq_len, self.context_size, -1
             ),
             appearance_windows=appearance_windows.reshape(
-                batch_size * seq_len, IWG_CONTEXT_SIZE, -1
+                batch_size * seq_len, self.context_size, -1
             ),
-            window_mask=window_mask.reshape(batch_size * seq_len, IWG_CONTEXT_SIZE),
+            window_mask=window_mask.reshape(
+                batch_size * seq_len, self.context_size
+            ),
             scalar_current=scalar_feats.reshape(batch_size * seq_len, -1),
             base_outputs=flat_base,
             has_detection=detection.reshape(-1),
@@ -519,9 +597,58 @@ class IWGRGCMA(nn.Module):
         return outputs
 
 
-def model_contract() -> dict[str, Any]:
-    return {
-        "model_schema": IWG_RG_CMA_MODEL_SCHEMA,
-        "model_schema_sha256": IWG_RG_CMA_MODEL_SCHEMA_SHA256,
-        "model_schema_descriptor": IWG_RG_CMA_MODEL_DESCRIPTOR,
-    }
+def model_contract(
+    *,
+    correction_bound: float = RG_CMA_CORRECTION_BOUND,
+    context_size: int = IWG_CONTEXT_SIZE,
+) -> dict[str, Any]:
+    correction_bound = float(correction_bound)
+    context_size = int(context_size)
+    contracts = (
+        (
+            RG_CMA_LEGACY_CORRECTION_BOUND,
+            IWG_CONTEXT_SIZE,
+            IWG_RG_CMA_LEGACY_MODEL_SCHEMA,
+            IWG_RG_CMA_LEGACY_MODEL_DESCRIPTOR,
+            IWG_RG_CMA_LEGACY_MODEL_SCHEMA_SHA256,
+        ),
+        (
+            RG_CMA_CORRECTION_BOUND,
+            IWG_CONTEXT_SIZE,
+            IWG_RG_CMA_MODEL_SCHEMA,
+            IWG_RG_CMA_MODEL_DESCRIPTOR,
+            IWG_RG_CMA_MODEL_SCHEMA_SHA256,
+        ),
+        (
+            RG_CMA_LEGACY_CORRECTION_BOUND,
+            8,
+            IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA,
+            IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_DESCRIPTOR,
+            IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA_SHA256,
+        ),
+        (
+            RG_CMA_CORRECTION_BOUND,
+            8,
+            IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA,
+            IWG_RG_CMA_CONTEXT8_MODEL_DESCRIPTOR,
+            IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA_SHA256,
+        ),
+    )
+    for bound, context, schema, descriptor, schema_sha256 in contracts:
+        if context == context_size and math.isclose(
+            correction_bound, bound, rel_tol=0.0, abs_tol=1e-12
+        ):
+            return {
+                "model_schema": schema,
+                "model_schema_sha256": schema_sha256,
+                "model_schema_descriptor": descriptor,
+            }
+    if context_size not in SUPPORTED_IWG_CONTEXT_SIZES:
+        raise ValueError(
+            "unsupported RG-CMA context_size for checkpoint contract: "
+            f"{context_size}"
+        )
+    raise ValueError(
+        "unsupported RG-CMA correction bound for checkpoint contract: "
+        f"{correction_bound} at context_size={context_size}"
+    )

@@ -271,6 +271,56 @@ SUPPORTED_IWG_ATTN_DATASET_SCHEMA_SHA256 = frozenset(
         SPORTSMOT_TRAINVAL_IWG_ATTN_DATASET_SCHEMA_SHA256,
     }
 )
+SUPPORTED_IWG_CONTEXT_SIZES = frozenset({IWG_CONTEXT_SIZE, 8})
+
+
+def _validate_context_size(context_size: int) -> int:
+    context_size = int(context_size)
+    if context_size not in SUPPORTED_IWG_CONTEXT_SIZES:
+        raise ValueError(
+            "unsupported IWG-attn context_size: "
+            f"{context_size}; expected one of {sorted(SUPPORTED_IWG_CONTEXT_SIZES)}"
+        )
+    return context_size
+
+
+def _contextual_schema_sha256(descriptor: dict[str, Any], context_size: int) -> str:
+    contextual = dict(descriptor)
+    contextual["context_size"] = int(context_size)
+    contextual["history"] = (
+        f"{int(context_size) - 1}_prior_segment_local_events_plus_endpoint"
+    )
+    return hashlib.sha256(
+        json.dumps(
+            contextual,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+IWG_ATTN_CONTEXT8_DATASET_SCHEMA_SHA256_BY_DATASET = {
+    dataset: _contextual_schema_sha256(
+        {
+            "MOT17": IWG_ATTN_DATASET_DESCRIPTOR,
+            "MOT20": MOT20_IWG_ATTN_DATASET_DESCRIPTOR,
+            "DanceTrack": DANCETRACK_IWG_ATTN_DATASET_DESCRIPTOR,
+            "SportsMOT": SPORTSMOT_IWG_ATTN_DATASET_DESCRIPTOR,
+        }[dataset],
+        8,
+    )
+    for dataset in IWG_ATTN_DATASET_SCHEMA_SHA256_BY_DATASET
+}
+SPORTSMOT_TRAINVAL_CONTEXT8_IWG_ATTN_DATASET_SCHEMA_SHA256 = (
+    _contextual_schema_sha256(SPORTSMOT_TRAINVAL_IWG_ATTN_DATASET_DESCRIPTOR, 8)
+)
+SUPPORTED_IWG_ATTN_DATASET_SCHEMA_SHA256 = frozenset(
+    {
+        *SUPPORTED_IWG_ATTN_DATASET_SCHEMA_SHA256,
+        *IWG_ATTN_CONTEXT8_DATASET_SCHEMA_SHA256_BY_DATASET.values(),
+        SPORTSMOT_TRAINVAL_CONTEXT8_IWG_ATTN_DATASET_SCHEMA_SHA256,
+    }
+)
 
 
 def event_key(sequence: str, event_shard_id: int, event_offset: int) -> str:
@@ -405,7 +455,9 @@ def _fit_train_normalization(
 def resolve_iwg_attn_dataset_spec(
     dataset: str,
     split: str,
+    context_size: int = IWG_CONTEXT_SIZE,
 ) -> tuple[list[str], str, dict[str, str]]:
+    context_size = _validate_context_size(context_size)
     if dataset == "SportsMOT" and split == "trainval":
         source_splits = {
             **{sequence: "train" for sequence in SPORTSMOT_TRAIN_SEQUENCES},
@@ -413,7 +465,11 @@ def resolve_iwg_attn_dataset_spec(
         }
         return (
             list(SPORTSMOT_TRAINVAL_SEQUENCES),
-            SPORTSMOT_TRAINVAL_IWG_ATTN_DATASET_SCHEMA_SHA256,
+            (
+                SPORTSMOT_TRAINVAL_IWG_ATTN_DATASET_SCHEMA_SHA256
+                if context_size == IWG_CONTEXT_SIZE
+                else SPORTSMOT_TRAINVAL_CONTEXT8_IWG_ATTN_DATASET_SCHEMA_SHA256
+            ),
             source_splits,
         )
     expected_split = IWG_ATTN_TRAIN_SPLIT_BY_DATASET.get(dataset)
@@ -424,9 +480,14 @@ def resolve_iwg_attn_dataset_spec(
         ]
         raise ValueError(f"IWG-attn supports {', '.join(supported)}")
     sequences = list(IWG_ATTN_TRAIN_ALL_SEQUENCES[dataset])
+    dataset_schema_sha256 = IWG_ATTN_DATASET_SCHEMA_SHA256_BY_DATASET[dataset]
+    if context_size != IWG_CONTEXT_SIZE:
+        dataset_schema_sha256 = IWG_ATTN_CONTEXT8_DATASET_SCHEMA_SHA256_BY_DATASET[
+            dataset
+        ]
     return (
         sequences,
-        IWG_ATTN_DATASET_SCHEMA_SHA256_BY_DATASET[dataset],
+        dataset_schema_sha256,
         {sequence: split for sequence in sequences},
     )
 COMPACT_INDEX_FORMAT = "compact_memmap_v1"
@@ -560,7 +621,9 @@ def _build_compact_sequence_index(
     index_dir: Path,
     max_frame_gap: int,
     segment_offset: int,
+    context_size: int,
 ) -> tuple[dict[str, int], int, list[Path]]:
+    context_size = _validate_context_size(context_size)
     label_manifest, labels = load_compact_label_arrays(compact_label_dir)
     label_keys = labels["event_keys"]
     count = int(label_manifest["retained_labels"])
@@ -591,9 +654,9 @@ def _build_compact_sequence_index(
         dtype=np.int64,
         shape=(timeline_size,),
     )
-    event_indices = np.full((count, IWG_CONTEXT_SIZE), -1, dtype=np.int32)
-    event_shards = np.full((count, IWG_CONTEXT_SIZE), -1, dtype=np.int32)
-    event_offsets = np.full((count, IWG_CONTEXT_SIZE), -1, dtype=np.int32)
+    event_indices = np.full((count, context_size), -1, dtype=np.int32)
+    event_shards = np.full((count, context_size), -1, dtype=np.int32)
+    event_offsets = np.full((count, context_size), -1, dtype=np.int32)
     track_ids = np.zeros(count, dtype=np.int64)
     segment_ids = np.zeros(count, dtype=np.int64)
 
@@ -638,7 +701,7 @@ def _build_compact_sequence_index(
                 "frame_id": frame_id,
                 "history_count": history_count,
                 "segment_id": next_segment,
-                "events": deque(maxlen=IWG_CONTEXT_SIZE),
+                "events": deque(maxlen=context_size),
             }
             histories[track_id] = state
             next_segment += 1
@@ -654,7 +717,7 @@ def _build_compact_sequence_index(
         if not is_matched:
             raise ValueError(f"supervised compact label points to unmatched event: {sequence}")
         history = list(state["events"])
-        pad_left = IWG_CONTEXT_SIZE - len(history)
+        pad_left = context_size - len(history)
         for position, (
             history_index,
             history_shard,
@@ -720,7 +783,9 @@ def _build_compact_sequence_index(
 def build_streaming_sample_index(
     segments: Iterable[list[dict[str, Any]]],
     labels: dict[str, dict[str, Any]],
+    context_size: int = IWG_CONTEXT_SIZE,
 ) -> list[dict[str, Any]]:
+    context_size = _validate_context_size(context_size)
     samples: list[dict[str, Any]] = []
     for segment_id, segment in enumerate(segments):
         for endpoint, record in enumerate(segment):
@@ -731,13 +796,13 @@ def build_streaming_sample_index(
             )
             if not bool(record.get("matched", False)) or key not in labels:
                 continue
-            events = segment[max(0, endpoint - IWG_CONTEXT_SIZE + 1) : endpoint + 1]
+            events = segment[max(0, endpoint - context_size + 1) : endpoint + 1]
             samples.append(
                 {
                     "sequence": str(record["sequence"]),
                     "track_id": int(record["track_id"]),
                     "segment_id": int(segment_id),
-                    "pad_left": IWG_CONTEXT_SIZE - len(events),
+                    "pad_left": context_size - len(events),
                     "events": events,
                     "label_key": key,
                 }
@@ -754,9 +819,11 @@ def build_iwg_attn_dataset(
     label_dir: str | Path,
     output_dir: str | Path,
     max_frame_gap: int = 30,
+    context_size: int = IWG_CONTEXT_SIZE,
 ) -> dict[str, Any]:
+    context_size = _validate_context_size(context_size)
     sequences, dataset_schema_sha256, source_splits = resolve_iwg_attn_dataset_spec(
-        dataset, split
+        dataset, split, context_size
     )
     event_cache_root = Path(event_cache_root).resolve()
     detection_cache_root = Path(detection_cache_root).resolve()
@@ -806,7 +873,9 @@ def build_iwg_attn_dataset(
             finally:
                 reader.close()
             segments = segment_track_timelines(timeline, max_frame_gap=max_frame_gap)
-            sequence_samples = build_streaming_sample_index(segments, labels)
+            sequence_samples = build_streaming_sample_index(
+                segments, labels, context_size
+            )
             for sample in sequence_samples:
                 sample["segment_id"] += segment_offset
             segment_offset += len(segments)
@@ -862,6 +931,7 @@ def build_iwg_attn_dataset(
                     index_dir=index_root / sequence,
                     max_frame_gap=max_frame_gap,
                     segment_offset=segment_offset,
+                    context_size=context_size,
                 )
             finally:
                 reader.close()
@@ -932,7 +1002,7 @@ def build_iwg_attn_dataset(
         **index_metadata,
         "normalization_file": norm_path.name,
         "num_train_samples": num_train_samples,
-        "context_size": IWG_CONTEXT_SIZE,
+        "context_size": context_size,
         "max_frame_gap": int(max_frame_gap),
         "reid_dim": reid_dims.pop(),
         "scalar_dim": 63,
@@ -959,6 +1029,7 @@ class StreamingIWGAttnDataset(torch.utils.data.Dataset):
         self.dataset_dir = Path(dataset_dir).resolve()
         self.metadata = json.loads((self.dataset_dir / "metadata.json").read_text())
         self._validate_metadata()
+        self.context_size = int(self.metadata["context_size"])
         self.index_format = str(self.metadata.get("index_format", "jsonl_v1"))
         self.samples: list[dict[str, Any]] = []
         self.labels: dict[str, dict[str, Any]] = {}
@@ -1026,8 +1097,9 @@ class StreamingIWGAttnDataset(torch.utils.data.Dataset):
         if str(self.metadata.get("motion_target_mode", "nsa")) != "nsa":
             raise ValueError("only NSA datasets are supported")
         split = str(self.metadata.get("split", ""))
+        context_size = _validate_context_size(self.metadata.get("context_size", -1))
         sequences, dataset_schema_sha256, source_splits = (
-            resolve_iwg_attn_dataset_spec(dataset, split)
+            resolve_iwg_attn_dataset_spec(dataset, split, context_size)
         )
         multi_source_splits = (
             source_splits if len(set(source_splits.values())) > 1 else None
@@ -1038,7 +1110,7 @@ class StreamingIWGAttnDataset(torch.utils.data.Dataset):
             "split_policy": "train_all",
             "candidate_types": ["A"],
             "train_sequences": sequences,
-            "context_size": IWG_CONTEXT_SIZE,
+            "context_size": context_size,
             "dataset_schema_version": IWG_ATTN_DATASET_SCHEMA_VERSION,
             "dataset_schema_sha256": dataset_schema_sha256,
             "label_schema_version": ROLLOUT_LABEL_SCHEMA_VERSION,
@@ -1293,12 +1365,15 @@ class StreamingIWGAttnDataset(torch.utils.data.Dataset):
             endpoint_shard, endpoint_offset = references[-1]
             label_key = event_key(sequence, endpoint_shard, endpoint_offset)
         reid_dim = int(self.metadata["reid_dim"])
-        track = np.zeros((IWG_CONTEXT_SIZE, reid_dim), dtype=np.float32)
-        detection = np.zeros((IWG_CONTEXT_SIZE, reid_dim), dtype=np.float32)
-        scalar = np.zeros((IWG_CONTEXT_SIZE, 63), dtype=np.float64)
-        padding = np.ones(IWG_CONTEXT_SIZE, dtype=np.bool_)
-        has_detection = np.zeros(IWG_CONTEXT_SIZE, dtype=np.bool_)
-        reset = np.zeros(IWG_CONTEXT_SIZE, dtype=np.bool_)
+        context_size = int(
+            getattr(self, "context_size", self.metadata.get("context_size", 6))
+        )
+        track = np.zeros((context_size, reid_dim), dtype=np.float32)
+        detection = np.zeros((context_size, reid_dim), dtype=np.float32)
+        scalar = np.zeros((context_size, 63), dtype=np.float64)
+        padding = np.ones(context_size, dtype=np.bool_)
+        has_detection = np.zeros(context_size, dtype=np.bool_)
+        reset = np.zeros(context_size, dtype=np.bool_)
         reader = (
             self._reader(sequence)
             if timeline_indices is None

@@ -101,12 +101,18 @@ run.py test（CPU、final、post、无 TrackEval）
 
 以下目录已经生成过，可以直接作为 `--dataset-dir`：
 
+这些目录是可复用的数据资产，统一放在 `outputs/agentguard/datasets`；`outputs/agentguard/experiments` 只保存某次实验的 checkpoint、日志、结果和 provenance。
+
 | 训练数据 | dataset 目录 |
 | --- | --- |
-| MOT17 FRCNN train/all | `outputs/agentguard/experiments/iwg_rg_cma_v1_trainall_seed42_bs1024_native_log/dataset` |
-| MOT20 train/all，NSA 事件 | `outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_trainall_seed42_bs1024/dataset` |
-| SportsMOT train | `outputs/agentguard/experiments/iwg_rg_cma_v1_sportsmot_train_data/dataset` |
-| SportsMOT train+val | `outputs/agentguard/experiments/iwg_rg_cma_v1_sportsmot_trainval_seed42_bs1024/dataset` |
+| MOT17 FRCNN train/all | `outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_jsonl_native_log` |
+| MOT20 train/all，NSA 事件 | `outputs/agentguard/datasets/iwg_rg_cma/MOT20/nsa_all_v3_compact` |
+| SportsMOT train | `outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_train_v3_compact` |
+| SportsMOT train+val | `outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_trainval_v3_compact` |
+| SportsMOT train+val，NSA future horizon=8，输入 context=6 | `outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_trainval_h8_v3_compact` |
+| SportsMOT train+val，NSA future horizon=8，输入 context=8 | `outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_trainval_future8_context8_v3_compact` |
+
+这里必须区分两个参数：`future horizon` 是 GT rollout 标签向未来看的帧数；`context size` 是网络和在线 tracker 实际输入的历史事件数。目录名中的 `h8` 只表示 future horizon=8，不能据此判断网络输入已经是 8 帧。构建输入数据时用 `build_iwg_attn_data --context-size 8`，训练时用 `train_iwg_attn --context-size 8`。
 
 统一缓存位置：
 
@@ -129,8 +135,8 @@ SportsMOT 的 train 与 train+val 是两套不同范围，不能互相覆盖。�
 开始训练前可以这样检查 dataset 是否存在：
 
 ```bash
-test -f outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_trainall_seed42_bs1024/dataset/metadata.json
-./.venv/bin/python -c "import json; x=json.load(open('outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_trainall_seed42_bs1024/dataset/metadata.json')); print(json.dumps(x, indent=2, sort_keys=True))"
+test -f outputs/agentguard/datasets/iwg_rg_cma/MOT20/nsa_all_v3_compact/metadata.json
+./.venv/bin/python -c "import json; x=json.load(open('outputs/agentguard/datasets/iwg_rg_cma/MOT20/nsa_all_v3_compact/metadata.json')); print(json.dumps(x, indent=2, sort_keys=True))"
 ```
 
 ## 5. 训练参数
@@ -167,6 +173,18 @@ shard_cycles=1
 ```
 
 warm-start 只严格加载模型权重，不恢复源实验的 optimizer、scheduler、epoch 或 normalization。新数据集使用自己的 normalization，新的 optimizer 和 scheduler 从头开始。25e 保存 epoch 5/10/25；50e 额外保存 epoch50。
+
+### 5.3 sequence sampling
+
+默认 `sample-proportional` 与原训练一致。MOT20、SportsMOT 和 MOT17 也可以使用：
+
+```text
+--sequence-sampling sqrt-size
+```
+
+sqrt-size 的序列权重为 `sqrt(sequence_labeled_endpoints)`，每个训练 phase 仍生成与原配置相同的样本数和 batch 数，因此 optimizer steps 不变。为了让序列权重真正改变分布，序列内采用有放回抽样：小序列会被重复访问，大序列的一部分样本可能在同一 full-pass 预算中未被抽到。训练 checkpoint 的 `training_schedule` 会记录权重、目标配额和 `sampling_with_replacement=true`。
+
+它只改变训练采样，不改变标签、dataset hash、输入 context 或 RG-CMA model schema，因此不需要重新构建标签或 dataset。进行公平对比时，必须保持 `bound=0.05`、`context_size=6`、shard 顺序和总 samples/steps 不变。
 
 ## 6. 分片训练怎么理解
 
@@ -205,7 +223,7 @@ mkdir -p outputs/agentguard/experiments/替换为新的实验名/checkpoints \
          outputs/agentguard/experiments/替换为新的实验名/logs
 
 ./.venv/bin/python -u -m agentguard.cli train_iwg_attn \
-  --dataset-dir outputs/agentguard/experiments/替换为数据目录/dataset \
+  --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/替换为数据集目录 \
   --checkpoint-dir outputs/agentguard/experiments/替换为新的实验名/checkpoints \
   --device cuda \
   --epochs 100 \
@@ -234,7 +252,7 @@ mkdir -p outputs/agentguard/experiments/iwg_rg_cma_mot17_new_seed42_bs1024_100e/
          outputs/agentguard/experiments/iwg_rg_cma_mot17_new_seed42_bs1024_100e/logs
 
 ./.venv/bin/python -u -m agentguard.cli train_iwg_attn \
-  --dataset-dir outputs/agentguard/experiments/iwg_rg_cma_v1_trainall_seed42_bs1024_native_log/dataset \
+  --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_jsonl_native_log \
   --checkpoint-dir outputs/agentguard/experiments/iwg_rg_cma_mot17_new_seed42_bs1024_100e/checkpoints \
   --device cuda --epochs 100 --batch-size 1024 --num-workers 4 \
   --lr 0.0001 --weight-decay 0.0001 --warmup-epochs 1 \
@@ -255,7 +273,7 @@ mkdir -p outputs/agentguard/experiments/iwg_rg_cma_mot20_new_interleaved_seed42_
          outputs/agentguard/experiments/iwg_rg_cma_mot20_new_interleaved_seed42_bs1024_100e/logs
 
 ./.venv/bin/python -u -m agentguard.cli train_iwg_attn \
-  --dataset-dir outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_trainall_seed42_bs1024/dataset \
+  --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/MOT20/nsa_all_v3_compact \
   --checkpoint-dir outputs/agentguard/experiments/iwg_rg_cma_mot20_new_interleaved_seed42_bs1024_100e/checkpoints \
   --device cuda --epochs 100 --batch-size 1024 --num-workers 4 \
   --lr 0.0001 --weight-decay 0.0001 --warmup-epochs 1 \
@@ -278,7 +296,7 @@ mkdir -p outputs/agentguard/experiments/iwg_rg_cma_sportsmot_train_new_interleav
          outputs/agentguard/experiments/iwg_rg_cma_sportsmot_train_new_interleaved_seed42_bs1024_100e/logs
 
 ./.venv/bin/python -u -m agentguard.cli train_iwg_attn \
-  --dataset-dir outputs/agentguard/experiments/iwg_rg_cma_v1_sportsmot_train_data/dataset \
+  --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_train_v3_compact \
   --checkpoint-dir outputs/agentguard/experiments/iwg_rg_cma_sportsmot_train_new_interleaved_seed42_bs1024_100e/checkpoints \
   --device cuda --epochs 100 --batch-size 1024 --num-workers 4 \
   --lr 0.0001 --weight-decay 0.0001 --warmup-epochs 1 \
@@ -297,7 +315,7 @@ mkdir -p outputs/agentguard/experiments/iwg_rg_cma_sportsmot_trainval_new_interl
          outputs/agentguard/experiments/iwg_rg_cma_sportsmot_trainval_new_interleaved_seed42_bs1024_200e/logs
 
 ./.venv/bin/python -u -m agentguard.cli train_iwg_attn \
-  --dataset-dir outputs/agentguard/experiments/iwg_rg_cma_v1_sportsmot_trainval_seed42_bs1024/dataset \
+  --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_trainval_v3_compact \
   --checkpoint-dir outputs/agentguard/experiments/iwg_rg_cma_sportsmot_trainval_new_interleaved_seed42_bs1024_200e/checkpoints \
   --device cuda --epochs 200 --batch-size 1024 --num-workers 4 \
   --lr 0.0001 --weight-decay 0.0001 --warmup-epochs 1 \
@@ -314,7 +332,7 @@ mkdir -p outputs/agentguard/experiments/iwg_rg_cma_mot20e050_to_mot17_new_finetu
          outputs/agentguard/experiments/iwg_rg_cma_mot20e050_to_mot17_new_finetune25_seed42_bs1024/logs
 
 ./.venv/bin/python -u -m agentguard.cli train_iwg_attn \
-  --dataset-dir outputs/agentguard/experiments/iwg_rg_cma_v1_trainall_seed42_bs1024_native_log/dataset \
+  --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_jsonl_native_log \
   --checkpoint-dir outputs/agentguard/experiments/iwg_rg_cma_mot20e050_to_mot17_new_finetune25_seed42_bs1024/checkpoints \
   --device cuda --epochs 25 --batch-size 1024 --num-workers 4 \
   --lr 0.00001 --weight-decay 0.0001 --warmup-epochs 1 \
@@ -396,7 +414,7 @@ tail -f outputs/agentguard/experiments/<实验名>/checkpoints/training.log
 ```bash
 ./.venv/bin/python -u -m agentguard.cli validate_iwg_attn_checkpoint \
   --checkpoint outputs/agentguard/experiments/<实验名>/checkpoints/iwg_rg_cma_last.pt \
-  --dataset-dir outputs/agentguard/experiments/<数据集实验名>/dataset \
+  --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/<数据集>/<数据版本> \
   --device cpu \
   --max-batches 8 \
   --output outputs/agentguard/experiments/<实验名>/checkpoint_validation.json
@@ -791,7 +809,7 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
 ```bash
 cd "/home/shang/workspace/TrackTrack"
 ./.venv/bin/python -u -m agentguard.cli train_iwg_attn \
-  --dataset-dir outputs/agentguard/experiments/替换为数据目录/dataset \
+  --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/替换为数据集目录 \
   --checkpoint-dir outputs/agentguard/experiments/替换为新的实验名/checkpoints \
   --device cuda --epochs 100 --batch-size 1024 --num-workers 4 \
   --lr 0.0001 --weight-decay 0.0001 --warmup-epochs 1 \

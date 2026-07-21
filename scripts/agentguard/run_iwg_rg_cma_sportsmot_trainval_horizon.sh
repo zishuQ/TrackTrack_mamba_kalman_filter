@@ -8,19 +8,43 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PY="${PYTHON_BIN:-${ROOT}/.venv/bin/python}"
 HORIZON="${HORIZON:-8}"
+CONTEXT_SIZE="${CONTEXT_SIZE:-6}"
+CORRECTION_BOUND="${CORRECTION_BOUND:-0.10}"
 EPOCHS="${EPOCHS:-200}"
 MEMORY_SHARDS="${MEMORY_SHARDS:-4}"
 EPOCHS_PER_SHARD="${EPOCHS_PER_SHARD:-1}"
 SHARD_CYCLES="${SHARD_CYCLES:-50}"
 LABEL_WORKERS="${LABEL_WORKERS:-4}"
-RUN_NAME="${RUN_NAME:-iwg_rg_cma_v1_sportsmot_trainval_h${HORIZON}_seed42_bs1024_shard${MEMORY_SHARDS}x${EPOCHS_PER_SHARD}_${EPOCHS}e}"
-DATA_RUN_NAME="${DATA_RUN_NAME:-iwg_rg_cma_v1_sportsmot_trainval_h${HORIZON}_seed42_bs1024}"
+BOUND_TAG="${CORRECTION_BOUND//./}"
+if [[ "${CONTEXT_SIZE}" == "6" && "${CORRECTION_BOUND}" == "0.05" ]]; then
+  MODEL_TAG="v1"
+elif [[ "${CONTEXT_SIZE}" == "6" && "${CORRECTION_BOUND}" == "0.10" ]]; then
+  MODEL_TAG="v2"
+elif [[ "${CONTEXT_SIZE}" == "8" && "${CORRECTION_BOUND}" == "0.05" ]]; then
+  MODEL_TAG="v3"
+else
+  MODEL_TAG="v4"
+fi
+if [[ -z "${RUN_NAME:-}" ]]; then
+  if [[ "${CONTEXT_SIZE}" == "6" && "${CORRECTION_BOUND}" == "0.10" ]]; then
+    RUN_NAME="iwg_rg_cma_v2_sportsmot_trainval_h${HORIZON}_bound010_seed42_bs1024_shard${MEMORY_SHARDS}x${EPOCHS_PER_SHARD}_${EPOCHS}e"
+  else
+    RUN_NAME="iwg_rg_cma_${MODEL_TAG}_sportsmot_trainval_future${HORIZON}_context${CONTEXT_SIZE}_bound${BOUND_TAG}_seed42_bs1024_shard${MEMORY_SHARDS}x${EPOCHS_PER_SHARD}_${EPOCHS}e"
+  fi
+fi
 
 EXPERIMENT_ROOT="${ROOT}/outputs/agentguard/experiments"
 RUN_ROOT="${EXPERIMENT_ROOT}/${RUN_NAME}"
-DATA_ROOT="${EXPERIMENT_ROOT}/${DATA_RUN_NAME}"
 LABEL_DIR="${ROOT}/outputs/agentguard/labels/iwg_rg_cma/SportsMOT/nsa_trainval_h${HORIZON}_v3_compact"
-DATASET_DIR="${DATA_ROOT}/dataset"
+# Reusable training data is separate from per-experiment artifacts.
+DATASET_ROOT="${ROOT}/outputs/agentguard/datasets/iwg_rg_cma/SportsMOT"
+if [[ -n "${DATASET_DIR:-}" ]]; then
+  DATASET_DIR="${DATASET_DIR}"
+elif [[ "${CONTEXT_SIZE}" == "6" ]]; then
+  DATASET_DIR="${DATASET_ROOT}/nsa_trainval_h${HORIZON}_v3_compact"
+else
+  DATASET_DIR="${DATASET_ROOT}/nsa_trainval_future${HORIZON}_context${CONTEXT_SIZE}_v3_compact"
+fi
 CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
 LAST_CHECKPOINT="${CHECKPOINT_DIR}/iwg_rg_cma_last.pt"
 FINAL_CHECKPOINT="${CHECKPOINT_DIR}/iwg_rg_cma_epoch$(printf '%03d' "${EPOCHS}").pt"
@@ -31,6 +55,14 @@ DETECTION_CACHE_ROOT="${ROOT}/outputs/agentguard/detection_cache"
 
 if ! [[ "${HORIZON}" =~ ^[1-9][0-9]*$ ]]; then
   echo "HORIZON must be a positive integer: ${HORIZON}" >&2
+  exit 2
+fi
+if [[ "${CONTEXT_SIZE}" != "6" && "${CONTEXT_SIZE}" != "8" ]]; then
+  echo "CONTEXT_SIZE must be 6 or 8: ${CONTEXT_SIZE}" >&2
+  exit 2
+fi
+if [[ "${CORRECTION_BOUND}" != "0.05" && "${CORRECTION_BOUND}" != "0.10" ]]; then
+  echo "CORRECTION_BOUND must be 0.05 or 0.10: ${CORRECTION_BOUND}" >&2
   exit 2
 fi
 if ! (( MEMORY_SHARDS >= 1 && EPOCHS_PER_SHARD >= 1 && SHARD_CYCLES >= 1 )); then
@@ -61,13 +93,15 @@ Usage:
 
 Defaults:
   HORIZON=${HORIZON}
+  CONTEXT_SIZE=${CONTEXT_SIZE}
+  CORRECTION_BOUND=${CORRECTION_BOUND}
   EPOCHS=${EPOCHS}
   MEMORY_SHARDS=${MEMORY_SHARDS}
   EPOCHS_PER_SHARD=${EPOCHS_PER_SHARD}
   SHARD_CYCLES=${SHARD_CYCLES}
   LABEL_WORKERS=${LABEL_WORKERS}
   RUN_NAME=${RUN_NAME}
-  DATA_RUN_NAME=${DATA_RUN_NAME}
+  DATASET_DIR=${DATASET_DIR}
 
 The run builds fresh trainval labels and data, trains from scratch, then
 evaluates both base and final gates on SportsMOT val using raw metrics only.
@@ -104,9 +138,11 @@ if ((DRY_RUN)); then
 ROOT=${ROOT}
 PY=${PY}
 HORIZON=${HORIZON}
+CONTEXT_SIZE=${CONTEXT_SIZE}
+CORRECTION_BOUND=${CORRECTION_BOUND}
 LABEL_WORKERS=${LABEL_WORKERS}
 RUN_ROOT=${RUN_ROOT}
-DATA_ROOT=${DATA_ROOT}
+DATASET_ROOT=${DATASET_ROOT}
 LABEL_DIR=${LABEL_DIR}
 DATASET_DIR=${DATASET_DIR}
 SCHEDULE=epochs:${EPOCHS},memory_shards:${MEMORY_SHARDS},epochs_per_shard:${EPOCHS_PER_SHARD},shard_cycles:${SHARD_CYCLES}
@@ -163,6 +199,8 @@ trap finish EXIT
 git -C "${ROOT}" rev-parse HEAD > "${PROVENANCE_DIR}/git_commit.txt"
 git -C "${ROOT}" status --porcelain > "${PROVENANCE_DIR}/git_status_porcelain.txt"
 printf '%s\n' "${HORIZON}" > "${PROVENANCE_DIR}/future_frames.txt"
+printf '%s\n' "${CONTEXT_SIZE}" > "${PROVENANCE_DIR}/context_size.txt"
+printf '%s\n' "${CORRECTION_BOUND}" > "${PROVENANCE_DIR}/correction_bound.txt"
 printf '%s\n' "${EPOCHS_PER_SHARD} * ${SHARD_CYCLES} = $((EPOCHS_PER_SHARD * SHARD_CYCLES)) effective full passes" \
   > "${PROVENANCE_DIR}/training_budget.txt"
 
@@ -211,6 +249,7 @@ if [[ ! -f "${DATASET_DIR}/metadata.json" ]]; then
     --label-dir "${LABEL_DIR}" \
     --output-dir "${DATASET_DIR}" \
     --max-frame-gap 30 \
+    --context-size "${CONTEXT_SIZE}" \
     2>&1 | tee "${LOG_DIR}/build_dataset.log"
 else
   echo "Reusing existing dataset: ${DATASET_DIR}" | tee "${LOG_DIR}/build_dataset.log"
@@ -225,6 +264,8 @@ TRAIN_COMMAND=(
   --device cuda --epochs "${EPOCHS}" --batch-size 1024 --num-workers 4
   --lr 0.0001 --weight-decay 0.0001 --warmup-epochs 1
   --grad-clip 1.0 --seed 42
+  --correction-bound "${CORRECTION_BOUND}"
+  --context-size "${CONTEXT_SIZE}"
   --memory-shards "${MEMORY_SHARDS}"
   --epochs-per-shard "${EPOCHS_PER_SHARD}"
   --shard-cycles "${SHARD_CYCLES}"

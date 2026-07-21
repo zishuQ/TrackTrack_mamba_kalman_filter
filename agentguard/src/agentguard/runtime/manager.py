@@ -79,6 +79,20 @@ class AgentGuardRuntime:
         self.iwg_attn_output = str(config.get("iwg_attn_output", "final"))
         if self.iwg_attn_output not in {"base", "final"}:
             raise ValueError("iwg_attn_output must be 'base' or 'final'")
+        self.iwg_context_size = int(config.get("iwg_context_size", 6))
+        if self.iwg_context_size < 1:
+            raise ValueError(
+                f"iwg_context_size must be positive, got {self.iwg_context_size}"
+            )
+        if self.mode == "iwg-attn":
+            model_context_size = int(
+                getattr(self.iwg_attn_model, "context_size", self.iwg_context_size)
+            )
+            if model_context_size != self.iwg_context_size:
+                raise ValueError(
+                    "runtime/model context_size mismatch: "
+                    f"{self.iwg_context_size} != {model_context_size}"
+                )
         self.iwg_attn_max_frame_gap = int(config.get("iwg_attn_max_frame_gap", 30))
 
         # Statistics
@@ -115,8 +129,11 @@ class AgentGuardRuntime:
 
     def is_mature_track(self, track) -> bool:
         """A track is mature if its state is Tracked or Lost and its history
-        contains at least 6 entries."""
-        return track.state in (1, 2) and len(track.history) >= 6
+        contains enough entries for the configured IWG context."""
+        return (
+            track.state in (1, 2)
+            and len(track.history) >= self.iwg_context_size
+        )
 
     # ------------------------------------------------------------------
     # Buffer helpers
@@ -129,13 +146,17 @@ class AgentGuardRuntime:
         """Return the event and window buffers for *track_id*, creating them
         on first access."""
         if track_id not in self.event_buffers:
-            self.event_buffers[track_id] = EventBuffer()
+            self.event_buffers[track_id] = EventBuffer(
+                max_len=self.iwg_context_size
+            )
             self.window_buffers[track_id] = WindowBuffer()
         return self.event_buffers[track_id], self.window_buffers[track_id]
 
     def get_or_create_event_buffer(self, track_id: int) -> EventBuffer:
         if track_id not in self.event_buffers:
-            self.event_buffers[track_id] = EventBuffer()
+            self.event_buffers[track_id] = EventBuffer(
+                max_len=self.iwg_context_size
+            )
         return self.event_buffers[track_id]
 
     def _reset_iwg_attn_history_for_frame(self, track_id: int, frame_id: int) -> bool:
