@@ -65,7 +65,7 @@ sha256sum \
   "${ROOT}/agentguard/src/agentguard/datasets/iwg_attn_dataset.py" \
   "${ROOT}/agentguard/src/agentguard/training/loss_iwg_rg_cma.py" \
   "${ROOT}/agentguard/src/agentguard/training/train_iwg_rg_cma.py" \
-  "${ROOT}/agentguard/src/agentguard/v0_pipeline.py" \
+  "${ROOT}/agentguard/src/agentguard/data/rollout_label_builder.py" \
   > "${PROVENANCE_DIR}/training_sources.sha256"
 "${PY}" -c "import sys,torch; print(sys.version); print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())" \
   > "${PROVENANCE_DIR}/environment.txt"

@@ -94,7 +94,9 @@ def build_current_rollout_compact_labels_for_sequence(
     future_frames: int = 5,
     max_events: int = 0,
 ) -> dict[str, Any]:
-    from agentguard.v0_pipeline import build_compact_rollout_labels_for_sequence
+    from agentguard.data.rollout_label_builder import (
+        build_compact_rollout_labels_for_sequence,
+    )
 
     event_cache_dir = Path(event_cache_dir).resolve()
     detection_cache_dir = Path(detection_cache_dir).resolve()

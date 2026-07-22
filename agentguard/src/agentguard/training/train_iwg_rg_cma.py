@@ -111,10 +111,10 @@ def _training_source_hashes() -> dict[str, str]:
         "models/iwg.py",
         "models/iwg_rg_cma.py",
         "datasets/iwg_attn_dataset.py",
+        "data/rollout_label_builder.py",
         "rollout_labels.py",
         "training/loss_iwg_rg_cma.py",
         "training/train_iwg_rg_cma.py",
-        "v0_pipeline.py",
     ]
     return {
         relative: hashlib.sha256((package_root / relative).read_bytes()).hexdigest()

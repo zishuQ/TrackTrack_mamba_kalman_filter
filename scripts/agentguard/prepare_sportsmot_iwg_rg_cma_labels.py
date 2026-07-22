@@ -188,7 +188,7 @@ def main() -> None:
                 root / "agentguard/src/agentguard/data/compact_iwg_labels.py",
                 root / "agentguard/src/agentguard/data/gt_reader.py",
                 root / "agentguard/src/agentguard/rollout_labels.py",
-                root / "agentguard/src/agentguard/v0_pipeline.py",
+                root / "agentguard/src/agentguard/data/rollout_label_builder.py",
             )
         },
     }

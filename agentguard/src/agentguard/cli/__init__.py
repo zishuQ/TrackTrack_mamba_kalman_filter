@@ -1052,7 +1052,9 @@ def _add_build_rollout_labels_parser(subparsers: argparse._SubParsersAction) -> 
     p.add_argument("--label-dir", default=None, help="Override rollout label directory.")
     p.add_argument("--output-dir", default=None, help="Override Student-V0 dataset index directory.")
 def _cmd_build_rollout_labels(args: argparse.Namespace) -> None:
-    from agentguard.v0_pipeline import build_compact_rollout_labels_for_sequence
+    from agentguard.data.rollout_label_builder import (
+        build_compact_rollout_labels_for_sequence,
+    )
 
     dataset = args.dataset
     mode = args.mode
