@@ -3035,6 +3035,12 @@ def _add_train_iwg_attn_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Number of events passed to IWG/RG-CMA (6 preserves old models).",
     )
     parser.add_argument(
+        "--reliability-mode",
+        choices=["full", "no-scalar"],
+        default="full",
+        help="Reliability token input mode; no-scalar masks normalized scalar features.",
+    )
+    parser.add_argument(
         "--residual-beta",
         type=float,
         default=1.0,
@@ -3111,6 +3117,7 @@ def _cmd_train_iwg_attn(args: argparse.Namespace) -> None:
         "seed": int(args.seed),
         "correction_bound": float(args.correction_bound),
         "context_size": int(args.context_size),
+        "reliability_mode": str(args.reliability_mode),
         "residual_beta": float(args.residual_beta),
         "residual_weight": float(args.residual_weight),
         "revision_weight": float(args.revision_weight),

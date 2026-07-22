@@ -19,6 +19,11 @@ RG_CMA_DIM = 128
 RG_CMA_HEADS = 4
 RG_CMA_LEGACY_CORRECTION_BOUND = 0.05
 RG_CMA_CORRECTION_BOUND = 0.10
+RELIABILITY_MODE_FULL = "full"
+RELIABILITY_MODE_NO_SCALAR = "no-scalar"
+SUPPORTED_RELIABILITY_MODES = frozenset(
+    {RELIABILITY_MODE_FULL, RELIABILITY_MODE_NO_SCALAR}
+)
 
 
 def _model_descriptor(
@@ -332,6 +337,7 @@ class IWGRGCMA(nn.Module):
         event_dim: int = 128,
         correction_bound: float = RG_CMA_CORRECTION_BOUND,
         context_size: int = IWG_CONTEXT_SIZE,
+        reliability_mode: str = RELIABILITY_MODE_FULL,
     ) -> None:
         super().__init__()
         correction_bound = float(correction_bound)
@@ -346,9 +352,17 @@ class IWGRGCMA(nn.Module):
                 "RG-CMA correction bound must be finite and in (0, 1], got "
                 f"{correction_bound}"
             )
+        reliability_mode = str(reliability_mode).strip().lower()
+        if reliability_mode not in SUPPORTED_RELIABILITY_MODES:
+            raise ValueError(
+                "unsupported RG-CMA reliability_mode: "
+                f"{reliability_mode!r}; expected one of "
+                f"{sorted(SUPPORTED_RELIABILITY_MODES)}"
+            )
         self.scalar_dim = int(scalar_dim)
         self.correction_bound = correction_bound
         self.context_size = context_size
+        self.reliability_mode = reliability_mode
         self.iwg = SafeDirectIWG(
             reid_dim=reid_dim,
             scalar_dim=scalar_dim,
@@ -461,15 +475,9 @@ class IWGRGCMA(nn.Module):
             need_weights=True,
             average_attn_weights=False,
         )
-        reliability_input = torch.cat(
-            [
-                base_outputs["base_gate"].detach(),
-                base_outputs["policy_probs"].detach(),
-                base_outputs["cue"].detach(),
-                base_outputs["risk"].detach(),
-                scalar_current.detach(),
-            ],
-            dim=-1,
+        reliability_input = self._build_reliability_input(
+            scalar_current=scalar_current,
+            base_outputs=base_outputs,
         )
         reliability = self.reliability_projection(reliability_input).unsqueeze(1)
         cross_tokens = torch.cat(
@@ -497,6 +505,28 @@ class IWGRGCMA(nn.Module):
                 appearance_weights
             ),
         }
+
+    def _build_reliability_input(
+        self,
+        *,
+        scalar_current: torch.Tensor,
+        base_outputs: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        reliability_scalar = scalar_current.detach()
+        if self.reliability_mode == RELIABILITY_MODE_NO_SCALAR:
+            # Zero is the normalized feature mean, preserving projection shape
+            # while removing scalar evidence from the ablation.
+            reliability_scalar = torch.zeros_like(reliability_scalar)
+        return torch.cat(
+            [
+                base_outputs["base_gate"].detach(),
+                base_outputs["policy_probs"].detach(),
+                base_outputs["cue"].detach(),
+                base_outputs["risk"].detach(),
+                reliability_scalar,
+            ],
+            dim=-1,
+        )
 
     def forward(
         self,

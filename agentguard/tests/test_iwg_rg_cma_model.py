@@ -129,6 +129,35 @@ def test_rg_cma_zero_init_masks_and_correction_bound():
     assert bounded["gate_correction"].abs().max() <= RG_CMA_CORRECTION_BOUND + 1e-6
 
 
+def test_no_scalar_reliability_mode_only_masks_scalar_evidence():
+    torch.manual_seed(37)
+    full = IWGRGCMA(16).eval()
+    no_scalar = IWGRGCMA(16, reliability_mode="no-scalar").eval()
+    no_scalar.load_state_dict(full.state_dict(), strict=True)
+    batch = _batch()
+    with torch.no_grad():
+        outputs = _forward(full, batch)
+        base_outputs = {
+            key: outputs[key]
+            for key in ("base_gate", "policy_probs", "cue", "risk")
+        }
+        scalar_current = batch["scalar_feats"][:, -1]
+        full_input = full._build_reliability_input(
+            scalar_current=scalar_current,
+            base_outputs=base_outputs,
+        )
+        no_scalar_input = no_scalar._build_reliability_input(
+            scalar_current=scalar_current,
+            base_outputs=base_outputs,
+        )
+        no_scalar_zero_input = no_scalar._build_reliability_input(
+            scalar_current=torch.zeros_like(scalar_current),
+            base_outputs=base_outputs,
+        )
+    torch.testing.assert_close(no_scalar_input, no_scalar_zero_input)
+    assert not torch.equal(full_input, no_scalar_input)
+
+
 def test_rg_cma_sequence_is_strictly_causal():
     torch.set_num_threads(1)
     torch.manual_seed(13)

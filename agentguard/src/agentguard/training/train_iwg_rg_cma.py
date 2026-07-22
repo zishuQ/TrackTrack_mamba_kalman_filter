@@ -34,6 +34,8 @@ from agentguard.models.iwg_rg_cma import (
     IWG_RG_CMA_MODEL_SCHEMA,
     IWG_RG_CMA_MODEL_SCHEMA_SHA256,
     IWGRGCMA,
+    RELIABILITY_MODE_FULL,
+    SUPPORTED_RELIABILITY_MODES,
     RG_CMA_CORRECTION_BOUND,
     RG_CMA_LEGACY_CORRECTION_BOUND,
     model_contract,
@@ -494,6 +496,16 @@ def _resolved_loss_settings(config: dict[str, Any]) -> dict[str, float]:
     return settings
 
 
+def _resolve_reliability_mode(config: dict[str, Any]) -> str:
+    mode = str(config.get("reliability_mode", RELIABILITY_MODE_FULL)).strip().lower()
+    if mode not in SUPPORTED_RELIABILITY_MODES:
+        raise ValueError(
+            "unsupported reliability_mode: "
+            f"{mode!r}; expected one of {sorted(SUPPORTED_RELIABILITY_MODES)}"
+        )
+    return mode
+
+
 def _write_training_log(handle, message: str) -> None:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     handle.write(f"{timestamp} | INFO     | {message}\n")
@@ -563,6 +575,7 @@ def _checkpoint_payload(
         "train_sequences": list(metadata["train_sequences"]),
         "index_format": str(metadata.get("index_format", "jsonl_v1")),
         "correction_bound": float(model.correction_bound),
+        "reliability_mode": str(model.reliability_mode),
         "policy_prototypes": np.asarray(POLICY_PROTOTYPE_MATRIX).tolist(),
         "dataset_schema_sha256": str(metadata["dataset_schema_sha256"]),
         "dataset_sha256": str(metadata["dataset_sha256"]),
@@ -646,6 +659,19 @@ def validate_iwg_rg_cma_checkpoint_contract(
     }
     if mismatches:
         raise ValueError(f"IWG RG-CMA checkpoint contract mismatch: {mismatches}")
+    reliability_mode = str(
+        checkpoint.get(
+            "reliability_mode",
+            checkpoint.get("training_config", {}).get(
+                "reliability_mode", RELIABILITY_MODE_FULL
+            ),
+        )
+    ).strip().lower()
+    if reliability_mode not in SUPPORTED_RELIABILITY_MODES:
+        raise ValueError(
+            "IWG RG-CMA checkpoint has unsupported reliability_mode: "
+            f"{reliability_mode!r}"
+        )
     if checkpoint.get("dataset_schema_sha256") not in (
         SUPPORTED_IWG_ATTN_DATASET_SCHEMA_SHA256
     ):
@@ -691,6 +717,14 @@ def load_iwg_rg_cma_checkpoint(
         event_dim=int(checkpoint["event_dim"]),
         correction_bound=float(checkpoint["correction_bound"]),
         context_size=int(checkpoint["context_size"]),
+        reliability_mode=str(
+            checkpoint.get(
+                "reliability_mode",
+                checkpoint.get("training_config", {}).get(
+                    "reliability_mode", RELIABILITY_MODE_FULL
+                ),
+            )
+        ),
     )
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     return model, checkpoint
@@ -756,6 +790,7 @@ def _run_training_attempt(
     _seed_everything(seed)
     device = torch.device(config["device"])
     loss_settings = _resolved_loss_settings(config)
+    reliability_mode = _resolve_reliability_mode(config)
     training_schedule = build_memory_shard_schedule(dataset, config)
     epoch_plan = [
         (phase, phase_epoch)
@@ -782,6 +817,7 @@ def _run_training_attempt(
             config.get("correction_bound", RG_CMA_CORRECTION_BOUND)
         ),
         context_size=int(config.get("context_size", 6)),
+        reliability_mode=reliability_mode,
     ).to(device)
     init_checkpoint = str(config.get("init_checkpoint", "")).strip()
     initialization = (
@@ -1134,6 +1170,7 @@ def _run_training_attempt(
 def _validate_formal_config(config: dict[str, Any]) -> int:
     _resolve_sequence_sampling(config)
     _resolved_loss_settings(config)
+    _resolve_reliability_mode(config)
     model_contract(
         correction_bound=float(
             config.get("correction_bound", RG_CMA_CORRECTION_BOUND)

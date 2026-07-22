@@ -73,6 +73,14 @@ def test_iwg_rg_cma_checkpoint_strict_roundtrip(tmp_path):
     model, loaded = load_iwg_rg_cma_checkpoint(path)
     assert isinstance(model, IWGRGCMA)
     assert loaded["epoch"] == 100
+    assert model.reliability_mode == "full"
+
+    no_scalar = dict(checkpoint)
+    no_scalar["reliability_mode"] = "no-scalar"
+    no_scalar_path = tmp_path / "no_scalar_checkpoint.pt"
+    torch.save(no_scalar, no_scalar_path)
+    no_scalar_loaded, _ = load_iwg_rg_cma_checkpoint(no_scalar_path)
+    assert no_scalar_loaded.reliability_mode == "no-scalar"
 
     invalid = dict(checkpoint)
     invalid["correction_bound"] = 0.2
@@ -191,6 +199,8 @@ def test_iwg_rg_cma_warm_start_has_fixed_finetune_config():
                 "epochs_per_shard": 5,
             }
         )
+    with pytest.raises(ValueError, match="unsupported reliability_mode"):
+        _validate_formal_config({**config, "reliability_mode": "gate-policy"})
 
 
 def test_iwg_rg_cma_warm_start_loads_only_strict_model_weights(tmp_path):
