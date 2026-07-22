@@ -116,7 +116,7 @@ finish() {
 trap finish EXIT
 
 TRAIN_COMMAND=(
-  "${PY}" -u -m agentguard.cli train_iwg_attn
+  "${PY}" -u -m agentguard.cli train_iwg_rg_cma
   --dataset-dir "${MOT17_DATASET}"
   --checkpoint-dir "${CHECKPOINT_DIR}"
   --device cuda
@@ -138,7 +138,7 @@ printf '\n' >> "${PROVENANCE_DIR}/train.command.txt"
 require_file "${FINAL_CHECKPOINT}"
 touch "${RUN_ROOT}/training_completed"
 
-"${PY}" -u -m agentguard.cli validate_iwg_attn_checkpoint \
+"${PY}" -u -m agentguard.cli validate_iwg_rg_cma_checkpoint \
   --checkpoint "${FINAL_CHECKPOINT}" \
   --dataset-dir "${MOT17_DATASET}" \
   --device cpu --max-batches 8 \
@@ -152,9 +152,9 @@ EVAL_COMMAND=(
   --dataset MOT17 --mode all
   --sequences "${MOT17_SEQUENCES[@]}"
   --seed 10000 --kf-type nsa
-  --agentguard-mode iwg-attn
+  --agentguard-mode iwg-rg-cma
   --agentguard-checkpoint "${FINAL_CHECKPOINT}"
-  --iwg-attn-output final
+  --iwg-rg-cma-output final
   --agentguard-device cpu
   --detection-cache-root "${DETECTION_CACHE_ROOT}"
   --tracker-suffix "${EVAL_SUFFIX}"

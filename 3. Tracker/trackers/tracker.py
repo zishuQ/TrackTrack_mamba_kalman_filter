@@ -130,7 +130,7 @@ class Tracker(object):
 
                 iwg_model = None
                 tgr_model = None
-                iwg_attn_model = None
+                iwg_rg_cma_model = None
                 checkpoint_reid_dim = None
                 checkpoint_norm_stats = None
 
@@ -158,17 +158,17 @@ class Tracker(object):
                     tgr_model.load_state_dict(sd_tgr)
                     tgr_model.eval()
 
-                if ag_mode == 'iwg-attn':
+                if ag_mode == 'iwg-rg-cma':
                     if combined_ckpt is None:
                         raise RuntimeError(
-                            "Combined AgentGuard checkpoint required for iwg-attn mode"
+                            "Combined AgentGuard checkpoint required for iwg-rg-cma mode"
                         )
                     from agentguard.features.normalization import NormalizationStats
                     from agentguard.training.train_iwg_rg_cma import (
                         load_iwg_rg_cma_checkpoint,
                     )
 
-                    iwg_attn_model, checkpoint = load_iwg_rg_cma_checkpoint(
+                    iwg_rg_cma_model, checkpoint = load_iwg_rg_cma_checkpoint(
                         combined_ckpt, map_location='cpu'
                     )
                     checkpoint_reid_dim = int(checkpoint['reid_dim'])
@@ -179,20 +179,20 @@ class Tracker(object):
                     checkpoint_norm_stats.std = np.asarray(
                         checkpoint['normalization_std'], dtype=np.float64
                     )
-                    runtime_config['iwg_attn_max_frame_gap'] = int(
+                    runtime_config['iwg_rg_cma_max_frame_gap'] = int(
                         checkpoint['max_frame_gap']
                     )
                     runtime_config['iwg_context_size'] = int(
                         checkpoint['context_size']
                     )
-                    iwg_attn_model.eval()
+                    iwg_rg_cma_model.eval()
 
                 runtime = AgentGuardRuntime(
                     runtime_config,
                     iwg_model,
                     tgr_model,
                     device,
-                    iwg_attn_model=iwg_attn_model,
+                    iwg_rg_cma_model=iwg_rg_cma_model,
                 )
                 runtime.event_sink = event_sink
 

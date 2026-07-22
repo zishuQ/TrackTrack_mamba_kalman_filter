@@ -121,7 +121,7 @@ def make_parser():
         action="store_true",
         help=(
             "Keep the historical AgentGuard output-folder spelling. By default, "
-            "iwg-attn outputs use the shorter '<suffix>_iwg_attn_<base|final>' name."
+            "iwg-rg-cma outputs use the shorter '<suffix>_iwg_rg_cma_<base|final>' name."
         ),
     )
     parser.add_argument("--sequences", type=str, nargs="+", default=None,
@@ -129,7 +129,7 @@ def make_parser():
 
     # AgentGuard parameters
     parser.add_argument("--agentguard-mode", type=str, default="off",
-                       choices=["off", "iwg", "full", "iwg-attn"],
+                       choices=["off", "iwg", "full", "iwg-rg-cma"],
                        help="AgentGuard mode: off, iwg, full, or IWG+RG-CMA")
     parser.add_argument("--iwg-checkpoint", type=str, default=None,
                        help="Path to IWG model checkpoint (.pt)")
@@ -137,8 +137,8 @@ def make_parser():
                        help="Path to TGR model checkpoint (.pt)")
     parser.add_argument("--agentguard-checkpoint", type=str, default=None,
                        help="Path to one combined IWG+RG-CMA checkpoint file (.pt); directories are not accepted")
-    parser.add_argument("--iwg-attn-output", choices=["base", "final"], default="final",
-                       help="Apply base or RG-CMA-refined gate from an IWG-attn checkpoint")
+    parser.add_argument("--iwg-rg-cma-output", choices=["base", "final"], default="final",
+                       help="Apply base or RG-CMA-refined gate from an IWG RG-CMA checkpoint")
     parser.add_argument("--agentguard-device", type=str, default="cpu",
                        help="Device for AgentGuard inference (cpu or cuda)")
     parser.add_argument(
@@ -456,11 +456,11 @@ def run():
         trackers_to_eval += '_agentguard_iwg'
     elif args.agentguard_mode == 'full':
         trackers_to_eval += '_agentguard_full'
-    elif args.agentguard_mode == 'iwg-attn':
+    elif args.agentguard_mode == 'iwg-rg-cma':
         if args.legacy_output_naming:
-            trackers_to_eval += f'_agentguard_iwg_attn_{args.iwg_attn_output}'
+            trackers_to_eval += f'_agentguard_iwg_rg_cma_{args.iwg_rg_cma_output}'
         else:
-            trackers_to_eval += f'_iwg_attn_{args.iwg_attn_output}'
+            trackers_to_eval += f'_iwg_rg_cma_{args.iwg_rg_cma_output}'
     result_folder_base = os.path.join(args.output_dir, trackers_to_eval)
     if 'dance' in args.dataset.lower() and args.mode == 'test':
         result_folder = os.path.join(result_folder_base, 'tracker')
@@ -551,8 +551,8 @@ if __name__ == "__main__":
             parser.error("--iwg-checkpoint is required when --agentguard-mode=full")
         if args.tgr_checkpoint is None:
             parser.error("--tgr-checkpoint is required when --agentguard-mode=full")
-    if args.agentguard_mode == 'iwg-attn' and args.agentguard_checkpoint is None:
-        parser.error("--agentguard-checkpoint is required when --agentguard-mode=iwg-attn")
+    if args.agentguard_mode == 'iwg-rg-cma' and args.agentguard_checkpoint is None:
+        parser.error("--agentguard-checkpoint is required when --agentguard-mode=iwg-rg-cma")
 
     # Set random seed
     random.seed(args.seed)

@@ -21,8 +21,8 @@ def build_runtime_config(args) -> dict:
         "iwg_checkpoint": getattr(args, "iwg_checkpoint", None),
         "tgr_checkpoint": getattr(args, "tgr_checkpoint", None),
         "agentguard_checkpoint": getattr(args, "agentguard_checkpoint", None),
-        "iwg_attn_output": getattr(args, "iwg_attn_output", "final"),
-        "iwg_attn_max_frame_gap": 30,
+        "iwg_rg_cma_output": getattr(args, "iwg_rg_cma_output", "final"),
+        "iwg_rg_cma_max_frame_gap": 30,
         "device": getattr(args, "agentguard_device", "cpu"),
         "replay_diff_threshold": float(
             getattr(args, "agentguard_replay_diff_threshold", 0.0) or 0.0

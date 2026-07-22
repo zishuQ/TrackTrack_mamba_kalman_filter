@@ -171,7 +171,7 @@ train_run() {
     fi
     stage "TRAIN ${run_root##*/}: epochs=${epochs}, shards=${memory_shards}, epochs_per_shard=${epochs_per_shard}, cycles=${shard_cycles}"
     local command=(
-      "${PY}" -u -m agentguard.cli train_iwg_attn
+      "${PY}" -u -m agentguard.cli train_iwg_rg_cma
       --dataset-dir "${dataset_dir}"
       --checkpoint-dir "${checkpoint_dir}"
       --device cuda --epochs "${epochs}" --batch-size 1024 --num-workers 4
@@ -192,7 +192,7 @@ train_run() {
     stage "TRAIN ${run_root##*/}: already complete, reuse checkpoint"
   fi
 
-  "${PY}" -u -m agentguard.cli validate_iwg_attn_checkpoint \
+  "${PY}" -u -m agentguard.cli validate_iwg_rg_cma_checkpoint \
     --checkpoint "${last_checkpoint}" --dataset-dir "${dataset_dir}" \
     --device cpu --max-batches 8 \
     --output "${run_root}/checkpoint_validation.json" \
@@ -220,9 +220,9 @@ eval_tracker() {
   local command=(
     "${PY}" -u run.py
     --dataset "${dataset}" --mode "${mode}"
-    --agentguard-mode iwg-attn
+    --agentguard-mode iwg-rg-cma
     --agentguard-checkpoint "${checkpoint}"
-    --iwg-attn-output final --agentguard-device cpu
+    --iwg-rg-cma-output final --agentguard-device cpu
     --detection-cache-root "${DETECTION_CACHE_ROOT}"
     --tracker-suffix "${suffix}"
     --print-per-sequence-metrics

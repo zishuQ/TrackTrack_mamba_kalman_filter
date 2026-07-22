@@ -55,7 +55,7 @@ sha256sum \
   "${ROOT}/agentguard/src/agentguard/models/iwg_rg_cma.py" \
   "${ROOT}/agentguard/src/agentguard/data/cache_reader.py" \
   "${ROOT}/agentguard/src/agentguard/data/compact_iwg_labels.py" \
-  "${ROOT}/agentguard/src/agentguard/datasets/iwg_attn_dataset.py" \
+  "${ROOT}/agentguard/src/agentguard/datasets/iwg_rg_cma_dataset.py" \
   "${ROOT}/agentguard/src/agentguard/rollout_labels.py" \
   "${ROOT}/agentguard/src/agentguard/training/loss_iwg_rg_cma.py" \
   "${ROOT}/agentguard/src/agentguard/training/train_iwg_rg_cma.py" \
@@ -87,19 +87,19 @@ else
 fi
 
 if [[ ! -f "${DATASET_DIR}/metadata.json" ]]; then
-  "${PY}" -m agentguard.cli build_iwg_attn_data \
+  "${PY}" -m agentguard.cli build_iwg_rg_cma_data \
     --dataset MOT20 --mode all \
     --event-cache-root "${EVENT_CACHE_ROOT}" \
     --detection-cache-root "${DETECTION_CACHE_ROOT}" \
     --label-dir "${LABEL_DIR}" --output-dir "${DATASET_DIR}" \
     --max-frame-gap 30 2>&1 | tee "${LOG_DIR}/build.log"
 else
-  "${PY}" -c "from agentguard.datasets.iwg_attn_dataset import StreamingIWGAttnDataset; d=StreamingIWGAttnDataset('${DATASET_DIR}', max_samples=1); print(d.metadata['dataset_sha256']); d.close()" \
+  "${PY}" -c "from agentguard.datasets.iwg_rg_cma_dataset import StreamingIWGRGCMADataset; d=StreamingIWGRGCMADataset('${DATASET_DIR}', max_samples=1); print(d.metadata['dataset_sha256']); d.close()" \
     2>&1 | tee "${LOG_DIR}/build.log"
 fi
 
 TRAIN_COMMAND=(
-  "${PY}" -m agentguard.cli train_iwg_attn
+  "${PY}" -m agentguard.cli train_iwg_rg_cma
   --dataset-dir "${DATASET_DIR}" --checkpoint-dir "${CHECKPOINT_DIR}"
   --device cuda --epochs 100 --batch-size 1024 --num-workers 4
   --lr 0.0001 --weight-decay 0.0001 --warmup-epochs 1
@@ -110,7 +110,7 @@ printf '%q ' "${TRAIN_COMMAND[@]}" > "${PROVENANCE_DIR}/train.command.txt"
 printf '\n' >> "${PROVENANCE_DIR}/train.command.txt"
 "${TRAIN_COMMAND[@]}" 2>&1 | tee "${LOG_DIR}/train.log"
 
-"${PY}" -m agentguard.cli validate_iwg_attn_checkpoint \
+"${PY}" -m agentguard.cli validate_iwg_rg_cma_checkpoint \
   --checkpoint "${CHECKPOINT}" --dataset-dir "${DATASET_DIR}" \
   --device cpu --max-batches 8 --output "${RUN_ROOT}/checkpoint_validation.json" \
   2>&1 | tee "${LOG_DIR}/checkpoint_validation.log"
@@ -122,8 +122,8 @@ run_raw_case() {
   local suffix="$2"
   local command=(
     "${PY}" run.py --dataset MOT20 --mode all --sequences "${SEQUENCES[@]}"
-    --seed 10000 --agentguard-mode iwg-attn --legacy-output-naming
-    --agentguard-checkpoint "${CHECKPOINT}" --iwg-attn-output "${output}"
+    --seed 10000 --agentguard-mode iwg-rg-cma --legacy-output-naming
+    --agentguard-checkpoint "${CHECKPOINT}" --iwg-rg-cma-output "${output}"
     --agentguard-device cpu --detection-cache-root "${DETECTION_CACHE_ROOT}"
     --tracker-suffix "${suffix}" --print-per-sequence-metrics
     --resource-log "${RUN_ROOT}/resource_${suffix}.jsonl" --profile-every 500
@@ -137,8 +137,8 @@ run_raw_case() {
 run_raw_case base "${RUN_NAME}_base_raw"
 run_raw_case final "${RUN_NAME}_final_raw"
 
-BASE_RAW="mot20_all_0.80_${RUN_NAME}_base_raw_agentguard_iwg_attn_base"
-FINAL_RAW="mot20_all_0.80_${RUN_NAME}_final_raw_agentguard_iwg_attn_final"
+BASE_RAW="mot20_all_0.80_${RUN_NAME}_base_raw_agentguard_iwg_rg_cma_base"
+FINAL_RAW="mot20_all_0.80_${RUN_NAME}_final_raw_agentguard_iwg_rg_cma_final"
 BASE_POST="${BASE_RAW}_post"
 FINAL_POST="${FINAL_RAW}_post"
 "${PY}" "${ROOT}/scripts/agentguard/postprocess_mot_tracker_folder.py" \

@@ -2958,11 +2958,11 @@ def _cmd_train_student_v1(args: argparse.Namespace) -> None:
     print(f"V1 training summary saved to {os.path.join(v1_checkpoints_dir, 'training_summary.json')}")
 
 
-def _add_build_iwg_attn_data_parser(
+def _add_build_iwg_rg_cma_data_parser(
     subparsers: argparse._SubParsersAction,
 ) -> None:
     parser = subparsers.add_parser(
-        "build_iwg_attn_data",
+        "build_iwg_rg_cma_data",
         help="Build train-all causal context windows for safe-direct IWG+RG-CMA.",
     )
     parser.add_argument(
@@ -2990,10 +2990,10 @@ def _add_build_iwg_attn_data_parser(
     )
 
 
-def _cmd_build_iwg_attn_data(args: argparse.Namespace) -> None:
-    from agentguard.datasets.iwg_attn_dataset import build_iwg_attn_dataset
+def _cmd_build_iwg_rg_cma_data(args: argparse.Namespace) -> None:
+    from agentguard.datasets.iwg_rg_cma_dataset import build_iwg_rg_cma_dataset
 
-    metadata = build_iwg_attn_dataset(
+    metadata = build_iwg_rg_cma_dataset(
         dataset=args.dataset,
         split=args.mode,
         event_cache_root=args.event_cache_root,
@@ -3006,9 +3006,9 @@ def _cmd_build_iwg_attn_data(args: argparse.Namespace) -> None:
     print(json.dumps(metadata, indent=2, sort_keys=True))
 
 
-def _add_train_iwg_attn_parser(subparsers: argparse._SubParsersAction) -> None:
+def _add_train_iwg_rg_cma_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
-        "train_iwg_attn",
+        "train_iwg_rg_cma",
         help="Train fixed safe-direct IWG+RG-CMA for 100 or 200 epochs.",
     )
     parser.add_argument("--dataset-dir", required=True)
@@ -3102,7 +3102,7 @@ def _add_train_iwg_attn_parser(subparsers: argparse._SubParsersAction) -> None:
             "budget and samples within sequences with replacement."
         ),
     )
-def _cmd_train_iwg_attn(args: argparse.Namespace) -> None:
+def _cmd_train_iwg_rg_cma(args: argparse.Namespace) -> None:
     from agentguard.training.train_iwg_rg_cma import train_iwg_rg_cma
 
     config = {
@@ -3143,11 +3143,11 @@ def _cmd_train_iwg_attn(args: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=2, sort_keys=True))
 
 
-def _add_validate_iwg_attn_checkpoint_parser(
+def _add_validate_iwg_rg_cma_checkpoint_parser(
     subparsers: argparse._SubParsersAction,
 ) -> None:
     parser = subparsers.add_parser(
-        "validate_iwg_attn_checkpoint",
+        "validate_iwg_rg_cma_checkpoint",
         help="Strictly load and evaluate an IWG RG-CMA checkpoint.",
     )
     parser.add_argument("--checkpoint", required=True)
@@ -3157,7 +3157,7 @@ def _add_validate_iwg_attn_checkpoint_parser(
     parser.add_argument("--output", default="")
 
 
-def _cmd_validate_iwg_attn_checkpoint(args: argparse.Namespace) -> None:
+def _cmd_validate_iwg_rg_cma_checkpoint(args: argparse.Namespace) -> None:
     from agentguard.training.train_iwg_rg_cma import (
         validate_iwg_rg_cma_checkpoint,
     )
@@ -3219,9 +3219,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     _add_verify_and_fuse_parser(subparsers)
     _add_build_student_v1_data_parser(subparsers)
     _add_train_student_v1_parser(subparsers)
-    _add_build_iwg_attn_data_parser(subparsers)
-    _add_train_iwg_attn_parser(subparsers)
-    _add_validate_iwg_attn_checkpoint_parser(subparsers)
+    _add_build_iwg_rg_cma_data_parser(subparsers)
+    _add_train_iwg_rg_cma_parser(subparsers)
+    _add_validate_iwg_rg_cma_checkpoint_parser(subparsers)
 
     parsed = parser.parse_args(argv)
 
@@ -3241,9 +3241,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         "verify_and_fuse": _cmd_verify_and_fuse,
         "build_student_v1_data": _cmd_build_student_v1_data,
         "train_student_v1": _cmd_train_student_v1,
-        "build_iwg_attn_data": _cmd_build_iwg_attn_data,
-        "train_iwg_attn": _cmd_train_iwg_attn,
-        "validate_iwg_attn_checkpoint": _cmd_validate_iwg_attn_checkpoint,
+        "build_iwg_rg_cma_data": _cmd_build_iwg_rg_cma_data,
+        "train_iwg_rg_cma": _cmd_train_iwg_rg_cma,
+        "validate_iwg_rg_cma_checkpoint": _cmd_validate_iwg_rg_cma_checkpoint,
     }
 
     handler = dispatch.get(parsed.command)

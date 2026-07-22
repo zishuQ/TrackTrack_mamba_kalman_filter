@@ -20,9 +20,10 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset, Sampler, Subset
 from agentguard.contracts.enums import POLICY_PROTOTYPE_MATRIX
 from agentguard.data.cache_schema import COMPACT_CACHE_SCHEMA_VERSION, FEATURE_SCHEMA_SHA256
 from agentguard.data.label_schema import ROLLOUT_LABEL_SCHEMA_SHA256
-from agentguard.datasets.iwg_attn_dataset import (
-    SUPPORTED_IWG_ATTN_DATASET_SCHEMA_SHA256,
-    StreamingIWGAttnDataset,
+from agentguard.datasets.iwg_rg_cma_dataset import (
+    accepted_iwg_rg_cma_dataset_schema_sha256,
+    SUPPORTED_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+    StreamingIWGRGCMADataset,
 )
 from agentguard.models.iwg_rg_cma import (
     IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA,
@@ -110,7 +111,7 @@ def _training_source_hashes() -> dict[str, str]:
         "models/event_encoder.py",
         "models/iwg.py",
         "models/iwg_rg_cma.py",
-        "datasets/iwg_attn_dataset.py",
+        "datasets/iwg_rg_cma_dataset.py",
         "data/rollout_label_builder.py",
         "rollout_labels.py",
         "training/loss_iwg_rg_cma.py",
@@ -153,7 +154,7 @@ def _loader(
         num_workers=num_workers,
         pin_memory=True,
         drop_last=False,
-        collate_fn=StreamingIWGAttnDataset.collate_fn,
+        collate_fn=StreamingIWGRGCMADataset.collate_fn,
         worker_init_fn=_worker_seed,
         generator=generator,
         **loader_kwargs,
@@ -329,7 +330,7 @@ def _resolved_schedule_settings(config: dict[str, Any]) -> tuple[int, int, int]:
 
 
 def build_memory_shard_schedule(
-    dataset: StreamingIWGAttnDataset,
+    dataset: StreamingIWGRGCMADataset,
     config: dict[str, Any],
 ) -> dict[str, Any]:
     shards, cycles, epochs_per_shard = _resolved_schedule_settings(config)
@@ -672,9 +673,18 @@ def validate_iwg_rg_cma_checkpoint_contract(
             "IWG RG-CMA checkpoint has unsupported reliability_mode: "
             f"{reliability_mode!r}"
         )
-    if checkpoint.get("dataset_schema_sha256") not in (
-        SUPPORTED_IWG_ATTN_DATASET_SCHEMA_SHA256
-    ):
+    checkpoint_dataset = str(checkpoint.get("dataset", ""))
+    checkpoint_split = str(checkpoint.get("split", ""))
+    checkpoint_context_size = int(checkpoint.get("context_size", 0))
+    if checkpoint_dataset and checkpoint_split:
+        accepted_dataset_schema_sha256 = accepted_iwg_rg_cma_dataset_schema_sha256(
+            checkpoint_dataset,
+            checkpoint_split,
+            checkpoint_context_size,
+        )
+    else:
+        accepted_dataset_schema_sha256 = SUPPORTED_IWG_RG_CMA_DATASET_SCHEMA_SHA256
+    if checkpoint.get("dataset_schema_sha256") not in accepted_dataset_schema_sha256:
         raise ValueError(
             "IWG RG-CMA checkpoint contract mismatch: unsupported "
             f"dataset_schema_sha256={checkpoint.get('dataset_schema_sha256')!r}"
@@ -783,7 +793,7 @@ def initialize_iwg_rg_cma_model(
 def _run_training_attempt(
     config: dict[str, Any],
     *,
-    dataset: StreamingIWGAttnDataset,
+    dataset: StreamingIWGRGCMADataset,
     batch_size: int,
 ) -> dict[str, Any]:
     seed = int(config["seed"])
@@ -1182,30 +1192,30 @@ def _validate_formal_config(config: dict[str, Any]) -> int:
     for key, expected in required.items():
         actual = config.get(key)
         if actual != expected:
-            raise ValueError(f"fixed IWG-attn config requires {key}={expected}, got {actual}")
+            raise ValueError(f"fixed IWG RG-CMA config requires {key}={expected}, got {actual}")
     if not init_checkpoint and int(config.get("epochs", 0)) not in FORMAL_TRAIN_EPOCHS:
         raise ValueError(
-            "formal IWG-attn training epochs must be one of "
+            "formal IWG RG-CMA training epochs must be one of "
             f"{sorted(FORMAL_TRAIN_EPOCHS)}, got {config.get('epochs')}"
         )
     batch_size = int(config.get("batch_size", 0))
     allowed_batch_sizes = {1024} if init_checkpoint else FORMAL_BATCH_SIZES
     if batch_size not in allowed_batch_sizes:
         raise ValueError(
-            "formal IWG-attn batch_size must be one of "
+            "formal IWG RG-CMA batch_size must be one of "
             f"{sorted(allowed_batch_sizes)}, got {batch_size}"
         )
     if init_checkpoint:
         epochs = int(config.get("epochs", 0))
         if epochs not in FINETUNE_ALLOWED_EPOCHS:
             raise ValueError(
-                "warm-start IWG-attn epochs must be one of "
+                "warm-start IWG RG-CMA epochs must be one of "
                 f"{sorted(FINETUNE_ALLOWED_EPOCHS)}, got {epochs}"
             )
         shards, cycles, epochs_per_shard = _resolved_schedule_settings(config)
         if (shards, cycles, epochs_per_shard) != (1, 1, epochs):
             raise ValueError(
-                "warm-start IWG-attn training requires one full-data phase "
+                "warm-start IWG RG-CMA training requires one full-data phase "
                 f"for {epochs} epochs"
             )
     _resolved_schedule_settings(config)
@@ -1215,11 +1225,11 @@ def _validate_formal_config(config: dict[str, Any]) -> int:
 def train_iwg_rg_cma(config: dict[str, Any]) -> dict[str, Any]:
     batch_size = _validate_formal_config(config)
     if str(config.get("device", "cuda")) != "cuda":
-        raise ValueError("formal IWG-attn training is fixed to CUDA")
+        raise ValueError("formal IWG RG-CMA training is fixed to CUDA")
     checkpoint_dir = Path(config["checkpoint_dir"])
     if (checkpoint_dir / "iwg_rg_cma_last.pt").exists():
-        raise FileExistsError("formal IWG-attn training requires a new checkpoint directory")
-    dataset = StreamingIWGAttnDataset(
+        raise FileExistsError("formal IWG RG-CMA training requires a new checkpoint directory")
+    dataset = StreamingIWGRGCMADataset(
         config["dataset_dir"], max_samples=int(config.get("max_train_samples", 0))
     )
     try:
@@ -1243,7 +1253,7 @@ def train_iwg_rg_cma(config: dict[str, Any]) -> dict[str, Any]:
 
 def smoke_train_iwg_rg_cma(config: dict[str, Any]) -> dict[str, Any]:
     """Small CPU-capable trainer used only by the implementation smoke test."""
-    dataset = StreamingIWGAttnDataset(
+    dataset = StreamingIWGRGCMADataset(
         config["dataset_dir"], max_samples=int(config.get("max_train_samples", 64))
     )
     smoke_config = {
@@ -1274,7 +1284,7 @@ def validate_iwg_rg_cma_checkpoint(
     device: str = "cpu",
     max_batches: int = 1,
 ) -> dict[str, Any]:
-    dataset = StreamingIWGAttnDataset(dataset_dir)
+    dataset = StreamingIWGRGCMADataset(dataset_dir)
     model, checkpoint = load_iwg_rg_cma_checkpoint(
         checkpoint_path, map_location=device
     )
@@ -1291,7 +1301,7 @@ def validate_iwg_rg_cma_checkpoint(
         batch_size=64,
         shuffle=False,
         num_workers=0,
-        collate_fn=StreamingIWGAttnDataset.collate_fn,
+        collate_fn=StreamingIWGRGCMADataset.collate_fn,
     )
     totals: dict[str, float] = {}
     count = 0

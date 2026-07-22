@@ -5,27 +5,28 @@ import json
 import numpy as np
 import torch
 
-import agentguard.datasets.iwg_attn_dataset as iwg_attn_dataset
+import agentguard.datasets.iwg_rg_cma_dataset as iwg_rg_cma_dataset
 from agentguard.data.cache_reader import CompactEventCacheReader
 from agentguard.data.cache_schema import (
     COMPACT_CACHE_SCHEMA_VERSION,
     FEATURE_SCHEMA_SHA256,
 )
-from agentguard.datasets.iwg_attn_dataset import (
+from agentguard.datasets.iwg_rg_cma_dataset import (
     COMPACT_INDEX_FORMAT,
-    DANCETRACK_IWG_ATTN_DATASET_SCHEMA_SHA256,
+    DANCETRACK_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
     DANCETRACK_TRAIN_SEQUENCES,
-    IWG_ATTN_DATASET_SCHEMA_SHA256,
-    MOT20_IWG_ATTN_DATASET_SCHEMA_SHA256,
-    SPORTSMOT_IWG_ATTN_DATASET_SCHEMA_SHA256,
-    SPORTSMOT_TRAINVAL_IWG_ATTN_DATASET_SCHEMA_SHA256,
+    IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+    LEGACY_DATASET_SCHEMA_SHA256_BY_DATASET_CONTEXT,
+    MOT20_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+    SPORTSMOT_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+    SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
     SPORTSMOT_TRAINVAL_SEQUENCES,
     SPORTSMOT_TRAIN_SEQUENCES,
     SPORTSMOT_VAL_SEQUENCES,
-    StreamingIWGAttnDataset,
+    StreamingIWGRGCMADataset,
     build_streaming_sample_index,
     event_key,
-    resolve_iwg_attn_dataset_spec,
+    resolve_iwg_rg_cma_dataset_spec,
     segment_track_timelines,
 )
 
@@ -70,34 +71,53 @@ def test_streaming_index_includes_unmatched_history_without_crossing_segments():
 
 def test_mot17_schema_hash_is_stable_and_mot20_is_separate():
     assert (
-        IWG_ATTN_DATASET_SCHEMA_SHA256
-        == "cf1d1fc4731a53902157ee3a44584e384e5b61453dc51b2796a6437782440158"
+        IWG_RG_CMA_DATASET_SCHEMA_SHA256
+        == "5b905322077353dc44041b4db93462d5a613c578873bac63545769e13669265b"
     )
-    assert MOT20_IWG_ATTN_DATASET_SCHEMA_SHA256 != IWG_ATTN_DATASET_SCHEMA_SHA256
-    assert DANCETRACK_IWG_ATTN_DATASET_SCHEMA_SHA256 not in {
-        IWG_ATTN_DATASET_SCHEMA_SHA256,
-        MOT20_IWG_ATTN_DATASET_SCHEMA_SHA256,
+    assert (
+        "cf1d1fc4731a53902157ee3a44584e384e5b61453dc51b2796a6437782440158"
+        in LEGACY_DATASET_SCHEMA_SHA256_BY_DATASET_CONTEXT[("MOT17", "all", 6)]
+    )
+    assert MOT20_IWG_RG_CMA_DATASET_SCHEMA_SHA256 != IWG_RG_CMA_DATASET_SCHEMA_SHA256
+    assert DANCETRACK_IWG_RG_CMA_DATASET_SCHEMA_SHA256 not in {
+        IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+        MOT20_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
     }
     assert len(DANCETRACK_TRAIN_SEQUENCES) == 40
     assert len(set(DANCETRACK_TRAIN_SEQUENCES)) == 40
-    assert SPORTSMOT_IWG_ATTN_DATASET_SCHEMA_SHA256 not in {
-        IWG_ATTN_DATASET_SCHEMA_SHA256,
-        MOT20_IWG_ATTN_DATASET_SCHEMA_SHA256,
-        DANCETRACK_IWG_ATTN_DATASET_SCHEMA_SHA256,
+    assert SPORTSMOT_IWG_RG_CMA_DATASET_SCHEMA_SHA256 not in {
+        IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+        MOT20_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+        DANCETRACK_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
     }
     assert len(SPORTSMOT_TRAIN_SEQUENCES) == 45
     assert len(set(SPORTSMOT_TRAIN_SEQUENCES)) == 45
+
+
+def test_pre_rename_dataset_hashes_remain_explicitly_loadable():
+    assert {
+        "cf1d1fc4731a53902157ee3a44584e384e5b61453dc51b2796a6437782440158",
+        "3321c5bba6d06512614247d79e36faa483ffa0feb939c6a8d4b07427c5fd6709",
+        "e0ac984bee62c819fe84b7b25c652e4af9d020b60b52fe1f49b9c7dee3214175",
+        "8135595698deb753202a6a884419838e19d6fc624a4e6829810e6f41e42fe574",
+    }.issubset(
+        {
+            schema
+            for schemas in LEGACY_DATASET_SCHEMA_SHA256_BY_DATASET_CONTEXT.values()
+            for schema in schemas
+        }
+    )
 
 
 def test_sportsmot_trainval_schema_has_exact_disjoint_source_mapping():
     assert len(SPORTSMOT_VAL_SEQUENCES) == 45
     assert set(SPORTSMOT_TRAIN_SEQUENCES).isdisjoint(SPORTSMOT_VAL_SEQUENCES)
     assert len(SPORTSMOT_TRAINVAL_SEQUENCES) == 90
-    sequences, schema, source_splits = resolve_iwg_attn_dataset_spec(
+    sequences, schema, source_splits = resolve_iwg_rg_cma_dataset_spec(
         "SportsMOT", "trainval"
     )
     assert sequences == SPORTSMOT_TRAINVAL_SEQUENCES
-    assert schema == SPORTSMOT_TRAINVAL_IWG_ATTN_DATASET_SCHEMA_SHA256
+    assert schema == SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_SCHEMA_SHA256
     assert {source_splits[item] for item in SPORTSMOT_TRAIN_SEQUENCES} == {"train"}
     assert {source_splits[item] for item in SPORTSMOT_VAL_SEQUENCES} == {"val"}
 
@@ -139,8 +159,8 @@ def test_jsonl_dataset_reader_keeps_event_shards_resident(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr(iwg_attn_dataset, "CompactEventCacheReader", ReaderStub)
-    dataset = object.__new__(StreamingIWGAttnDataset)
+    monkeypatch.setattr(iwg_rg_cma_dataset, "CompactEventCacheReader", ReaderStub)
+    dataset = object.__new__(StreamingIWGRGCMADataset)
     dataset.metadata = {
         "event_cache_root": "/events",
         "detection_cache_root": "/detections",
@@ -166,7 +186,7 @@ def test_compact_index_getitem_does_not_open_event_shard_reader():
         def transform(value):
             return value
 
-    dataset = object.__new__(StreamingIWGAttnDataset)
+    dataset = object.__new__(StreamingIWGRGCMADataset)
     dataset.index_format = COMPACT_INDEX_FORMAT
     dataset._length = 1
     dataset._compact_boundaries = [1]

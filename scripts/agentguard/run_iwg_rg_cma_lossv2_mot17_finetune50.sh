@@ -131,7 +131,7 @@ finish() {
 trap finish EXIT
 
 TRAIN_COMMAND=(
-  "${PY}" -u -m agentguard.cli train_iwg_attn
+  "${PY}" -u -m agentguard.cli train_iwg_rg_cma
   --dataset-dir "${DATASET_DIR}"
   --checkpoint-dir "${CHECKPOINT_DIR}"
   --device cuda
@@ -160,7 +160,7 @@ echo "$(date '+%Y-%m-%d %H:%M:%S') | TRAIN MOT17 loss v2" | tee "${RUN_ROOT}/sta
 "${TRAIN_COMMAND[@]}" 2>&1 | tee "${RUN_ROOT}/logs/train.log"
 require_file "${CHECKPOINT}"
 
-"${PY}" -u -m agentguard.cli validate_iwg_attn_checkpoint \
+"${PY}" -u -m agentguard.cli validate_iwg_rg_cma_checkpoint \
   --checkpoint "${CHECKPOINT}" --dataset-dir "${DATASET_DIR}" \
   --device cpu --max-batches 8 --output "${RUN_ROOT}/checkpoint_validation.json" \
   2>&1 | tee "${RUN_ROOT}/logs/checkpoint_validation.log"
@@ -178,10 +178,10 @@ run_train_case() {
     --sequences "${SEQUENCES[@]}"
     --seed 10000
     --kf-type nsa
-    --agentguard-mode iwg-attn
+    --agentguard-mode iwg-rg-cma
     --legacy-output-naming
     --agentguard-checkpoint "${CHECKPOINT}"
-    --iwg-attn-output "${output}"
+    --iwg-rg-cma-output "${output}"
     --agentguard-device cpu
     --detection-cache-root "${DETECTION_CACHE_ROOT}"
     --tracker-suffix "${suffix}"
@@ -195,8 +195,8 @@ run_train_case() {
     2>&1 | tee "${RUN_ROOT}/logs/${log_name}.log"
 }
 
-BASE_RAW="mot17_all_0.80_${RUN_NAME}_base_raw_agentguard_iwg_attn_base"
-FINAL_RAW="mot17_all_0.80_${RUN_NAME}_final_raw_agentguard_iwg_attn_final"
+BASE_RAW="mot17_all_0.80_${RUN_NAME}_base_raw_agentguard_iwg_rg_cma_base"
+FINAL_RAW="mot17_all_0.80_${RUN_NAME}_final_raw_agentguard_iwg_rg_cma_final"
 run_train_case base "${RUN_NAME}_base_raw" mot17_base_raw
 run_train_case final "${RUN_NAME}_final_raw" mot17_final_raw
 
@@ -220,16 +220,16 @@ FINAL_POST="${FINAL_RAW}_post"
   2>&1 | tee "${RUN_ROOT}/logs/train_evaluation.log"
 
 TEST_SUFFIX="${RUN_NAME}_test_final_post"
-TEST_FOLDER="mot17_test_0.80_${TEST_SUFFIX}_agentguard_iwg_attn_final_post"
+TEST_FOLDER="mot17_test_0.80_${TEST_SUFFIX}_agentguard_iwg_rg_cma_final_post"
 TEST_COMMAND=(
   "${PY}" -u run.py
   --dataset MOT17
   --mode test
   --seed 10000
-  --agentguard-mode iwg-attn
+  --agentguard-mode iwg-rg-cma
   --legacy-output-naming
   --agentguard-checkpoint "${CHECKPOINT}"
-  --iwg-attn-output final
+  --iwg-rg-cma-output final
   --agentguard-device cpu
   --detection-cache-root "${DETECTION_CACHE_ROOT}"
   --tracker-suffix "${TEST_SUFFIX}"

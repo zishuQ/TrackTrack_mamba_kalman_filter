@@ -8,10 +8,11 @@ import torch
 from agentguard.contracts.enums import POLICY_PROTOTYPE_MATRIX
 from agentguard.data.cache_schema import COMPACT_CACHE_SCHEMA_VERSION, FEATURE_SCHEMA_SHA256
 from agentguard.data.label_schema import ROLLOUT_LABEL_SCHEMA_SHA256
-from agentguard.datasets.iwg_attn_dataset import (
-    IWG_ATTN_DATASET_SCHEMA_SHA256,
-    MOT20_IWG_ATTN_DATASET_SCHEMA_SHA256,
-    SPORTSMOT_TRAINVAL_IWG_ATTN_DATASET_SCHEMA_SHA256,
+from agentguard.datasets.iwg_rg_cma_dataset import (
+    IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+    LEGACY_DATASET_SCHEMA_SHA256_BY_DATASET_CONTEXT,
+    MOT20_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+    SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
 )
 from agentguard.models.iwg_rg_cma import (
     IWG_RG_CMA_LEGACY_MODEL_SCHEMA,
@@ -49,7 +50,7 @@ def _checkpoint() -> dict:
         "max_frame_gap": 30,
         "correction_bound": RG_CMA_CORRECTION_BOUND,
         "policy_prototypes": np.asarray(POLICY_PROTOTYPE_MATRIX).tolist(),
-        "dataset_schema_sha256": IWG_ATTN_DATASET_SCHEMA_SHA256,
+        "dataset_schema_sha256": IWG_RG_CMA_DATASET_SCHEMA_SHA256,
         "dataset_sha256": "dataset-hash",
         "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
         "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
@@ -106,14 +107,26 @@ def test_iwg_rg_cma_checkpoint_strict_roundtrip(tmp_path):
     assert legacy_loaded.correction_bound == RG_CMA_LEGACY_CORRECTION_BOUND
 
     mot20 = dict(checkpoint)
-    mot20["dataset_schema_sha256"] = MOT20_IWG_ATTN_DATASET_SCHEMA_SHA256
+    mot20["dataset_schema_sha256"] = MOT20_IWG_RG_CMA_DATASET_SCHEMA_SHA256
     validate_iwg_rg_cma_checkpoint_contract(mot20)
 
     sportsmot_trainval = dict(checkpoint)
     sportsmot_trainval["dataset_schema_sha256"] = (
-        SPORTSMOT_TRAINVAL_IWG_ATTN_DATASET_SCHEMA_SHA256
+        SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_SCHEMA_SHA256
     )
     validate_iwg_rg_cma_checkpoint_contract(sportsmot_trainval)
+
+    legacy_dataset = dict(checkpoint)
+    legacy_dataset.update(
+        {
+            "dataset": "MOT17",
+            "split": "all",
+            "dataset_schema_sha256": next(
+                iter(LEGACY_DATASET_SCHEMA_SHA256_BY_DATASET_CONTEXT[("MOT17", "all", 6)])
+            ),
+        }
+    )
+    validate_iwg_rg_cma_checkpoint_contract(legacy_dataset)
 
     unsupported = dict(checkpoint)
     unsupported["dataset_schema_sha256"] = "unsupported"
@@ -415,7 +428,7 @@ def test_low_memory_training_switches_phases_without_resetting_progress(tmp_path
             "context_size": 6,
             "max_frame_gap": 30,
             "index_format": "compact_memmap_v1",
-            "dataset_schema_sha256": MOT20_IWG_ATTN_DATASET_SCHEMA_SHA256,
+            "dataset_schema_sha256": MOT20_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
             "dataset_sha256": "tiny-dataset",
         }
 

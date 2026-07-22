@@ -173,7 +173,7 @@ train_stage() {
   fi
 
   local command=(
-    "${PY}" -u -m agentguard.cli train_iwg_attn
+    "${PY}" -u -m agentguard.cli train_iwg_rg_cma
     --dataset-dir "${dataset_dir}"
     --checkpoint-dir "${checkpoint_dir}"
     --device cuda
@@ -230,9 +230,9 @@ eval_final_raw() {
     --sequences "${sequences[@]}"
     --seed 10000
     --kf-type nsa
-    --agentguard-mode iwg-attn
+    --agentguard-mode iwg-rg-cma
     --agentguard-checkpoint "${checkpoint}"
-    --iwg-attn-output final
+    --iwg-rg-cma-output final
     --agentguard-device cpu
     --detection-cache-root "${DETECTION_CACHE_ROOT}"
     --tracker-suffix "${suffix}"
@@ -281,7 +281,7 @@ eval_final_raw \
   "${MOT20_SEQUENCES[@]}"
 
 # Stage 2: strict model-weight warm start; optimizer and scheduler are reset by
-# train_iwg_attn, as required for cross-dataset fine-tuning.
+# train_iwg_rg_cma, as required for cross-dataset fine-tuning.
 train_stage \
   "MOT17 from MOT20 e200, 50e" \
   "${MOT17_RUN}" \

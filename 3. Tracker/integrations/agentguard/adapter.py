@@ -486,8 +486,8 @@ class AgentGuardTrackerAdapter:
             hist = buffer.get_sequence()
             seq = hist[-(seq_len - 1):] + [event]
 
-        if self.runtime.mode == "iwg-attn":
-            result = self.runtime.run_iwg_attn_inference(
+        if self.runtime.mode == "iwg-rg-cma":
+            result = self.runtime.run_iwg_rg_cma_inference(
                 track_id,
                 seq,
                 frame_id=event.frame_id,
@@ -549,8 +549,8 @@ class AgentGuardTrackerAdapter:
                 seq = hist[-(seq_len - 1):] + [event]
             sequences.append(seq)
 
-        if self.runtime.mode == "iwg-attn":
-            results = self.runtime.run_iwg_attn_batch_inference(
+        if self.runtime.mode == "iwg-rg-cma":
+            results = self.runtime.run_iwg_rg_cma_batch_inference(
                 [track_id for track_id, _event in items],
                 sequences,
                 frame_ids=[event.frame_id for _track_id, event in items],
@@ -616,8 +616,8 @@ class AgentGuardTrackerAdapter:
                 final_gate=gate_decision.final_gate,
                 correction=gate_decision.gate_correction,
                 correction_bound=(
-                    getattr(self.runtime.iwg_attn_model, "correction_bound", None)
-                    if self.runtime.mode == "iwg-attn"
+                    getattr(self.runtime.iwg_rg_cma_model, "correction_bound", None)
+                    if self.runtime.mode == "iwg-rg-cma"
                     else None
                 ),
             )
@@ -656,7 +656,7 @@ class AgentGuardTrackerAdapter:
             if self.runtime.mode == "full":
                 _event_buffer, window_buffer = self.runtime.get_or_create_buffer(track_id)
 
-        if not is_capture and self.runtime.mode == "iwg-attn":
+        if not is_capture and self.runtime.mode == "iwg-rg-cma":
             fb = self.runtime.feature_builder
             rd = self.reid_dim
             src_state = event.pre_update_state or event.frame_start_state
@@ -671,7 +671,7 @@ class AgentGuardTrackerAdapter:
             history = event_buffer.get_sequence()
             seq_len = self.runtime.iwg_context_size
             sequence = history[-(seq_len - 1) :] + [event]
-            result = self.runtime.run_iwg_attn_inference(
+            result = self.runtime.run_iwg_rg_cma_inference(
                 track_id,
                 sequence,
                 frame_id=event.frame_id,

@@ -14,8 +14,8 @@ from typing import Any
 from agentguard.data.compact_iwg_labels import (
     build_current_rollout_compact_labels_for_sequence,
 )
-from agentguard.datasets.iwg_attn_dataset import SPORTSMOT_TRAIN_SEQUENCES
-from agentguard.datasets.iwg_attn_dataset import SPORTSMOT_VAL_SEQUENCES
+from agentguard.datasets.iwg_rg_cma_dataset import SPORTSMOT_TRAIN_SEQUENCES
+from agentguard.datasets.iwg_rg_cma_dataset import SPORTSMOT_VAL_SEQUENCES
 
 
 def _sha256(path: Path) -> str:

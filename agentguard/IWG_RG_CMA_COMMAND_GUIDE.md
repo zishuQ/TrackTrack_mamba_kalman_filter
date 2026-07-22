@@ -26,7 +26,7 @@
 6. test 没有 GT，使用 `--use_post --skip-eval` 生成提交结果。
 7. `base` 是 Safe-Direct IWG 原始 gate；`final` 是经过 RG-CMA 修正后的 gate。正式 test 默认使用 `final`。
 8. 新训练必须指定新的 checkpoint 目录。代码检测到已有 `iwg_rg_cma_last.pt` 时会拒绝覆盖。
-9. `tracker-suffix` 必须使用新的、能辨认的短名字；`iwg-attn` 默认会追加 `_iwg_attn_<base|final>`，不要再把 `final_test` 重复写进 suffix。
+9. `tracker-suffix` 必须使用新的、能辨认的短名字；`iwg-rg-cma` 默认会追加 `_iwg_rg_cma_<base|final>`，不要再把 `final_test` 重复写进 suffix。
 
 训练示例直接从仓库根目录执行，使用 `./.venv/bin/python` 和 `outputs/...` 相对路径；tracker
 示例先进入 `3. Tracker`，使用 `../.venv/bin/python` 和 `../outputs/...`。不需要每次重新设置
@@ -38,7 +38,7 @@
 已有/新建六事件 dataset
         |
         v
-train_iwg_attn（CUDA）
+train_iwg_rg_cma（CUDA）
         |
         +--> checkpoints/iwg_rg_cma_epochXXX.pt
         |
@@ -58,7 +58,7 @@ run.py test（CPU、final、post、无 TrackEval）
 有两种开始训练的方法：
 
 - 首次准备某个数据集：运行仓库已有的一键脚本。脚本会准备 detection cache、event cache、标签和六事件 dataset，再训练。
-- dataset 已经存在：直接运行 `agentguard.cli train_iwg_attn`。这是重复实验或比较分片策略时的推荐方法，不会重复生成数据。
+- dataset 已经存在：直接运行 `agentguard.cli train_iwg_rg_cma`。这是重复实验或比较分片策略时的推荐方法，不会重复生成数据。
 
 ## 3. 术语说明
 
@@ -66,10 +66,10 @@ run.py test（CPU、final、post、无 TrackEval）
 
 | 参数 | 实际含义 | 是否使用 RG-CMA |
 | --- | --- | --- |
-| `--iwg-attn-output base` | Safe-Direct IWG 输出的原始 motion/appearance gate | 否 |
-| `--iwg-attn-output final` | `base gate + RG-CMA 有界 correction` | 是 |
+| `--iwg-rg-cma-output base` | Safe-Direct IWG 输出的原始 motion/appearance gate | 否 |
+| `--iwg-rg-cma-output final` | `base gate + RG-CMA 有界 correction` | 是 |
 
-同一个 combined checkpoint 同时包含 base IWG 和 RG-CMA。因此比较 base/final 时必须使用同一个 checkpoint，只改变 `--iwg-attn-output`。
+同一个 combined checkpoint 同时包含 base IWG 和 RG-CMA。因此比较 base/final 时必须使用同一个 checkpoint，只改变 `--iwg-rg-cma-output`。
 
 ### 3.2 raw 与 post
 
@@ -112,7 +112,7 @@ run.py test（CPU、final、post、无 TrackEval）
 | SportsMOT train+val，NSA future horizon=8，输入 context=6 | `outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_trainval_h8_v3_compact` |
 | SportsMOT train+val，NSA future horizon=8，输入 context=8 | `outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_trainval_future8_context8_v3_compact` |
 
-这里必须区分两个参数：`future horizon` 是 GT rollout 标签向未来看的帧数；`context size` 是网络和在线 tracker 实际输入的历史事件数。目录名中的 `h8` 只表示 future horizon=8，不能据此判断网络输入已经是 8 帧。构建输入数据时用 `build_iwg_attn_data --context-size 8`，训练时用 `train_iwg_attn --context-size 8`。
+这里必须区分两个参数：`future horizon` 是 GT rollout 标签向未来看的帧数；`context size` 是网络和在线 tracker 实际输入的历史事件数。目录名中的 `h8` 只表示 future horizon=8，不能据此判断网络输入已经是 8 帧。构建输入数据时用 `build_iwg_rg_cma_data --context-size 8`，训练时用 `train_iwg_rg_cma --context-size 8`。
 
 统一缓存位置：
 
@@ -222,7 +222,7 @@ set -euo pipefail
 mkdir -p outputs/agentguard/experiments/替换为新的实验名/checkpoints \
          outputs/agentguard/experiments/替换为新的实验名/logs
 
-./.venv/bin/python -u -m agentguard.cli train_iwg_attn \
+./.venv/bin/python -u -m agentguard.cli train_iwg_rg_cma \
   --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/替换为数据集目录 \
   --checkpoint-dir outputs/agentguard/experiments/替换为新的实验名/checkpoints \
   --device cuda \
@@ -251,7 +251,7 @@ set -euo pipefail
 mkdir -p outputs/agentguard/experiments/iwg_rg_cma_mot17_new_seed42_bs1024_100e/checkpoints \
          outputs/agentguard/experiments/iwg_rg_cma_mot17_new_seed42_bs1024_100e/logs
 
-./.venv/bin/python -u -m agentguard.cli train_iwg_attn \
+./.venv/bin/python -u -m agentguard.cli train_iwg_rg_cma \
   --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_jsonl_native_log \
   --checkpoint-dir outputs/agentguard/experiments/iwg_rg_cma_mot17_new_seed42_bs1024_100e/checkpoints \
   --device cuda --epochs 100 --batch-size 1024 --num-workers 4 \
@@ -272,7 +272,7 @@ set -euo pipefail
 mkdir -p outputs/agentguard/experiments/iwg_rg_cma_mot20_new_interleaved_seed42_bs1024_100e/checkpoints \
          outputs/agentguard/experiments/iwg_rg_cma_mot20_new_interleaved_seed42_bs1024_100e/logs
 
-./.venv/bin/python -u -m agentguard.cli train_iwg_attn \
+./.venv/bin/python -u -m agentguard.cli train_iwg_rg_cma \
   --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/MOT20/nsa_all_v3_compact \
   --checkpoint-dir outputs/agentguard/experiments/iwg_rg_cma_mot20_new_interleaved_seed42_bs1024_100e/checkpoints \
   --device cuda --epochs 100 --batch-size 1024 --num-workers 4 \
@@ -295,7 +295,7 @@ set -euo pipefail
 mkdir -p outputs/agentguard/experiments/iwg_rg_cma_sportsmot_train_new_interleaved_seed42_bs1024_100e/checkpoints \
          outputs/agentguard/experiments/iwg_rg_cma_sportsmot_train_new_interleaved_seed42_bs1024_100e/logs
 
-./.venv/bin/python -u -m agentguard.cli train_iwg_attn \
+./.venv/bin/python -u -m agentguard.cli train_iwg_rg_cma \
   --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_train_v3_compact \
   --checkpoint-dir outputs/agentguard/experiments/iwg_rg_cma_sportsmot_train_new_interleaved_seed42_bs1024_100e/checkpoints \
   --device cuda --epochs 100 --batch-size 1024 --num-workers 4 \
@@ -314,7 +314,7 @@ set -euo pipefail
 mkdir -p outputs/agentguard/experiments/iwg_rg_cma_sportsmot_trainval_new_interleaved_seed42_bs1024_200e/checkpoints \
          outputs/agentguard/experiments/iwg_rg_cma_sportsmot_trainval_new_interleaved_seed42_bs1024_200e/logs
 
-./.venv/bin/python -u -m agentguard.cli train_iwg_attn \
+./.venv/bin/python -u -m agentguard.cli train_iwg_rg_cma \
   --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_trainval_v3_compact \
   --checkpoint-dir outputs/agentguard/experiments/iwg_rg_cma_sportsmot_trainval_new_interleaved_seed42_bs1024_200e/checkpoints \
   --device cuda --epochs 200 --batch-size 1024 --num-workers 4 \
@@ -331,7 +331,7 @@ set -euo pipefail
 mkdir -p outputs/agentguard/experiments/iwg_rg_cma_mot20e050_to_mot17_new_finetune25_seed42_bs1024/checkpoints \
          outputs/agentguard/experiments/iwg_rg_cma_mot20e050_to_mot17_new_finetune25_seed42_bs1024/logs
 
-./.venv/bin/python -u -m agentguard.cli train_iwg_attn \
+./.venv/bin/python -u -m agentguard.cli train_iwg_rg_cma \
   --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_jsonl_native_log \
   --checkpoint-dir outputs/agentguard/experiments/iwg_rg_cma_mot20e050_to_mot17_new_finetune25_seed42_bs1024/checkpoints \
   --device cuda --epochs 25 --batch-size 1024 --num-workers 4 \
@@ -412,7 +412,7 @@ tail -f outputs/agentguard/experiments/<实验名>/checkpoints/training.log
 检查 checkpoint 能否严格加载，并在 dataset 上跑少量 batch：
 
 ```bash
-./.venv/bin/python -u -m agentguard.cli validate_iwg_attn_checkpoint \
+./.venv/bin/python -u -m agentguard.cli validate_iwg_rg_cma_checkpoint \
   --checkpoint outputs/agentguard/experiments/<实验名>/checkpoints/iwg_rg_cma_last.pt \
   --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/<数据集>/<数据版本> \
   --device cpu \
@@ -433,13 +433,13 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
 最短运行命令只需要下面这些参数：
 
 ```text
---agentguard-mode iwg-attn
+--agentguard-mode iwg-rg-cma
 --agentguard-checkpoint ../outputs/agentguard/experiments/<实验名>/checkpoints/iwg_rg_cma_epochXXX.pt
---iwg-attn-output final
+--iwg-rg-cma-output final
 --tracker-suffix "唯一名称"
 ```
 
-`--agentguard-checkpoint` 可以使用相对路径；它相对于当前 shell 工作目录解析。`--seed 10000`、`--kf-type nsa`、`--iwg-attn-output final`、`--agentguard-device cpu` 和 `--detection-cache-root ../outputs/agentguard/detection_cache` 都是当前默认值。resource log、`tee` 和 `--profile-every` 只是可选审计项。
+`--agentguard-checkpoint` 可以使用相对路径；它相对于当前 shell 工作目录解析。`--seed 10000`、`--kf-type nsa`、`--iwg-rg-cma-output final`、`--agentguard-device cpu` 和 `--detection-cache-root ../outputs/agentguard/detection_cache` 都是当前默认值。resource log、`tee` 和 `--profile-every` 只是可选审计项。
 
 参数说明：
 
@@ -448,12 +448,12 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
 | `--dataset` | `MOT17`、`MOT20` 或 `SportsMOT` |
 | `--mode` | 选择 train/all、val 或 test 对应的数据和检测缓存 |
 | `--sequences` | 可选；只跑指定序列。MOT17/MOT20 的 all 示例显式列出，便于审计 |
-| `--agentguard-mode iwg-attn` | 启用 IWG + RG-CMA combined checkpoint |
+| `--agentguard-mode iwg-rg-cma` | 启用 IWG + RG-CMA combined checkpoint |
 | `--agentguard-checkpoint` | 单个 `.pt` 权重文件路径，可以是相对于 `3. Tracker` 的 `../outputs/...`；当前不接受 checkpoint 目录 |
-| `--iwg-attn-output` | `base` 或 `final` |
+| `--iwg-rg-cma-output` | `base` 或 `final` |
 | `--agentguard-device cpu` | AgentGuard 小模型在 tracker 内逐事件推理；CPU 通常比频繁 CPU/GPU 同步更合适 |
 | `--tracker-suffix` | 决定输出目录名，务必唯一 |
-| `--legacy-output-naming` | 可选；仅旧 pipeline 使用，恢复历史的 `_agentguard_iwg_attn_...` 目录拼法 |
+| `--legacy-output-naming` | 可选；仅旧 pipeline 使用，恢复历史的 `_agentguard_iwg_rg_cma_...` 目录拼法 |
 | `--print-per-sequence-metrics` | 有 GT 时除总指标外打印每序列指标 |
 | `--use_post` | 生成并使用 post 结果；只给 test 命令使用 |
 | `--skip-eval` | 跳过 TrackEval；test 没有 GT 时使用 |
@@ -472,10 +472,10 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
   --sequences \
     MOT17-02-FRCNN MOT17-04-FRCNN MOT17-05-FRCNN \
     MOT17-09-FRCNN MOT17-10-FRCNN MOT17-11-FRCNN MOT17-13-FRCNN \
-  --agentguard-mode iwg-attn \
+  --agentguard-mode iwg-rg-cma \
   --agentguard-checkpoint \
     "../outputs/agentguard/experiments/iwg_rg_cma_v1_trainall_seed42_bs1024_native_log/checkpoints/iwg_rg_cma_epoch100.pt" \
-  --iwg-attn-output final \
+  --iwg-rg-cma-output final \
   --tracker-suffix mot17_e100_final_all_raw \
   --print-per-sequence-metrics
 ```
@@ -487,10 +487,10 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
 "../.venv/bin/python" -u run.py \
   --dataset MOT20 --mode all \
   --sequences MOT20-01 MOT20-02 MOT20-03 MOT20-05 \
-  --agentguard-mode iwg-attn \
+  --agentguard-mode iwg-rg-cma \
   --agentguard-checkpoint \
     "../outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_interleaved_shard1x20_seed42_bs1024/checkpoints/iwg_rg_cma_epoch100.pt" \
-  --iwg-attn-output final \
+  --iwg-rg-cma-output final \
   --tracker-suffix mot20_interleaved_e100_final_all_raw \
   --print-per-sequence-metrics
 ```
@@ -501,10 +501,10 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
 cd "/home/shang/workspace/TrackTrack/3. Tracker"
 "../.venv/bin/python" -u run.py \
   --dataset SportsMOT --mode val \
-  --agentguard-mode iwg-attn \
+  --agentguard-mode iwg-rg-cma \
   --agentguard-checkpoint \
     "../outputs/agentguard/experiments/iwg_rg_cma_v1_sportsmot_trainval_seed42_bs1024_interleaved_shard1x20_200e/checkpoints/iwg_rg_cma_epoch200.pt" \
-  --iwg-attn-output final \
+  --iwg-rg-cma-output final \
   --tracker-suffix sportsmot_trainval_e200_final_val_raw \
   --print-per-sequence-metrics
 ```
@@ -521,10 +521,10 @@ for GATE in base final; do
   "../.venv/bin/python" -u run.py \
     --dataset MOT20 --mode all \
     --sequences MOT20-01 MOT20-02 MOT20-03 MOT20-05 \
-    --agentguard-mode iwg-attn \
+    --agentguard-mode iwg-rg-cma \
     --agentguard-checkpoint \
       "../outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_interleaved_shard1x20_seed42_bs1024/checkpoints/iwg_rg_cma_epoch100.pt" \
-    --iwg-attn-output "$GATE" \
+    --iwg-rg-cma-output "$GATE" \
     --tracker-suffix "mot20_interleaved_e100_${GATE}_all_raw" \
     --print-per-sequence-metrics
 done
@@ -537,7 +537,7 @@ done
 test 命令统一使用：
 
 ```text
---iwg-attn-output final
+--iwg-rg-cma-output final
 --use_post
 --skip-eval
 ```
@@ -552,10 +552,10 @@ test 命令统一使用：
 cd "/home/shang/workspace/TrackTrack/3. Tracker"
 "../.venv/bin/python" -u run.py \
   --dataset MOT17 --mode test \
-  --agentguard-mode iwg-attn \
+  --agentguard-mode iwg-rg-cma \
   --agentguard-checkpoint \
     "../outputs/agentguard/experiments/iwg_rg_cma_mot20e050_to_mot17_finetune25_cachefix_seed42_bs1024/checkpoints/iwg_rg_cma_epoch025.pt" \
-  --iwg-attn-output final \
+  --iwg-rg-cma-output final \
   --tracker-suffix mot20e050_mot17_finetune25 \
   --use_post --skip-eval
 ```
@@ -563,7 +563,7 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
 post 结果目录：
 
 ```text
-outputs/3. track/mot17_test_0.80_mot20e050_mot17_finetune25_iwg_attn_final_post
+outputs/3. track/mot17_test_0.80_mot20e050_mot17_finetune25_iwg_rg_cma_final_post
 ```
 
 ### 12.2 MOT20 test final + post
@@ -574,10 +574,10 @@ outputs/3. track/mot17_test_0.80_mot20e050_mot17_finetune25_iwg_attn_final_post
 cd "/home/shang/workspace/TrackTrack/3. Tracker"
 "../.venv/bin/python" -u run.py \
   --dataset MOT20 --mode test \
-  --agentguard-mode iwg-attn \
+  --agentguard-mode iwg-rg-cma \
   --agentguard-checkpoint \
     "../outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_trainall_seed42_bs1024_shard20x2/checkpoints/iwg_rg_cma_epoch050.pt" \
-  --iwg-attn-output final \
+  --iwg-rg-cma-output final \
   --tracker-suffix mot20_old_e050 \
   --use_post --skip-eval
 ```
@@ -585,7 +585,7 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
 post 结果目录：
 
 ```text
-outputs/3. track/mot20_test_0.80_mot20_old_e050_iwg_attn_final_post
+outputs/3. track/mot20_test_0.80_mot20_old_e050_iwg_rg_cma_final_post
 ```
 
 ### 12.3 SportsMOT test final + post
@@ -596,10 +596,10 @@ outputs/3. track/mot20_test_0.80_mot20_old_e050_iwg_attn_final_post
 cd "/home/shang/workspace/TrackTrack/3. Tracker"
 "../.venv/bin/python" -u run.py \
   --dataset SportsMOT --mode test \
-  --agentguard-mode iwg-attn \
+  --agentguard-mode iwg-rg-cma \
   --agentguard-checkpoint \
     "../outputs/agentguard/experiments/iwg_rg_cma_v1_sportsmot_trainval_seed42_bs1024_interleaved_shard1x20_200e/checkpoints/iwg_rg_cma_epoch200.pt" \
-  --iwg-attn-output final \
+  --iwg-rg-cma-output final \
   --tracker-suffix trainval_interleaved_e200 \
   --use_post --skip-eval
 ```
@@ -607,7 +607,7 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
 post 结果目录：
 
 ```text
-outputs/3. track/sportsmot_test_0.80_trainval_interleaved_e200_iwg_attn_final_post
+outputs/3. track/sportsmot_test_0.80_trainval_interleaved_e200_iwg_rg_cma_final_post
 ```
 
 ### 12.4 MOT20 权重迁移到 MOT17 test
@@ -619,10 +619,10 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
 "../.venv/bin/python" -u run.py \
   --dataset MOT17 --mode test \
   --kf-type nsa \
-  --agentguard-mode iwg-attn \
+  --agentguard-mode iwg-rg-cma \
   --agentguard-checkpoint \
     "../outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_trainall_seed42_bs1024_shard20x2/checkpoints/iwg_rg_cma_epoch050.pt" \
-  --iwg-attn-output final \
+  --iwg-rg-cma-output final \
   --tracker-suffix mot20_nsa_old_e050_to_mot17 \
   --use_post --skip-eval
 ```
@@ -630,27 +630,27 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
 结果目录分别是：
 
 ```text
-outputs/3. track/mot17_test_0.80_mot20_nsa_old_e050_to_mot17_iwg_attn_final_post
+outputs/3. track/mot17_test_0.80_mot20_nsa_old_e050_to_mot17_iwg_rg_cma_final_post
 ```
 
 ## 13. 输出目录命名规则
 
-`iwg-attn` 的默认形式：
+`iwg-rg-cma` 的默认形式：
 
 ```text
-outputs/3. track/<检测前缀>_0.80_<tracker-suffix>_iwg_attn_<base|final>
+outputs/3. track/<检测前缀>_0.80_<tracker-suffix>_iwg_rg_cma_<base|final>
 ```
 
 加 `--use_post` 后，结果目录末尾增加 `_post`：
 
 ```text
-outputs/3. track/<检测前缀>_0.80_<tracker-suffix>_iwg_attn_<base|final>_post
+outputs/3. track/<检测前缀>_0.80_<tracker-suffix>_iwg_rg_cma_<base|final>_post
 ```
 
 例如 `--tracker-suffix mot20_nsa_old_e050_to_mot17` 会得到：
 
 ```text
-mot17_test_0.80_mot20_nsa_old_e050_to_mot17_iwg_attn_final_post
+mot17_test_0.80_mot20_nsa_old_e050_to_mot17_iwg_rg_cma_final_post
 ```
 
 旧脚本若显式传 `--legacy-output-naming`，才会继续使用带 `agentguard_` 的历史形式。
@@ -670,7 +670,7 @@ MOT17 tracker 只实际运行 7 个 FRCNN test 序列。提交时需要复制成
 ```bash
 set -euo pipefail
 ./.venv/bin/python scripts/agentguard/package_mot17_submission.py \
-  --source-dir outputs/3. track/mot17_test_0.80_mot20e050_mot17_finetune25_iwg_attn_final_post \
+  --source-dir outputs/3. track/mot17_test_0.80_mot20e050_mot17_finetune25_iwg_rg_cma_final_post \
   --data-root /home/shang/datasets/MOT17/test \
   --output-zip outputs/agentguard/experiments/iwg_rg_cma_mot20e050_to_mot17_finetune25_cachefix_seed42_bs1024/MOT17_test_final_post.zip \
   --manifest outputs/agentguard/experiments/iwg_rg_cma_mot20e050_to_mot17_finetune25_cachefix_seed42_bs1024/MOT17_test_final_post_manifest.json
@@ -714,7 +714,7 @@ unzip -Z1 "outputs/agentguard/experiments/替换为实验名/submission_final_po
 
 MOT20 新分片方式的权重已经存在，不需要重新准备数据或重新训练。其配置是 `epochs=100`、`batch_size=1024`、`memory_shards=5`、`epochs_per_shard=1`、`shard_cycles=20`，等效完整数据访问 20 轮。epoch100 的 `final` 指标为：raw `HOTA=0.791406, MOTA=0.934669, IDF1=0.919926, DetA=0.806762, AssA=0.776905`；post `HOTA=0.794985, MOTA=0.938744, IDF1=0.921030, DetA=0.810640, AssA=0.780232`。
 
-已提交的 MOT20 test ZIP `outputs/3. track/mot20_test_0.80_best_mot20_interleaved_e100_final_test_agentguard_iwg_attn_final_post/mot20_test_0.80_best_interleaved_e100_iwg_attn_final_post_66.12.zip` 明确标记为 `interleaved_e100`，所以你记得的 66.12 确实来自 epoch100。公平对比旧方式时，应使用同一新方式实验的 `checkpoints/iwg_rg_cma_epoch050.pt`。
+已提交的 MOT20 test ZIP `outputs/3. track/mot20_test_0.80_best_mot20_interleaved_e100_final_test_agentguard_iwg_rg_cma_final_post/mot20_test_0.80_best_interleaved_e100_iwg_rg_cma_final_post_66.12.zip` 明确标记为 `interleaved_e100`，所以你记得的 66.12 确实来自 epoch100。公平对比旧方式时，应使用同一新方式实验的 `checkpoints/iwg_rg_cma_epoch050.pt`。
 
 选择权重时，不要因为文件名是 `last` 就默认它最好。应根据 raw validation 选择 epoch；train+val 最终刷榜没有独立 validation 时，才结合已完成的 test 结果选择。
 
@@ -733,7 +733,7 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
 错误类似：
 
 ```text
-formal IWG-attn training requires a new checkpoint directory
+formal IWG RG-CMA training requires a new checkpoint directory
 ```
 
 这是保护机制。给 `RUN` 换一个新实验名，不要删除旧权重后在原目录上强行重跑。
@@ -774,14 +774,14 @@ Running <dataset> <mode> with nsa Kalman filter...
 
 ### 17.1 不使用变量的最短 test 命令
 
-`run.py` 当前默认值已经是 `seed=10000`、`kf-type=nsa`、`iwg-attn-output=final`、`agentguard-device=cpu`，并且从 `3. Tracker` 目录运行时会自动使用 `../outputs/agentguard/detection_cache`。因此 test 可以直接写成：
+`run.py` 当前默认值已经是 `seed=10000`、`kf-type=nsa`、`iwg-rg-cma-output=final`、`agentguard-device=cpu`，并且从 `3. Tracker` 目录运行时会自动使用 `../outputs/agentguard/detection_cache`。因此 test 可以直接写成：
 
 ```bash
 cd "/home/shang/workspace/TrackTrack/3. Tracker"
 
 "../.venv/bin/python" -u run.py \
   --dataset MOT17 --mode test \
-  --agentguard-mode iwg-attn \
+  --agentguard-mode iwg-rg-cma \
   --agentguard-checkpoint \
     "../outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_trainall_seed42_bs1024/checkpoints/iwg_rg_cma_epoch050.pt" \
   --tracker-suffix mot20_nsa_old_e050_to_mot17 \
@@ -795,7 +795,7 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
 
 "../.venv/bin/python" -u run.py \
   --dataset MOT17 --mode test \
-  --agentguard-mode iwg-attn \
+  --agentguard-mode iwg-rg-cma \
   --agentguard-checkpoint \
     "../outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_trainall_seed42_bs1024_shard20x2/checkpoints/iwg_rg_cma_epoch050.pt" \
   --tracker-suffix mot20_nsa_old_e050_to_mot17 \
@@ -808,7 +808,7 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
 
 ```bash
 cd "/home/shang/workspace/TrackTrack"
-./.venv/bin/python -u -m agentguard.cli train_iwg_attn \
+./.venv/bin/python -u -m agentguard.cli train_iwg_rg_cma \
   --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/替换为数据集目录 \
   --checkpoint-dir outputs/agentguard/experiments/替换为新的实验名/checkpoints \
   --device cuda --epochs 100 --batch-size 1024 --num-workers 4 \
@@ -824,10 +824,10 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
 "../.venv/bin/python" -u run.py \
   --dataset MOT20 --mode all \
   --sequences MOT20-01 MOT20-02 MOT20-03 MOT20-05 \
-  --agentguard-mode iwg-attn \
+  --agentguard-mode iwg-rg-cma \
   --agentguard-checkpoint \
     "../outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_interleaved_shard1x20_seed42_bs1024/checkpoints/iwg_rg_cma_epoch100.pt" \
-  --iwg-attn-output final \
+  --iwg-rg-cma-output final \
   --tracker-suffix mot20_interleaved_e100_final_all_raw \
   --print-per-sequence-metrics
 ```
@@ -838,10 +838,10 @@ cd "/home/shang/workspace/TrackTrack/3. Tracker"
 cd "/home/shang/workspace/TrackTrack/3. Tracker"
 "../.venv/bin/python" -u run.py \
   --dataset MOT20 --mode test \
-  --agentguard-mode iwg-attn \
+  --agentguard-mode iwg-rg-cma \
   --agentguard-checkpoint \
     "../outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_interleaved_shard1x20_seed42_bs1024/checkpoints/iwg_rg_cma_epoch100.pt" \
-  --iwg-attn-output final \
+  --iwg-rg-cma-output final \
   --tracker-suffix mot20_interleaved_e100 \
   --use_post --skip-eval
 ```

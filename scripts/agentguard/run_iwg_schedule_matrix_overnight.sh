@@ -141,7 +141,7 @@ prepare_sportsmot_data() {
 
   stage "SportsMOT data: build/verify streaming six-event dataset"
   if [[ ! -f "${SPORTS_DATASET_DIR}/metadata.json" ]]; then
-    "${PY}" -m agentguard.cli build_iwg_attn_data \
+    "${PY}" -m agentguard.cli build_iwg_rg_cma_data \
       --dataset SportsMOT --mode train \
       --event-cache-root "${EVENT_CACHE_ROOT}" \
       --detection-cache-root "${DETECTION_CACHE_ROOT}" \
@@ -149,7 +149,7 @@ prepare_sportsmot_data() {
       --max-frame-gap 30 \
       2>&1 | tee "${SPORTS_DATA_LOG_ROOT}/logs/build.log"
   else
-    "${PY}" -c "from agentguard.datasets.iwg_attn_dataset import StreamingIWGAttnDataset; d=StreamingIWGAttnDataset('${SPORTS_DATASET_DIR}', max_samples=1); print(d.metadata['dataset_sha256'], d.metadata['num_train_samples']); d.close()" \
+    "${PY}" -c "from agentguard.datasets.iwg_rg_cma_dataset import StreamingIWGRGCMADataset; d=StreamingIWGRGCMADataset('${SPORTS_DATASET_DIR}', max_samples=1); print(d.metadata['dataset_sha256'], d.metadata['num_train_samples']); d.close()" \
       2>&1 | tee "${SPORTS_DATA_LOG_ROOT}/logs/build.log"
   fi
 }
@@ -171,7 +171,7 @@ train_schedule() {
   if [[ ! -f "${checkpoint}" ]]; then
     stage "Train ${run_root##*/}: ${schedule_name}"
     local command=(
-      "${PY}" -m agentguard.cli train_iwg_attn
+      "${PY}" -m agentguard.cli train_iwg_rg_cma
       --dataset-dir "${dataset_dir}" --checkpoint-dir "${checkpoint_dir}"
       --device cuda --epochs 100 --batch-size 1024 --num-workers 4
       --lr 0.0001 --weight-decay 0.0001 --warmup-epochs 1
@@ -185,7 +185,7 @@ train_schedule() {
   else
     stage "Train ${run_root##*/}: checkpoint already complete, skip"
   fi
-  "${PY}" -m agentguard.cli validate_iwg_attn_checkpoint \
+  "${PY}" -m agentguard.cli validate_iwg_rg_cma_checkpoint \
     --checkpoint "${checkpoint}" --dataset-dir "${dataset_dir}" \
     --device cpu --max-batches 8 --output "${run_root}/checkpoint_validation.json" \
     2>&1 | tee "${run_root}/logs/checkpoint_validation.log"
@@ -219,7 +219,7 @@ validate_schedule() {
     fi
     for gate in base final; do
       local suffix="${run_name}_e${tag}_${gate}_validation"
-      local tracker_name="${result_prefix}_0.80_${suffix}_agentguard_iwg_attn_${gate}"
+      local tracker_name="${result_prefix}_0.80_${suffix}_agentguard_iwg_rg_cma_${gate}"
       local raw_log="${run_root}/logs/eval_e${tag}_${gate}_raw.log"
       local post_log="${run_root}/logs/eval_e${tag}_${gate}_post.log"
       if [[ -s "${raw_log}" && -s "${post_log}" ]]; then
@@ -230,8 +230,8 @@ validate_schedule() {
       local command=(
         "${PY}" run.py --dataset "${dataset}" --mode "${mode}"
         --sequences "${sequences[@]}" --seed 10000
-        --agentguard-mode iwg-attn --legacy-output-naming --agentguard-checkpoint "${checkpoint}"
-        --iwg-attn-output "${gate}" --agentguard-device cpu
+        --agentguard-mode iwg-rg-cma --legacy-output-naming --agentguard-checkpoint "${checkpoint}"
+        --iwg-rg-cma-output "${gate}" --agentguard-device cpu
         --detection-cache-root "${DETECTION_CACHE_ROOT}"
         --tracker-suffix "${suffix}" --use_post --skip-eval
         --resource-log "${run_root}/resource_e${tag}_${gate}.jsonl"

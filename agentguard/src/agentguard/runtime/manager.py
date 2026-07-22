@@ -35,29 +35,29 @@ class AgentGuardRuntime:
         iwg_model: Optional[torch.nn.Module] = None,
         tgr_model: Optional[torch.nn.Module] = None,
         device: str = "cpu",
-        iwg_attn_model: Optional[torch.nn.Module] = None,
+        iwg_rg_cma_model: Optional[torch.nn.Module] = None,
     ):
         self.config = config
         self.mode = config.get("mode", "off")
         self.device = device
         self.iwg = iwg_model
         self.tgr = tgr_model
-        self.iwg_attn_model = iwg_attn_model
-        if self.mode == "iwg-attn":
-            if self.iwg_attn_model is None:
-                raise RuntimeError("iwg-attn mode requires a combined IWG RG-CMA model")
+        self.iwg_rg_cma_model = iwg_rg_cma_model
+        if self.mode == "iwg-rg-cma":
+            if self.iwg_rg_cma_model is None:
+                raise RuntimeError("iwg-rg-cma mode requires a combined IWG RG-CMA model")
             if self.tgr is not None:
-                raise RuntimeError("iwg-attn mode must not instantiate TGR")
-            self.iwg = self.iwg_attn_model.iwg
+                raise RuntimeError("iwg-rg-cma mode must not instantiate TGR")
+            self.iwg = self.iwg_rg_cma_model.iwg
         if self.iwg is not None:
             self.iwg.to(device)
             self.iwg.eval()
         if self.tgr is not None:
             self.tgr.to(device)
             self.tgr.eval()
-        if self.iwg_attn_model is not None:
-            self.iwg_attn_model.to(device)
-            self.iwg_attn_model.eval()
+        if self.iwg_rg_cma_model is not None:
+            self.iwg_rg_cma_model.to(device)
+            self.iwg_rg_cma_model.eval()
 
         # Per-track state
         self.event_buffers: Dict[int, EventBuffer] = {}
@@ -76,24 +76,24 @@ class AgentGuardRuntime:
         )
         self.tgr_frame_stride = max(int(config.get("tgr_frame_stride", 1) or 1), 1)
         self._finalize_frame_index = 0
-        self.iwg_attn_output = str(config.get("iwg_attn_output", "final"))
-        if self.iwg_attn_output not in {"base", "final"}:
-            raise ValueError("iwg_attn_output must be 'base' or 'final'")
+        self.iwg_rg_cma_output = str(config.get("iwg_rg_cma_output", "final"))
+        if self.iwg_rg_cma_output not in {"base", "final"}:
+            raise ValueError("iwg_rg_cma_output must be 'base' or 'final'")
         self.iwg_context_size = int(config.get("iwg_context_size", 6))
         if self.iwg_context_size < 1:
             raise ValueError(
                 f"iwg_context_size must be positive, got {self.iwg_context_size}"
             )
-        if self.mode == "iwg-attn":
+        if self.mode == "iwg-rg-cma":
             model_context_size = int(
-                getattr(self.iwg_attn_model, "context_size", self.iwg_context_size)
+                getattr(self.iwg_rg_cma_model, "context_size", self.iwg_context_size)
             )
             if model_context_size != self.iwg_context_size:
                 raise ValueError(
                     "runtime/model context_size mismatch: "
                     f"{self.iwg_context_size} != {model_context_size}"
                 )
-        self.iwg_attn_max_frame_gap = int(config.get("iwg_attn_max_frame_gap", 30))
+        self.iwg_rg_cma_max_frame_gap = int(config.get("iwg_rg_cma_max_frame_gap", 30))
 
         # Statistics
         self.stats = RuntimeStatistics()
@@ -159,12 +159,12 @@ class AgentGuardRuntime:
             )
         return self.event_buffers[track_id]
 
-    def _reset_iwg_attn_history_for_frame(self, track_id: int, frame_id: int) -> bool:
+    def _reset_iwg_rg_cma_history_for_frame(self, track_id: int, frame_id: int) -> bool:
         event_buffer = self.event_buffers.get(track_id)
         if event_buffer is None or not event_buffer.events:
             return False
         gap = int(frame_id) - int(event_buffer.events[-1].frame_id)
-        if 0 < gap <= self.iwg_attn_max_frame_gap:
+        if 0 < gap <= self.iwg_rg_cma_max_frame_gap:
             return False
         event_buffer.clear()
         return True
@@ -218,8 +218,8 @@ class AgentGuardRuntime:
             final_gate=gate_decision.final_gate,
             correction=gate_decision.gate_correction,
             correction_bound=(
-                getattr(self.iwg_attn_model, "correction_bound", None)
-                if self.mode == "iwg-attn"
+                getattr(self.iwg_rg_cma_model, "correction_bound", None)
+                if self.mode == "iwg-rg-cma"
                 else None
             ),
         )
@@ -563,7 +563,7 @@ class AgentGuardRuntime:
             for i in range(len(event_sequences))
         ]
 
-    def run_iwg_attn_inference(
+    def run_iwg_rg_cma_inference(
         self,
         track_id: int,
         events_sequence: List[Optional[TrackEvent]],
@@ -571,14 +571,14 @@ class AgentGuardRuntime:
         frame_id: int,
         has_detection: bool,
     ) -> Dict[str, np.ndarray]:
-        return self.run_iwg_attn_batch_inference(
+        return self.run_iwg_rg_cma_batch_inference(
             [track_id],
             [events_sequence],
             frame_ids=[frame_id],
             has_detection=[has_detection],
         )[0]
 
-    def run_iwg_attn_batch_inference(
+    def run_iwg_rg_cma_batch_inference(
         self,
         track_ids: List[int],
         event_sequences: List[List[Optional[TrackEvent]]],
@@ -586,29 +586,29 @@ class AgentGuardRuntime:
         frame_ids: List[int],
         has_detection: List[bool],
     ) -> List[Dict[str, np.ndarray]]:
-        if self.mode != "iwg-attn" or self.iwg_attn_model is None:
-            raise RuntimeError("run_iwg_attn_batch_inference requires iwg-attn mode")
+        if self.mode != "iwg-rg-cma" or self.iwg_rg_cma_model is None:
+            raise RuntimeError("run_iwg_rg_cma_batch_inference requires iwg-rg-cma mode")
         size = len(track_ids)
         if not (
             len(event_sequences) == len(frame_ids) == len(has_detection) == size
         ):
-            raise ValueError("iwg-attn batch inputs must have equal lengths")
+            raise ValueError("iwg-rg-cma batch inputs must have equal lengths")
         if size == 0:
             return []
         if len(set(track_ids)) != size:
-            raise ValueError("iwg-attn batch cannot contain duplicate track ids")
+            raise ValueError("iwg-rg-cma batch cannot contain duplicate track ids")
         if self.feature_builder is None:
-            raise RuntimeError("iwg-attn runtime feature builder is not initialized")
+            raise RuntimeError("iwg-rg-cma runtime feature builder is not initialized")
 
         event_sequences = list(event_sequences)
         for index, (track_id, frame_id) in enumerate(zip(track_ids, frame_ids)):
-            if self._reset_iwg_attn_history_for_frame(track_id, frame_id):
+            if self._reset_iwg_rg_cma_history_for_frame(track_id, frame_id):
                 sequence = event_sequences[index]
                 if not sequence or sequence[-1] is None:
-                    raise ValueError("iwg-attn sequence must end with the current event")
+                    raise ValueError("iwg-rg-cma sequence must end with the current event")
                 event_sequences[index] = [None] * (len(sequence) - 1) + [sequence[-1]]
 
-        device = next(self.iwg_attn_model.parameters()).device
+        device = next(self.iwg_rg_cma_model.parameters()).device
         inputs = self.feature_builder.build_iwg_batch_input(event_sequences)
         padding = inputs["mask"].to(device, non_blocking=True)
         detection = torch.zeros_like(padding)
@@ -622,7 +622,7 @@ class AgentGuardRuntime:
             first_valid = int((~padding[batch_index]).nonzero()[0, 0])
             reset[batch_index, first_valid] = True
         with torch.inference_mode():
-            outputs = self.iwg_attn_model(
+            outputs = self.iwg_rg_cma_model(
                 inputs["track_feats"].to(device, non_blocking=True),
                 inputs["det_feats"].to(device, non_blocking=True),
                 inputs["scalar_feats"].to(device, non_blocking=True),
@@ -633,7 +633,7 @@ class AgentGuardRuntime:
         base = outputs["base_gate"].float().cpu().numpy()
         final = outputs["refined_gate"].float().cpu().numpy()
         correction = outputs["gate_correction"].float().cpu().numpy()
-        applied = base if self.iwg_attn_output == "base" else final
+        applied = base if self.iwg_rg_cma_output == "base" else final
         policy = outputs["policy_probs"].float().cpu().numpy()
         cue = outputs["cue"].float().cpu().numpy()
         risk = outputs["risk"].float().cpu().numpy()

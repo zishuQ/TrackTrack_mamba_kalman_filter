@@ -351,7 +351,7 @@ def collect_rows() -> list[dict[str, Any]]:
     rows.append(build_row(
         mot20_new, epoch=100, gate="final", processing="post", split="test",
         metrics={"HOTA": 0.6612},
-        source="本地 ZIP 文件名：mot20_test_0.80_best_interleaved_e100_iwg_attn_final_post_66.12.zip",
+        source="本地 ZIP 文件名：mot20_test_0.80_best_interleaved_e100_iwg_rg_cma_final_post_66.12.zip",
         note="官方 test 其余四项未保存在本地。",
     ))
 
@@ -407,7 +407,7 @@ def collect_rows() -> list[dict[str, Any]]:
     rows.append(build_row(
         sports_trainval, epoch=200, gate="final", processing="post", split="test",
         metrics={"HOTA": 0.7589},
-        source="本地 ZIP 文件名：sportsmot_test_0.80_trainval_200e_iwg_attn_final_post_75.89.zip",
+        source="本地 ZIP 文件名：sportsmot_test_0.80_trainval_200e_iwg_rg_cma_final_post_75.89.zip",
         note="SportsMOT 当前最佳 test 权重；其余四项未保存在本地。",
     ))
 

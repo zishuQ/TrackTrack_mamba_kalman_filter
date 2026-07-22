@@ -34,12 +34,12 @@ def _event(track_id: int, frame_id: int, *, matched: bool = True) -> TrackEvent:
 def _runtime(model: IWGRGCMA, output: str = "final") -> AgentGuardRuntime:
     runtime = AgentGuardRuntime(
         {
-            "mode": "iwg-attn",
-            "iwg_attn_output": output,
-            "iwg_attn_max_frame_gap": 30,
+            "mode": "iwg-rg-cma",
+            "iwg_rg_cma_output": output,
+            "iwg_rg_cma_max_frame_gap": 30,
         },
         device="cpu",
-        iwg_attn_model=model,
+        iwg_rg_cma_model=model,
     )
     runtime.init_feature_builder(reid_dim=16)
     return runtime
@@ -49,20 +49,20 @@ def _sequence(event: TrackEvent) -> list[TrackEvent | None]:
     return [None, None, None, None, None, event]
 
 
-def test_iwg_attn_single_batch_parity_unmatched_and_no_second_buffer():
+def test_iwg_rg_cma_single_batch_parity_unmatched_and_no_second_buffer():
     torch.manual_seed(29)
     template = IWGRGCMA(16).eval()
     batch_runtime = _runtime(copy.deepcopy(template))
     single_runtime = _runtime(copy.deepcopy(template))
     events = [_event(1, 10), _event(2, 10)]
-    batched = batch_runtime.run_iwg_attn_batch_inference(
+    batched = batch_runtime.run_iwg_rg_cma_batch_inference(
         [1, 2],
         [_sequence(event) for event in events],
         frame_ids=[10, 10],
         has_detection=[True, True],
     )
     singles = [
-        single_runtime.run_iwg_attn_inference(
+        single_runtime.run_iwg_rg_cma_inference(
             event.track_id,
             _sequence(event),
             frame_id=event.frame_id,
@@ -86,7 +86,7 @@ def test_iwg_attn_single_batch_parity_unmatched_and_no_second_buffer():
                     batch_item[key], single_item[key], atol=2e-6, rtol=0.0
                 )
     unmatched = _event(3, 10, matched=False)
-    result = batch_runtime.run_iwg_attn_inference(
+    result = batch_runtime.run_iwg_rg_cma_inference(
         3, _sequence(unmatched), frame_id=10, has_detection=False
     )
     np.testing.assert_array_equal(result["gate"], [0.0, 0.0])
@@ -111,7 +111,7 @@ def test_offline_six_event_outputs_match_online_streaming_and_gap_reset():
         event_buffer = runtime.get_or_create_event_buffer(9)
         sequence = event_buffer.get_sequence()[-5:] + [event]
         online.append(
-            runtime.run_iwg_attn_inference(
+            runtime.run_iwg_rg_cma_inference(
                 9,
                 sequence,
                 frame_id=event.frame_id,
@@ -145,7 +145,7 @@ def test_offline_six_event_outputs_match_online_streaming_and_gap_reset():
         )
 
     stale = _event(9, 100)
-    runtime.run_iwg_attn_inference(
+    runtime.run_iwg_rg_cma_inference(
         9,
         runtime.event_buffers[9].get_sequence()[-5:] + [stale],
         frame_id=100,

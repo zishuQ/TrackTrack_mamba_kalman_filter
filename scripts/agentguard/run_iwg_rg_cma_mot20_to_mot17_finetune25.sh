@@ -28,7 +28,7 @@ if [[ -e "${RUN_ROOT}/running" || -e "${LAST_CHECKPOINT}" ]]; then
 fi
 
 "${PY}" -c \
-  "from agentguard.datasets.iwg_attn_dataset import StreamingIWGAttnDataset; d=StreamingIWGAttnDataset(r'${DATASET_DIR}', max_samples=1); assert d.index_format == 'jsonl_v1', d.index_format; r=d._reader(d.metadata['train_sequences'][0]); assert r.max_cached_shards is None, r.max_cached_shards; print('MOT17 event-shard cache: unbounded resident (cachefix active)'); d.close()"
+  "from agentguard.datasets.iwg_rg_cma_dataset import StreamingIWGRGCMADataset; d=StreamingIWGRGCMADataset(r'${DATASET_DIR}', max_samples=1); assert d.index_format == 'jsonl_v1', d.index_format; r=d._reader(d.metadata['train_sequences'][0]); assert r.max_cached_shards is None, r.max_cached_shards; print('MOT17 event-shard cache: unbounded resident (cachefix active)'); d.close()"
 
 mkdir -p "${CHECKPOINT_DIR}" "${LOG_DIR}" "${PROVENANCE_DIR}"
 touch "${RUN_ROOT}/running"
@@ -52,7 +52,7 @@ sha256sum "${INIT_CHECKPOINT}" > "${PROVENANCE_DIR}/initial_checkpoint.sha256"
 sha256sum "${DATASET_DIR}/metadata.json" > "${PROVENANCE_DIR}/dataset_metadata.sha256"
 
 TRAIN_COMMAND=(
-  "${PY}" -m agentguard.cli train_iwg_attn
+  "${PY}" -m agentguard.cli train_iwg_rg_cma
   --dataset-dir "${DATASET_DIR}"
   --checkpoint-dir "${CHECKPOINT_DIR}"
   --device cuda
@@ -73,7 +73,7 @@ printf '%q ' "${TRAIN_COMMAND[@]}" > "${PROVENANCE_DIR}/train.command.txt"
 printf '\n' >> "${PROVENANCE_DIR}/train.command.txt"
 "${TRAIN_COMMAND[@]}" 2>&1 | tee "${LOG_DIR}/train.log"
 
-"${PY}" -m agentguard.cli validate_iwg_attn_checkpoint \
+"${PY}" -m agentguard.cli validate_iwg_rg_cma_checkpoint \
   --checkpoint "${LAST_CHECKPOINT}" \
   --dataset-dir "${DATASET_DIR}" \
   --device cuda \

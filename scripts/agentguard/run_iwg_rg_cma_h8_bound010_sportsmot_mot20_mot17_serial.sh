@@ -264,7 +264,7 @@ train_stage() {
       exit 2
     fi
     local command=(
-      "${PY}" -u -m agentguard.cli train_iwg_attn
+      "${PY}" -u -m agentguard.cli train_iwg_rg_cma
       --dataset-dir "${dataset_dir}"
       --checkpoint-dir "${checkpoint_dir}"
       --device cuda
@@ -300,7 +300,7 @@ train_stage() {
     touch "${completed_marker}"
   fi
 
-  "${PY}" -u -m agentguard.cli validate_iwg_attn_checkpoint \
+  "${PY}" -u -m agentguard.cli validate_iwg_rg_cma_checkpoint \
     --checkpoint "${expected_checkpoint}" \
     --dataset-dir "${dataset_dir}" \
     --device cpu --max-batches 8 \
@@ -336,9 +336,9 @@ eval_final_raw() {
     --sequences "${sequences[@]}"
     --seed 10000
     --kf-type nsa
-    --agentguard-mode iwg-attn
+    --agentguard-mode iwg-rg-cma
     --agentguard-checkpoint "${checkpoint}"
-    --iwg-attn-output final
+    --iwg-rg-cma-output final
     --agentguard-device cpu
     --detection-cache-root "${DETECTION_CACHE_ROOT}"
     --tracker-suffix "${suffix}"

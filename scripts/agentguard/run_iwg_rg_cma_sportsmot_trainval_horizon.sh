@@ -242,7 +242,7 @@ done
   2>&1 | tee "${LOG_DIR}/label_contract.log"
 
 if [[ ! -f "${DATASET_DIR}/metadata.json" ]]; then
-  "${PY}" -u -m agentguard.cli build_iwg_attn_data \
+  "${PY}" -u -m agentguard.cli build_iwg_rg_cma_data \
     --dataset SportsMOT --mode trainval \
     --event-cache-root "${EVENT_CACHE_ROOT}" \
     --detection-cache-root "${DETECTION_CACHE_ROOT}" \
@@ -258,7 +258,7 @@ fi
 sha256sum "${DATASET_DIR}/metadata.json" > "${PROVENANCE_DIR}/dataset_metadata.sha256"
 
 TRAIN_COMMAND=(
-  "${PY}" -u -m agentguard.cli train_iwg_attn
+  "${PY}" -u -m agentguard.cli train_iwg_rg_cma
   --dataset-dir "${DATASET_DIR}"
   --checkpoint-dir "${CHECKPOINT_DIR}"
   --device cuda --epochs "${EPOCHS}" --batch-size 1024 --num-workers 4
@@ -275,7 +275,7 @@ printf '\n' >> "${PROVENANCE_DIR}/train.command.txt"
 "${TRAIN_COMMAND[@]}" 2>&1 | tee "${LOG_DIR}/train.log"
 touch "${RUN_ROOT}/training_completed"
 
-"${PY}" -u -m agentguard.cli validate_iwg_attn_checkpoint \
+"${PY}" -u -m agentguard.cli validate_iwg_rg_cma_checkpoint \
   --checkpoint "${FINAL_CHECKPOINT}" \
   --dataset-dir "${DATASET_DIR}" \
   --device cpu --max-batches 8 \
@@ -291,9 +291,9 @@ run_raw_case() {
     "${PY}" -u run.py
     --dataset SportsMOT --mode val
     --sequences "${SPORTS_VAL_SEQUENCES[@]}"
-    --seed 10000 --agentguard-mode iwg-attn
+    --seed 10000 --agentguard-mode iwg-rg-cma
     --agentguard-checkpoint "${checkpoint}"
-    --iwg-attn-output "${gate}" --agentguard-device cpu
+    --iwg-rg-cma-output "${gate}" --agentguard-device cpu
     --detection-cache-root "${DETECTION_CACHE_ROOT}"
     --tracker-suffix "${suffix}" --print-per-sequence-metrics
   )

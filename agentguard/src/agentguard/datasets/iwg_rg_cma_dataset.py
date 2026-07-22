@@ -33,7 +33,7 @@ from agentguard.datasets.timeline_utils import (
 from agentguard.features.normalization import NormalizationStats
 
 
-IWG_ATTN_DATASET_SCHEMA_VERSION = 1
+IWG_RG_CMA_DATASET_SCHEMA_VERSION = 1
 MOT17_FRCNN_ALL_SEQUENCES = [
     "MOT17-02-FRCNN",
     "MOT17-04-FRCNN",
@@ -181,21 +181,21 @@ SPORTSMOT_VAL_SEQUENCES = [
     "v_i2_L4qquVg0_c010",
 ]
 SPORTSMOT_TRAINVAL_SEQUENCES = SPORTSMOT_TRAIN_SEQUENCES + SPORTSMOT_VAL_SEQUENCES
-IWG_ATTN_TRAIN_ALL_SEQUENCES = {
+IWG_RG_CMA_TRAIN_ALL_SEQUENCES = {
     "MOT17": MOT17_FRCNN_ALL_SEQUENCES,
     "MOT20": MOT20_ALL_SEQUENCES,
     "DanceTrack": DANCETRACK_TRAIN_SEQUENCES,
     "SportsMOT": SPORTSMOT_TRAIN_SEQUENCES,
 }
-IWG_ATTN_TRAIN_SPLIT_BY_DATASET = {
+IWG_RG_CMA_TRAIN_SPLIT_BY_DATASET = {
     "MOT17": "all",
     "MOT20": "all",
     "DanceTrack": "train",
     "SportsMOT": "train",
 }
-IWG_ATTN_DATASET_DESCRIPTOR = {
-    "name": "agentguard_iwg_attn_streaming_windows",
-    "version": IWG_ATTN_DATASET_SCHEMA_VERSION,
+IWG_RG_CMA_DATASET_DESCRIPTOR = {
+    "name": "agentguard_iwg_rg_cma_streaming_windows",
+    "version": IWG_RG_CMA_DATASET_SCHEMA_VERSION,
     "timeline": "complete_compact_cache_matched_and_unmatched",
     "sample": "each_candidate_a_labeled_matched_endpoint",
     "history": "five_prior_segment_local_events_plus_endpoint",
@@ -208,76 +208,76 @@ IWG_ATTN_DATASET_DESCRIPTOR = {
     "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
     "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
 }
-IWG_ATTN_DATASET_SCHEMA_SHA256 = hashlib.sha256(
+IWG_RG_CMA_DATASET_SCHEMA_SHA256 = hashlib.sha256(
     json.dumps(
-        IWG_ATTN_DATASET_DESCRIPTOR,
+        IWG_RG_CMA_DATASET_DESCRIPTOR,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
 ).hexdigest()
-MOT20_IWG_ATTN_DATASET_DESCRIPTOR = {
-    **IWG_ATTN_DATASET_DESCRIPTOR,
+MOT20_IWG_RG_CMA_DATASET_DESCRIPTOR = {
+    **IWG_RG_CMA_DATASET_DESCRIPTOR,
     "split_policy": "mot20_all_train_all",
     "index_format": "compact_memmap_v1",
     "label_join": "native_current_timeline_event_key",
 }
-MOT20_IWG_ATTN_DATASET_SCHEMA_SHA256 = hashlib.sha256(
+MOT20_IWG_RG_CMA_DATASET_SCHEMA_SHA256 = hashlib.sha256(
     json.dumps(
-        MOT20_IWG_ATTN_DATASET_DESCRIPTOR,
+        MOT20_IWG_RG_CMA_DATASET_DESCRIPTOR,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
 ).hexdigest()
-DANCETRACK_IWG_ATTN_DATASET_DESCRIPTOR = {
-    **IWG_ATTN_DATASET_DESCRIPTOR,
+DANCETRACK_IWG_RG_CMA_DATASET_DESCRIPTOR = {
+    **IWG_RG_CMA_DATASET_DESCRIPTOR,
     "split_policy": "dancetrack_official_train",
     "index_format": "compact_memmap_v1",
     "label_join": "native_current_timeline_event_key",
 }
-DANCETRACK_IWG_ATTN_DATASET_SCHEMA_SHA256 = hashlib.sha256(
+DANCETRACK_IWG_RG_CMA_DATASET_SCHEMA_SHA256 = hashlib.sha256(
     json.dumps(
-        DANCETRACK_IWG_ATTN_DATASET_DESCRIPTOR,
+        DANCETRACK_IWG_RG_CMA_DATASET_DESCRIPTOR,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
 ).hexdigest()
-SPORTSMOT_IWG_ATTN_DATASET_DESCRIPTOR = {
-    **IWG_ATTN_DATASET_DESCRIPTOR,
+SPORTSMOT_IWG_RG_CMA_DATASET_DESCRIPTOR = {
+    **IWG_RG_CMA_DATASET_DESCRIPTOR,
     "split_policy": "sportsmot_official_train",
     "index_format": "compact_memmap_v1",
     "label_join": "native_current_timeline_event_key",
 }
-SPORTSMOT_IWG_ATTN_DATASET_SCHEMA_SHA256 = hashlib.sha256(
+SPORTSMOT_IWG_RG_CMA_DATASET_SCHEMA_SHA256 = hashlib.sha256(
     json.dumps(
-        SPORTSMOT_IWG_ATTN_DATASET_DESCRIPTOR,
+        SPORTSMOT_IWG_RG_CMA_DATASET_DESCRIPTOR,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
 ).hexdigest()
-SPORTSMOT_TRAINVAL_IWG_ATTN_DATASET_DESCRIPTOR = {
-    **IWG_ATTN_DATASET_DESCRIPTOR,
+SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_DESCRIPTOR = {
+    **IWG_RG_CMA_DATASET_DESCRIPTOR,
     "split_policy": "sportsmot_official_train_plus_val",
     "index_format": "compact_memmap_v1",
     "label_join": "native_current_timeline_event_key",
     "source_layout": "per_sequence_official_split_mapping",
 }
-SPORTSMOT_TRAINVAL_IWG_ATTN_DATASET_SCHEMA_SHA256 = hashlib.sha256(
+SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_SCHEMA_SHA256 = hashlib.sha256(
     json.dumps(
-        SPORTSMOT_TRAINVAL_IWG_ATTN_DATASET_DESCRIPTOR,
+        SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_DESCRIPTOR,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
 ).hexdigest()
-IWG_ATTN_DATASET_SCHEMA_SHA256_BY_DATASET = {
-    "MOT17": IWG_ATTN_DATASET_SCHEMA_SHA256,
-    "MOT20": MOT20_IWG_ATTN_DATASET_SCHEMA_SHA256,
-    "DanceTrack": DANCETRACK_IWG_ATTN_DATASET_SCHEMA_SHA256,
-    "SportsMOT": SPORTSMOT_IWG_ATTN_DATASET_SCHEMA_SHA256,
+IWG_RG_CMA_DATASET_SCHEMA_SHA256_BY_DATASET = {
+    "MOT17": IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+    "MOT20": MOT20_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+    "DanceTrack": DANCETRACK_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+    "SportsMOT": SPORTSMOT_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
 }
-SUPPORTED_IWG_ATTN_DATASET_SCHEMA_SHA256 = frozenset(
+SUPPORTED_IWG_RG_CMA_DATASET_SCHEMA_SHA256 = frozenset(
     {
-        *IWG_ATTN_DATASET_SCHEMA_SHA256_BY_DATASET.values(),
-        SPORTSMOT_TRAINVAL_IWG_ATTN_DATASET_SCHEMA_SHA256,
+        *IWG_RG_CMA_DATASET_SCHEMA_SHA256_BY_DATASET.values(),
+        SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
     }
 )
 SUPPORTED_IWG_CONTEXT_SIZES = frozenset({IWG_CONTEXT_SIZE, 8})
@@ -287,7 +287,7 @@ def _validate_context_size(context_size: int) -> int:
     context_size = int(context_size)
     if context_size not in SUPPORTED_IWG_CONTEXT_SIZES:
         raise ValueError(
-            "unsupported IWG-attn context_size: "
+            "unsupported IWG RG-CMA context_size: "
             f"{context_size}; expected one of {sorted(SUPPORTED_IWG_CONTEXT_SIZES)}"
         )
     return context_size
@@ -308,31 +308,77 @@ def _contextual_schema_sha256(descriptor: dict[str, Any], context_size: int) -> 
     ).hexdigest()
 
 
-IWG_ATTN_CONTEXT8_DATASET_SCHEMA_SHA256_BY_DATASET = {
+IWG_RG_CMA_CONTEXT8_DATASET_SCHEMA_SHA256_BY_DATASET = {
     dataset: _contextual_schema_sha256(
         {
-            "MOT17": IWG_ATTN_DATASET_DESCRIPTOR,
-            "MOT20": MOT20_IWG_ATTN_DATASET_DESCRIPTOR,
-            "DanceTrack": DANCETRACK_IWG_ATTN_DATASET_DESCRIPTOR,
-            "SportsMOT": SPORTSMOT_IWG_ATTN_DATASET_DESCRIPTOR,
+            "MOT17": IWG_RG_CMA_DATASET_DESCRIPTOR,
+            "MOT20": MOT20_IWG_RG_CMA_DATASET_DESCRIPTOR,
+            "DanceTrack": DANCETRACK_IWG_RG_CMA_DATASET_DESCRIPTOR,
+            "SportsMOT": SPORTSMOT_IWG_RG_CMA_DATASET_DESCRIPTOR,
         }[dataset],
         8,
     )
-    for dataset in IWG_ATTN_DATASET_SCHEMA_SHA256_BY_DATASET
+    for dataset in IWG_RG_CMA_DATASET_SCHEMA_SHA256_BY_DATASET
 }
-SPORTSMOT_TRAINVAL_CONTEXT8_IWG_ATTN_DATASET_SCHEMA_SHA256 = (
-    _contextual_schema_sha256(SPORTSMOT_TRAINVAL_IWG_ATTN_DATASET_DESCRIPTOR, 8)
+SPORTSMOT_TRAINVAL_CONTEXT8_IWG_RG_CMA_DATASET_SCHEMA_SHA256 = (
+    _contextual_schema_sha256(SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_DESCRIPTOR, 8)
 )
-SUPPORTED_IWG_ATTN_DATASET_SCHEMA_SHA256 = frozenset(
+SUPPORTED_IWG_RG_CMA_DATASET_SCHEMA_SHA256 = frozenset(
     {
-        *SUPPORTED_IWG_ATTN_DATASET_SCHEMA_SHA256,
-        *IWG_ATTN_CONTEXT8_DATASET_SCHEMA_SHA256_BY_DATASET.values(),
-        SPORTSMOT_TRAINVAL_CONTEXT8_IWG_ATTN_DATASET_SCHEMA_SHA256,
+        *SUPPORTED_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+        *IWG_RG_CMA_CONTEXT8_DATASET_SCHEMA_SHA256_BY_DATASET.values(),
+        SPORTSMOT_TRAINVAL_CONTEXT8_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+    }
+)
+
+# These hashes identify datasets written before the public IWG/RG-CMA rename.
+# They remain loadable, while every newly built dataset uses the descriptors
+# above and therefore writes only the current schema hash.
+LEGACY_DATASET_SCHEMA_SHA256_BY_DATASET_CONTEXT = {
+    ("MOT17", "all", 6): frozenset(
+        {"cf1d1fc4731a53902157ee3a44584e384e5b61453dc51b2796a6437782440158"}
+    ),
+    ("MOT17", "all", 8): frozenset(
+        {"a92a7c4146f5ebbf563777314fc8c3cb76043cb094b13f75ffaac9e5241f4357"}
+    ),
+    ("MOT20", "all", 6): frozenset(
+        {"3321c5bba6d06512614247d79e36faa483ffa0feb939c6a8d4b07427c5fd6709"}
+    ),
+    ("MOT20", "all", 8): frozenset(
+        {"55f2e221dc43c3a0e261ba5925aeb0c9db206182e6a3046cb6bcb3b401db6136"}
+    ),
+    ("DanceTrack", "train", 6): frozenset(
+        {"e0ac984bee62c819fe84b7b25c652e4af9d020b60b52fe1f49b9c7dee3214175"}
+    ),
+    ("DanceTrack", "train", 8): frozenset(
+        {"f2a7cc928b6e1e7060ac53d373926f085a264ffda30749df1b9eb006a9e669c5"}
+    ),
+    ("SportsMOT", "train", 6): frozenset(
+        {"17cee34dee8024a1472c97f2843e1769a70bb7321722509fb320ee3ff3654d56"}
+    ),
+    ("SportsMOT", "trainval", 6): frozenset(
+        {"8135595698deb753202a6a884419838e19d6fc624a4e6829810e6f41e42fe574"}
+    ),
+    ("SportsMOT", "train", 8): frozenset(
+        {"d083bd7f35caa9f3e20971bd882289337103def8008adf0dc596552c17e60a1d"}
+    ),
+    ("SportsMOT", "trainval", 8): frozenset(
+        {"e5e6c13eb135492dac5c4bb2990c6cfadf6c0100e5ab9d97e0a32783a263f93b"}
+    ),
+}
+SUPPORTED_IWG_RG_CMA_DATASET_SCHEMA_SHA256 = frozenset(
+    {
+        *SUPPORTED_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+        *(
+            schema_sha256
+            for schemas in LEGACY_DATASET_SCHEMA_SHA256_BY_DATASET_CONTEXT.values()
+            for schema_sha256 in schemas
+        ),
     }
 )
 
 
-def resolve_iwg_attn_dataset_spec(
+def resolve_iwg_rg_cma_dataset_spec(
     dataset: str,
     split: str,
     context_size: int = IWG_CONTEXT_SIZE,
@@ -346,29 +392,48 @@ def resolve_iwg_attn_dataset_spec(
         return (
             list(SPORTSMOT_TRAINVAL_SEQUENCES),
             (
-                SPORTSMOT_TRAINVAL_IWG_ATTN_DATASET_SCHEMA_SHA256
+                SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_SCHEMA_SHA256
                 if context_size == IWG_CONTEXT_SIZE
-                else SPORTSMOT_TRAINVAL_CONTEXT8_IWG_ATTN_DATASET_SCHEMA_SHA256
+                else SPORTSMOT_TRAINVAL_CONTEXT8_IWG_RG_CMA_DATASET_SCHEMA_SHA256
             ),
             source_splits,
         )
-    expected_split = IWG_ATTN_TRAIN_SPLIT_BY_DATASET.get(dataset)
+    expected_split = IWG_RG_CMA_TRAIN_SPLIT_BY_DATASET.get(dataset)
     if expected_split is None or split != expected_split:
         supported = [
-            *(f"{name}/{value}" for name, value in IWG_ATTN_TRAIN_SPLIT_BY_DATASET.items()),
+            *(f"{name}/{value}" for name, value in IWG_RG_CMA_TRAIN_SPLIT_BY_DATASET.items()),
             "SportsMOT/trainval",
         ]
-        raise ValueError(f"IWG-attn supports {', '.join(supported)}")
-    sequences = list(IWG_ATTN_TRAIN_ALL_SEQUENCES[dataset])
-    dataset_schema_sha256 = IWG_ATTN_DATASET_SCHEMA_SHA256_BY_DATASET[dataset]
+        raise ValueError(f"IWG RG-CMA supports {', '.join(supported)}")
+    sequences = list(IWG_RG_CMA_TRAIN_ALL_SEQUENCES[dataset])
+    dataset_schema_sha256 = IWG_RG_CMA_DATASET_SCHEMA_SHA256_BY_DATASET[dataset]
     if context_size != IWG_CONTEXT_SIZE:
-        dataset_schema_sha256 = IWG_ATTN_CONTEXT8_DATASET_SCHEMA_SHA256_BY_DATASET[
+        dataset_schema_sha256 = IWG_RG_CMA_CONTEXT8_DATASET_SCHEMA_SHA256_BY_DATASET[
             dataset
         ]
     return (
         sequences,
         dataset_schema_sha256,
         {sequence: split for sequence in sequences},
+    )
+
+
+def accepted_iwg_rg_cma_dataset_schema_sha256(
+    dataset: str,
+    split: str,
+    context_size: int,
+) -> frozenset[str]:
+    """Return current and pre-rename schema hashes for one dataset contract."""
+    _sequences, current, _source_splits = resolve_iwg_rg_cma_dataset_spec(
+        dataset, split, context_size
+    )
+    return frozenset(
+        {
+            current,
+            *LEGACY_DATASET_SCHEMA_SHA256_BY_DATASET_CONTEXT.get(
+                (dataset, split, int(context_size)), frozenset()
+            ),
+        }
     )
 COMPACT_INDEX_FORMAT = "compact_memmap_v1"
 COMPACT_SAMPLE_ARRAY_FILES = {
@@ -690,7 +755,7 @@ def build_streaming_sample_index(
     return samples
 
 
-def build_iwg_attn_dataset(
+def build_iwg_rg_cma_dataset(
     *,
     dataset: str,
     split: str,
@@ -702,7 +767,7 @@ def build_iwg_attn_dataset(
     context_size: int = IWG_CONTEXT_SIZE,
 ) -> dict[str, Any]:
     context_size = _validate_context_size(context_size)
-    sequences, dataset_schema_sha256, source_splits = resolve_iwg_attn_dataset_spec(
+    sequences, dataset_schema_sha256, source_splits = resolve_iwg_rg_cma_dataset_spec(
         dataset, split, context_size
     )
     event_cache_root = Path(event_cache_root).resolve()
@@ -711,13 +776,13 @@ def build_iwg_attn_dataset(
     final_output_dir = Path(output_dir).resolve()
     if final_output_dir.exists():
         raise FileExistsError(
-            f"refusing to overwrite IWG-attn dataset: {final_output_dir}"
+            f"refusing to overwrite IWG RG-CMA dataset: {final_output_dir}"
         )
     output_dir = final_output_dir.with_name(
         f"{final_output_dir.name}.incomplete.{os.getpid()}"
     )
     if output_dir.exists():
-        raise FileExistsError(f"stale IWG-attn build directory exists: {output_dir}")
+        raise FileExistsError(f"stale IWG RG-CMA build directory exists: {output_dir}")
     missing = sorted(
         sequence
         for sequence in sequences
@@ -840,7 +905,7 @@ def build_iwg_attn_dataset(
     if any(counts["unmatched"] == 0 for counts in timeline_counts.values()):
         raise ValueError("every source timeline must contain unmatched events")
     if num_train_samples == 0:
-        raise RuntimeError("no labeled streaming IWG-attn samples were built")
+        raise RuntimeError("no labeled streaming IWG RG-CMA samples were built")
 
     norm_stats = (
         _fit_train_normalization(event_cache_root, dataset, split, sequences)
@@ -888,7 +953,7 @@ def build_iwg_attn_dataset(
         "scalar_dim": 63,
         "event_dim": 128,
         "timeline_counts": timeline_counts,
-        "dataset_schema_version": IWG_ATTN_DATASET_SCHEMA_VERSION,
+        "dataset_schema_version": IWG_RG_CMA_DATASET_SCHEMA_VERSION,
         "dataset_schema_sha256": dataset_schema_sha256,
         "label_schema_version": ROLLOUT_LABEL_SCHEMA_VERSION,
         "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
@@ -904,7 +969,7 @@ def build_iwg_attn_dataset(
     return metadata
 
 
-class StreamingIWGAttnDataset(torch.utils.data.Dataset):
+class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
     def __init__(self, dataset_dir: str | Path, *, max_samples: int = 0) -> None:
         self.dataset_dir = Path(dataset_dir).resolve()
         self.metadata = json.loads((self.dataset_dir / "metadata.json").read_text())
@@ -963,7 +1028,7 @@ class StreamingIWGAttnDataset(torch.utils.data.Dataset):
                 self._compact_boundaries.append(total)
             self._length = min(total, int(max_samples)) if max_samples > 0 else total
         else:
-            raise ValueError(f"unsupported IWG-attn index format: {self.index_format}")
+            raise ValueError(f"unsupported IWG RG-CMA index format: {self.index_format}")
         self.norm_stats = NormalizationStats.load(
             str(self.dataset_dir / self.metadata["normalization_file"])
         )
@@ -972,14 +1037,18 @@ class StreamingIWGAttnDataset(torch.utils.data.Dataset):
 
     def _validate_metadata(self) -> None:
         dataset = str(self.metadata.get("dataset", ""))
-        if dataset not in IWG_ATTN_TRAIN_ALL_SEQUENCES:
-            raise ValueError(f"unsupported IWG-attn dataset: {dataset}")
+        if dataset not in IWG_RG_CMA_TRAIN_ALL_SEQUENCES:
+            raise ValueError(f"unsupported IWG RG-CMA dataset: {dataset}")
         if str(self.metadata.get("motion_target_mode", "nsa")) != "nsa":
             raise ValueError("only NSA datasets are supported")
         split = str(self.metadata.get("split", ""))
         context_size = _validate_context_size(self.metadata.get("context_size", -1))
-        sequences, dataset_schema_sha256, source_splits = (
-            resolve_iwg_attn_dataset_spec(dataset, split, context_size)
+        sequences, _current_schema_sha256, source_splits = (
+            resolve_iwg_rg_cma_dataset_spec(dataset, split, context_size)
+        )
+        metadata_schema_sha256 = str(self.metadata.get("dataset_schema_sha256", ""))
+        accepted_schema_sha256 = accepted_iwg_rg_cma_dataset_schema_sha256(
+            dataset, split, context_size
         )
         multi_source_splits = (
             source_splits if len(set(source_splits.values())) > 1 else None
@@ -991,8 +1060,7 @@ class StreamingIWGAttnDataset(torch.utils.data.Dataset):
             "candidate_types": ["A"],
             "train_sequences": sequences,
             "context_size": context_size,
-            "dataset_schema_version": IWG_ATTN_DATASET_SCHEMA_VERSION,
-            "dataset_schema_sha256": dataset_schema_sha256,
+            "dataset_schema_version": IWG_RG_CMA_DATASET_SCHEMA_VERSION,
             "label_schema_version": ROLLOUT_LABEL_SCHEMA_VERSION,
             "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
             "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
@@ -1005,8 +1073,13 @@ class StreamingIWGAttnDataset(torch.utils.data.Dataset):
             for key, value in expected.items()
             if self.metadata.get(key) != value
         }
+        if metadata_schema_sha256 not in accepted_schema_sha256:
+            mismatches["dataset_schema_sha256"] = (
+                metadata_schema_sha256,
+                sorted(accepted_schema_sha256),
+            )
         if mismatches:
-            raise ValueError(f"IWG-attn dataset metadata mismatch: {mismatches}")
+            raise ValueError(f"IWG RG-CMA dataset metadata mismatch: {mismatches}")
         norm_path = self.dataset_dir / self.metadata["normalization_file"]
         index_format = str(self.metadata.get("index_format", "jsonl_v1"))
         if index_format == "jsonl_v1":
@@ -1034,7 +1107,7 @@ class StreamingIWGAttnDataset(torch.utils.data.Dataset):
             label_paths.append(label_root / "summary.json")
             label_files_sha256 = _sha256_relative_file_set(label_paths, label_root)
         else:
-            raise ValueError(f"unsupported IWG-attn index format: {index_format}")
+            raise ValueError(f"unsupported IWG RG-CMA index format: {index_format}")
         manifest_paths = [
             Path(self.metadata["event_cache_root"])
             / self.metadata["dataset"]
@@ -1045,14 +1118,14 @@ class StreamingIWGAttnDataset(torch.utils.data.Dataset):
         ]
         event_cache_manifests_sha256 = _sha256_file_set(manifest_paths)
         if label_files_sha256 != self.metadata["label_files_sha256"]:
-            raise ValueError("IWG-attn label files changed after dataset construction")
+            raise ValueError("IWG RG-CMA label files changed after dataset construction")
         if (
             event_cache_manifests_sha256
             != self.metadata["event_cache_manifests_sha256"]
         ):
-            raise ValueError("IWG-attn event cache manifests changed after construction")
+            raise ValueError("IWG RG-CMA event cache manifests changed after construction")
         source_contract = _dataset_source_contract(
-            dataset_schema_sha256=dataset_schema_sha256,
+            dataset_schema_sha256=metadata_schema_sha256,
             index_sha256=index_sha256,
             normalization_sha256=_sha256_file(norm_path),
             label_files_sha256=label_files_sha256,
@@ -1062,7 +1135,7 @@ class StreamingIWGAttnDataset(torch.utils.data.Dataset):
             sequence_source_splits=multi_source_splits,
         )
         if self.metadata.get("dataset_sha256") != _canonical_sha256(source_contract):
-            raise ValueError("IWG-attn dataset content hash mismatch")
+            raise ValueError("IWG RG-CMA dataset content hash mismatch")
 
     def _reader(self, sequence: str) -> CompactEventCacheReader:
         if sequence not in self._readers:
@@ -1284,9 +1357,9 @@ class StreamingIWGAttnDataset(torch.utils.data.Dataset):
                     compact["timeline_detection_indices"][timeline_index]
                 )
             if track_value.shape != (reid_dim,) or scalar_value.shape != (63,):
-                raise ValueError("cached IWG-attn feature has an invalid shape")
+                raise ValueError("cached IWG RG-CMA feature has an invalid shape")
             if not np.isfinite(track_value).all() or not np.isfinite(scalar_value).all():
-                raise ValueError("cached IWG-attn feature is non-finite")
+                raise ValueError("cached IWG RG-CMA feature is non-finite")
             track[position] = track_value
             scalar[position] = scalar_value
             has_detection[position] = matched
