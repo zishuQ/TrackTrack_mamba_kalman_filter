@@ -18,15 +18,32 @@ from agentguard.data.label_schema import (
 )
 
 
-COMPACT_IWG_LABEL_SCHEMA_VERSION = 1
-COMPACT_IWG_LABEL_SCHEMA_DESCRIPTOR = {
+COMPACT_IWG_LABEL_SCHEMA_V1_DESCRIPTOR = {
     "name": "agentguard_compact_iwg_safe_labels",
-    "version": COMPACT_IWG_LABEL_SCHEMA_VERSION,
+    "version": 1,
     "source": "current_timeline_candidate_a_rollout_v3",
     "join_policy": "native_event_shard_and_offset",
     "target_label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
     "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
     "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
+}
+COMPACT_IWG_LABEL_SCHEMA_V1_SHA256 = hashlib.sha256(
+    json.dumps(
+        COMPACT_IWG_LABEL_SCHEMA_V1_DESCRIPTOR,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+
+COMPACT_IWG_LABEL_SCHEMA_VERSION = 2
+COMPACT_IWG_LABEL_SCHEMA_DESCRIPTOR = {
+    **COMPACT_IWG_LABEL_SCHEMA_V1_DESCRIPTOR,
+    "version": COMPACT_IWG_LABEL_SCHEMA_VERSION,
+    "target_fields": [
+        "safe_gate_target",
+        "oracle_gate_target",
+        "gate_confidence",
+    ],
 }
 COMPACT_IWG_LABEL_SCHEMA_SHA256 = hashlib.sha256(
     json.dumps(
@@ -36,10 +53,10 @@ COMPACT_IWG_LABEL_SCHEMA_SHA256 = hashlib.sha256(
     ).encode("utf-8")
 ).hexdigest()
 SUPPORTED_COMPACT_IWG_LABEL_SCHEMA_SHA256 = frozenset(
-    {COMPACT_IWG_LABEL_SCHEMA_SHA256}
+    {COMPACT_IWG_LABEL_SCHEMA_V1_SHA256, COMPACT_IWG_LABEL_SCHEMA_SHA256}
 )
 
-COMPACT_LABEL_ARRAY_FILES = {
+COMPACT_LABEL_ARRAY_FILES_V1 = {
     "event_keys": "event_keys.npy",
     "safe_gate_target": "safe_gate_target.npy",
     "policy_safe_soft_target": "policy_safe_soft_target.npy",
@@ -47,6 +64,11 @@ COMPACT_LABEL_ARRAY_FILES = {
     "risk_target": "risk_target.npy",
     "valid_channels": "valid_channels.npy",
     "sample_weight": "sample_weight.npy",
+}
+COMPACT_LABEL_ARRAY_FILES = {
+    **COMPACT_LABEL_ARRAY_FILES_V1,
+    "oracle_gate_target": "oracle_gate_target.npy",
+    "gate_confidence": "gate_confidence.npy",
 }
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -61,6 +83,8 @@ def _write_arrays(
     *,
     event_keys: np.ndarray,
     safe_gate: np.ndarray,
+    oracle_gate: np.ndarray,
+    gate_confidence: np.ndarray,
     policy: np.ndarray,
     cue: np.ndarray,
     risk: np.ndarray,
@@ -70,6 +94,8 @@ def _write_arrays(
     values = {
         "event_keys": event_keys,
         "safe_gate_target": safe_gate,
+        "oracle_gate_target": oracle_gate,
+        "gate_confidence": gate_confidence,
         "policy_safe_soft_target": policy,
         "cue_target": cue,
         "risk_target": risk,
@@ -174,6 +200,20 @@ def build_current_rollout_compact_labels_for_sequence(
         ],
         dtype=np.float32,
     )[order]
+    oracle_gate = np.asarray(
+        [
+            [label["motion_soft_target"], label["appearance_soft_target"]]
+            for label in labels
+        ],
+        dtype=np.float32,
+    )[order]
+    gate_confidence = np.asarray(
+        [
+            [label["motion_label_confidence"], label["appearance_label_confidence"]]
+            for label in labels
+        ],
+        dtype=np.float32,
+    )[order]
     policy = np.asarray(
         [label["policy_safe_soft_target"] for label in labels], dtype=np.float32
     )[order]
@@ -201,6 +241,8 @@ def build_current_rollout_compact_labels_for_sequence(
         temporary,
         event_keys=event_keys,
         safe_gate=safe_gate,
+        oracle_gate=oracle_gate,
+        gate_confidence=gate_confidence,
         policy=policy,
         cue=cue,
         risk=risk,
@@ -259,16 +301,29 @@ def load_compact_label_arrays(
     }
     if mismatches:
         raise ValueError(f"compact label manifest mismatch: {mismatches}")
-    if manifest.get("compact_label_schema_sha256") not in (
-        SUPPORTED_COMPACT_IWG_LABEL_SCHEMA_SHA256
-    ):
+    if manifest.get("compact_label_schema_sha256") not in SUPPORTED_COMPACT_IWG_LABEL_SCHEMA_SHA256:
         raise ValueError(
             "unsupported compact label schema: "
             f"{manifest.get('compact_label_schema_sha256')!r}"
         )
+    schema_hash = manifest.get("compact_label_schema_sha256")
+    if schema_hash == COMPACT_IWG_LABEL_SCHEMA_V1_SHA256:
+        array_files = COMPACT_LABEL_ARRAY_FILES_V1
+    elif schema_hash == COMPACT_IWG_LABEL_SCHEMA_SHA256:
+        array_files = COMPACT_LABEL_ARRAY_FILES
+    else:
+        raise ValueError(
+            "unsupported compact label schema: "
+            f"{schema_hash!r}"
+        )
+    declared_files = manifest.get("array_files", array_files)
+    if declared_files != array_files:
+        raise ValueError(
+            f"compact label array file contract mismatch in {sequence_dir}"
+        )
     arrays = {
         name: np.load(sequence_dir / filename, mmap_mode="r", allow_pickle=False)
-        for name, filename in COMPACT_LABEL_ARRAY_FILES.items()
+        for name, filename in array_files.items()
     }
     count = int(manifest["retained_labels"])
     if any(value.shape[0] != count for value in arrays.values()):

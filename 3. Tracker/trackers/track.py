@@ -157,33 +157,6 @@ class Track(BaseTrack):
             state=self.state,
         )
 
-    def restore_state(self, snapshot):
-        self.track_id = snapshot.track_id
-        self.box = snapshot.box.copy()
-        self.score = snapshot.score
-        self.mean = snapshot.mean.copy() if snapshot.mean is not None else None
-        self.covariance = snapshot.covariance.copy() if snapshot.covariance is not None else None
-        self.velocity = snapshot.velocity.copy()
-        self.feat = snapshot.feature.copy()
-
-        self.history = {}
-        for frame_id, hist_list in snapshot.history.items():
-            hist_box = hist_list[0].copy()
-            hist_score = hist_list[1] if len(hist_list) > 1 else snapshot.score
-            hist_mean = hist_list[2] if len(hist_list) > 2 else snapshot.mean
-            hist_covariance = hist_list[3] if len(hist_list) > 3 else snapshot.covariance
-            hist_feat = hist_list[4] if len(hist_list) > 4 else snapshot.feature
-            self.history[frame_id] = [
-                hist_box,
-                hist_score,
-                hist_mean.copy() if hist_mean is not None else None,
-                hist_covariance.copy() if hist_covariance is not None else None,
-                hist_feat.copy(),
-            ]
-
-        self.end_frame_id = snapshot.end_frame_id
-        self.state = snapshot.state
-
     def update_with_gates(self, frame_id, detection, motion_gate, appearance_gate):
         # Validate
         motion_gate = float(np.clip(motion_gate, 0.0, 1.0))

@@ -8,6 +8,52 @@ import torch.nn.functional as F
 from agentguard.models.iwg_rg_cma import RG_CMA_CORRECTION_BOUND
 
 
+SAFE_SELECTIVE_CONFIDENCE_START = 0.50
+SAFE_SELECTIVE_CONFIDENCE_FULL = 0.75
+SAFE_SELECTIVE_DECISIVENESS_START = 0.20
+SAFE_SELECTIVE_DECISIVENESS_FULL = 0.50
+
+
+def _piecewise_linear_ramp(
+    value: torch.Tensor,
+    *,
+    start: float,
+    full: float,
+) -> torch.Tensor:
+    return ((value - float(start)) / (float(full) - float(start))).clamp(
+        0.0, 1.0
+    )
+
+
+def _safe_selective_correction_target(
+    safe_target: torch.Tensor,
+    oracle_target: torch.Tensor,
+    confidence: torch.Tensor,
+    *,
+    correction_bound: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the CMA-only safe-to-oracle residual and its unlock strength."""
+    decisiveness = (2.0 * oracle_target - 1.0).abs()
+    unlock = (
+        _piecewise_linear_ramp(
+            confidence,
+            start=SAFE_SELECTIVE_CONFIDENCE_START,
+            full=SAFE_SELECTIVE_CONFIDENCE_FULL,
+        )
+        * _piecewise_linear_ramp(
+            decisiveness,
+            start=SAFE_SELECTIVE_DECISIVENESS_START,
+            full=SAFE_SELECTIVE_DECISIVENESS_FULL,
+        )
+    ).detach()
+    correction_target = torch.clamp(
+        unlock * (oracle_target - safe_target),
+        -float(correction_bound),
+        float(correction_bound),
+    )
+    return correction_target, unlock
+
+
 def _weighted_mean(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     weights = weights.to(dtype=values.dtype)
     return torch.where(
@@ -34,16 +80,23 @@ def validate_iwg_rg_cma_loss_config(
     residual_weight: float = 0.5,
     revision_weight: float = 0.01,
     hard_example_gain: float = 0.0,
+    no_harm_weight: float = 0.0,
 ) -> None:
     values = {
         "residual_beta": float(residual_beta),
         "residual_weight": float(residual_weight),
         "revision_weight": float(revision_weight),
         "hard_example_gain": float(hard_example_gain),
+        "no_harm_weight": float(no_harm_weight),
     }
     if not math.isfinite(values["residual_beta"]) or values["residual_beta"] <= 0.0:
         raise ValueError("residual_beta must be finite and positive")
-    for key in ("residual_weight", "revision_weight", "hard_example_gain"):
+    for key in (
+        "residual_weight",
+        "revision_weight",
+        "hard_example_gain",
+        "no_harm_weight",
+    ):
         if not math.isfinite(values[key]) or values[key] < 0.0:
             raise ValueError(f"{key} must be finite and non-negative")
 
@@ -74,16 +127,26 @@ def compute_iwg_rg_cma_loss(
     residual_weight: float = 0.5,
     revision_weight: float = 0.01,
     hard_example_gain: float = 0.0,
+    no_harm_weight: float = 0.0,
+    residual_target_mode: str = "safe",
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     validate_iwg_rg_cma_loss_config(
         residual_beta=residual_beta,
         residual_weight=residual_weight,
         revision_weight=revision_weight,
         hard_example_gain=hard_example_gain,
+        no_harm_weight=no_harm_weight,
     )
     correction_bound = float(correction_bound)
     if not math.isfinite(correction_bound) or correction_bound <= 0.0:
         raise ValueError("correction_bound must be finite and positive")
+    residual_target_mode = str(residual_target_mode).strip().lower()
+    if residual_target_mode not in {"safe", "oracle-confidence", "safe-selective"}:
+        raise ValueError(
+            "residual_target_mode must be 'safe', 'oracle-confidence', or "
+            "'safe-selective', got "
+            f"{residual_target_mode!r}"
+        )
     valid_channels = torch.stack(
         [batch["valid_motion"], batch["valid_appearance"]], dim=-1
     )
@@ -131,13 +194,70 @@ def compute_iwg_rg_cma_loss(
         ),
         risk_valid * sample_weight.unsqueeze(-1),
     )
+    base_detached = outputs["base_gate"].detach().float()
+    unlock = torch.ones_like(gate_weights)
+    if residual_target_mode in {"oracle-confidence", "safe-selective"}:
+        required = ("oracle_gate_target", "gate_confidence")
+        missing = [key for key in required if key not in batch]
+        if missing:
+            raise ValueError(
+                "oracle residual targets are missing from the batch: "
+                f"{missing}"
+            )
+        oracle_target = batch["oracle_gate_target"].float().clamp(0.0, 1.0)
+        confidence = batch["gate_confidence"].float().clamp(0.0, 1.0)
+        if residual_target_mode == "oracle-confidence":
+            correction_target = torch.clamp(
+                confidence * (oracle_target - base_detached),
+                -correction_bound,
+                correction_bound,
+            )
+            refined_target = torch.clamp(
+                base_detached + correction_target,
+                0.0,
+                1.0,
+            )
+            diagnostic_weights = gate_weights * confidence
+            # Weight samples by both label confidence and the available correction
+            # opportunity. Easy/no-op endpoints should not dominate CMA updates.
+            opportunity_weight = (
+                0.25
+                + confidence
+                + 2.0 * confidence * (oracle_target - base_detached).abs().detach()
+            )
+            residual_weights = gate_weights * opportunity_weight
+        else:
+            # The safe target already contains one confidence-weighted blend
+            # toward the oracle. Piecewise ramps provide a real zero region,
+            # so uncertain or indecisive labels explicitly supervise abstention.
+            correction_target, unlock = _safe_selective_correction_target(
+                safe_target,
+                oracle_target,
+                confidence,
+                correction_bound=correction_bound,
+            )
+            diagnostic_weights = gate_weights
+            # CMA learns only the extra safe-to-oracle residual. Base errors
+            # remain the responsibility of the independently supervised IWG.
+            refined_target = torch.clamp(
+                base_detached + correction_target,
+                0.0,
+                1.0,
+            )
+            opportunity_weight = 0.10 + unlock
+            residual_weights = gate_weights * opportunity_weight
+    else:
+        confidence = torch.ones_like(gate_weights)
+        refined_target = safe_target
+        diagnostic_weights = gate_weights
+        correction_target = torch.clamp(
+            safe_target - base_detached,
+            -correction_bound,
+            correction_bound,
+        )
+        residual_weights = gate_weights
     final_loss, final_bce, final_mse = _probability_gate_loss(
-        outputs["refined_gate"], safe_target, gate_weights
-    )
-    correction_target = torch.clamp(
-        safe_target - outputs["base_gate"].detach(),
-        -correction_bound,
-        correction_bound,
+        outputs["refined_gate"], refined_target, gate_weights
     )
     correction_abs = outputs["gate_correction"].float().abs()
     correction_target_abs = correction_target.abs()
@@ -151,12 +271,45 @@ def compute_iwg_rg_cma_loss(
             reduction="none",
             beta=float(residual_beta),
         ),
-        gate_weights * hard_weight,
+        residual_weights * hard_weight,
     )
-    revision_loss = correction_abs.mean()
+    if residual_target_mode == "oracle-confidence":
+        # Abstain only where the label is uncertain. High-confidence residuals
+        # are not penalized for being nonzero.
+        revision_loss = _weighted_mean(
+            correction_abs,
+            gate_weights * (1.0 - confidence),
+        )
+    elif residual_target_mode == "safe-selective":
+        # Partial unlock is already encoded in correction_target. Penalizing it
+        # again by (1 - unlock) shifts the optimum toward zero, so the explicit
+        # abstention term is restricted to the exact-zero region.
+        revision_loss = _weighted_mean(
+            correction_abs,
+            gate_weights * (unlock <= 0.0).to(dtype=gate_weights.dtype),
+        )
+    else:
+        revision_loss = correction_abs.mean()
+    correction_error = (
+        outputs["gate_correction"].float() - correction_target
+    ).abs()
+    abstain_error = correction_target_abs
+    no_harm_loss = _weighted_mean(
+        F.relu(correction_error - abstain_error), diagnostic_weights
+    )
+    correction_improvement = abstain_error - correction_error
+    correction_help = (correction_improvement > 1e-6).float()
+    correction_harm = (correction_improvement < -1e-6).float()
+    correction_scale = outputs.get(
+        "correction_scale", torch.ones_like(outputs["gate_correction"])
+    ).float()
     valid_correction_mask = gate_weights > 0
     sign_mask = valid_correction_mask & (correction_target_abs > 1e-6)
     correction_nonzero = (correction_abs > 1e-6).float()
+    correction_active = (
+        correction_abs >= 0.10 * correction_bound
+    ).float()
+    correction_target_nonzero = (correction_target_abs > 1e-6).float()
     correction_saturated = (
         correction_abs >= 0.95 * correction_bound
     ).float()
@@ -172,6 +325,7 @@ def compute_iwg_rg_cma_loss(
         + final_loss
         + float(residual_weight) * residual_loss
         + float(revision_weight) * revision_loss
+        + float(no_harm_weight) * no_harm_loss
     )
     return total, {
         "loss": total,
@@ -186,6 +340,27 @@ def compute_iwg_rg_cma_loss(
         "final_mse": final_mse,
         "residual_loss": residual_loss,
         "revision_loss": revision_loss,
+        "no_harm_loss": no_harm_loss,
+        "correction_improvement_mean": _weighted_mean(
+            correction_improvement, gate_weights
+        ),
+        "correction_help_rate": _weighted_mean(correction_help, gate_weights),
+        "correction_harm_rate": _weighted_mean(correction_harm, gate_weights),
+        "correction_scale_mean": _weighted_mean(correction_scale, gate_weights),
+        "correction_target_confidence_mean": _weighted_mean(
+            confidence, gate_weights
+        ),
+        "correction_unlock_mean": _weighted_mean(unlock, gate_weights),
+        "correction_unlock_rate": _weighted_mean(
+            (unlock >= 0.5).float(), gate_weights
+        ),
+        "correction_abstain_loss": revision_loss,
+        "motion_correction_scale_mean": _weighted_mean(
+            correction_scale[:, 0], gate_weights[:, 0]
+        ),
+        "appearance_correction_scale_mean": _weighted_mean(
+            correction_scale[:, 1], gate_weights[:, 1]
+        ),
         "correction_abs_mean": _weighted_mean(correction_abs, gate_weights),
         "correction_abs_p50": _masked_quantile(
             correction_abs, valid_correction_mask, 0.50
@@ -198,6 +373,12 @@ def compute_iwg_rg_cma_loss(
         ),
         "correction_nonzero_rate": _weighted_mean(
             correction_nonzero, gate_weights
+        ),
+        "correction_active_rate": _weighted_mean(
+            correction_active, gate_weights
+        ),
+        "correction_target_nonzero_rate": _weighted_mean(
+            correction_target_nonzero, gate_weights
         ),
         "correction_saturation_rate": _weighted_mean(
             correction_saturated, gate_weights

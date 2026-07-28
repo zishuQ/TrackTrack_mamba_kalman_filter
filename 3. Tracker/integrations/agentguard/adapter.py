@@ -2,7 +2,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from agentguard.contracts.enums import DetectionSource
 from agentguard.contracts.events import TrackEvent
 from agentguard.contracts.outputs import GateDecision
 from agentguard.features.geometry import pairwise_iou_xyxy
@@ -17,7 +16,6 @@ from .converters import (
     build_association_context,
     export_association_pair,
     export_detection,
-    export_track_state,
 )
 
 
@@ -48,10 +46,7 @@ class AgentGuardTrackerAdapter:
 
         # EventSink from runtime (for cache recording)
         self.event_sink = getattr(agentguard_runtime, "event_sink", None) if agentguard_runtime else None
-        self.capture_only = bool(
-            getattr(args, "capture_agentguard_events", False)
-            and getattr(args, "agentguard_mode", "off") == "off"
-        )
+        self.capture_only = getattr(args, "agentguard_mode", "off") == "capture"
 
         # Pending frame-level data for EventSink
         self._pending_frame_record: Optional[dict] = None
@@ -351,94 +346,13 @@ class AgentGuardTrackerAdapter:
     # Stage lifecycle callbacks
     # ------------------------------------------------------------------
 
-    def finalize_first_stage(
-        self,
-        tracked_lost_tracks: List[Track],
-    ) -> None:
-        """Called after first-stage association is complete.
-
-        In ``'full'`` mode:
-          1. Asks the runtime to build ``ReplayPlan`` objects for every
-             track whose TGR window has reached capacity.
-          2. Executes each plan on the corresponding live ``Track`` via
-             ``TrackTrackReplayBackend.replay_into_live_track()``.
-
-        In capture-only mode or ``'off'`` mode with event_sink:
-          Flushes pending events to EventSink.
-        """
-        if self.runtime is not None and self.runtime.mode == "full":
-            plans = self.runtime.finalize_first_stage()
-            if plans:
-                from integrations.agentguard.replay_backend import (
-                    TrackTrackReplayBackend,
-                )
-
-                backend = TrackTrackReplayBackend()
-                track_by_id = {t.track_id: t for t in tracked_lost_tracks}
-
-                for track_id, plan in plans.items():
-                    live_track = track_by_id.get(track_id)
-                    if live_track is None:
-                        raise RuntimeError(
-                            f"Live track {track_id} not found for replay plan "
-                            f"({len(plan.steps)} steps)"
-                        )
-                    backend.replay_into_live_track(live_track, plan)
-                    self._roll_checkpoint_with_live_track(
-                        backend=backend,
-                        live_track=live_track,
-                        track_id=track_id,
-                    )
-
-        # Flush pending events to EventSink
+    def end_frame(self) -> None:
+        """Flush the current frame to the compact event sink."""
         if self.event_sink is not None and hasattr(self.event_sink, 'on_frame') and self._pending_frame_record is not None:
             frame_events = list(self._pending_frame_events)
             self.event_sink.on_frame(self._pending_frame_record, frame_events)
             self._pending_frame_events = []
             self._pending_frame_record = None
-
-    def _roll_checkpoint_with_live_track(
-        self,
-        backend,
-        live_track: Track,
-        track_id: int,
-    ) -> None:
-        if self.runtime is None:
-            return
-        roll = self.runtime.pending_checkpoint_rolls.get(track_id)
-        if roll is None:
-            return
-
-        live_snapshot = (
-            live_track.snapshot_state(compact_history=True)
-            if hasattr(live_track, "snapshot_state")
-            else export_track_state(live_track)
-        )
-        oldest_step = roll["oldest_step"]
-        roll_plan = type("CheckpointRollPlan", (), {
-            "checkpoint": roll["checkpoint"],
-            "steps": [oldest_step],
-        })()
-        backend.replay_into_live_track(live_track, roll_plan)
-        new_checkpoint = (
-            live_track.snapshot_state(compact_history=True)
-            if hasattr(live_track, "snapshot_state")
-            else export_track_state(live_track)
-        )
-        if getattr(self.runtime, "stats", None) is not None:
-            self.runtime.stats.record_checkpoint_roll(len(roll_plan.steps))
-
-        next_event_id = roll["next_event_id"]
-        if next_event_id is not None:
-            self.runtime.checkpoints.save_checkpoint(
-                track_id,
-                next_event_id,
-                new_checkpoint,
-            )
-        self.runtime.window_buffers[track_id].pop_oldest()
-        self.runtime.checkpoints.remove_checkpoint(track_id, roll["oldest_event_id"])
-        self.runtime.pending_checkpoint_rolls.pop(track_id, None)
-        live_track.restore_state(live_snapshot)
 
     # ------------------------------------------------------------------
     # IWG decision
@@ -455,8 +369,8 @@ class AgentGuardTrackerAdapter:
         Populates feature vectors on the event (track_feature,
         detection_feature, scalar_features) before running inference.
         """
-        if self.runtime is None or self.runtime.iwg is None:
-            return GateDecision(1.0, 1.0, np.ones(5, dtype=np.float64) / 5.0, 1.0)
+        if self.runtime is None or self.runtime.rg_cma_model is None:
+            return GateDecision(1.0, 1.0, np.ones(5, dtype=np.float64) / 5.0)
 
         fb = self.runtime.feature_builder
         rd = self.reid_dim
@@ -486,21 +400,17 @@ class AgentGuardTrackerAdapter:
             hist = buffer.get_sequence()
             seq = hist[-(seq_len - 1):] + [event]
 
-        if self.runtime.mode == "iwg-rg-cma":
-            result = self.runtime.run_iwg_rg_cma_inference(
-                track_id,
-                seq,
-                frame_id=event.frame_id,
-                has_detection=event.has_detection,
-            )
-        else:
-            result = self.runtime.run_iwg_inference(seq)
+        result = self.runtime.run_iwg_rg_cma_inference(
+            track_id,
+            seq,
+            frame_id=event.frame_id,
+            has_detection=event.has_detection,
+        )
 
         return GateDecision(
             motion_gate=float(result["gate"][0]),
             appearance_gate=float(result["gate"][1]),
             policy_probs=result["policy_probs"],
-            confidence=float(np.mean(result["cue"])),
             base_gate=result.get("base_gate"),
             final_gate=result.get("final_gate"),
             gate_correction=result.get("gate_correction"),
@@ -513,9 +423,9 @@ class AgentGuardTrackerAdapter:
         """Run IWG once for many matched events from the same frame."""
         if not items:
             return []
-        if self.runtime is None or self.runtime.iwg is None:
+        if self.runtime is None or self.runtime.rg_cma_model is None:
             return [
-                GateDecision(1.0, 1.0, np.ones(5, dtype=np.float64) / 5.0, 1.0)
+                GateDecision(1.0, 1.0, np.ones(5, dtype=np.float64) / 5.0)
                 for _ in items
             ]
 
@@ -549,21 +459,17 @@ class AgentGuardTrackerAdapter:
                 seq = hist[-(seq_len - 1):] + [event]
             sequences.append(seq)
 
-        if self.runtime.mode == "iwg-rg-cma":
-            results = self.runtime.run_iwg_rg_cma_batch_inference(
-                [track_id for track_id, _event in items],
-                sequences,
-                frame_ids=[event.frame_id for _track_id, event in items],
-                has_detection=[event.has_detection for _track_id, event in items],
-            )
-        else:
-            results = self.runtime.run_iwg_batch_inference(sequences)
+        results = self.runtime.run_iwg_rg_cma_batch_inference(
+            [track_id for track_id, _event in items],
+            sequences,
+            frame_ids=[event.frame_id for _track_id, event in items],
+            has_detection=[event.has_detection for _track_id, event in items],
+        )
         return [
             GateDecision(
                 motion_gate=float(result["gate"][0]),
                 appearance_gate=float(result["gate"][1]),
                 policy_probs=result["policy_probs"],
-                confidence=float(np.mean(result["cue"])),
                 base_gate=result.get("base_gate"),
                 final_gate=result.get("final_gate"),
                 gate_correction=result.get("gate_correction"),
@@ -581,24 +487,17 @@ class AgentGuardTrackerAdapter:
         event: TrackEvent,
         gate_decision: GateDecision,
     ) -> None:
-        """Record a matched event into the runtime buffers for later TGR replay.
-
-        Attaches IWG outputs to the event and saves a checkpoint for TGR
-        when in ``'full'`` mode.  Does **not** call ``track.update_with_gates``
-        (the gate has already been applied via :meth:`apply_gate`).
-        """
+        """Record a matched event in Runtime context and the compact sink."""
         if self.runtime is None:
             self._accumulate_event_for_sink(event)
             return
 
-        is_capture = self.capture_only and self.runtime.mode == "off"
+        is_capture = self.capture_only or self.runtime.mode == "capture"
 
+        self.runtime.stats.record_event()
+        event_buffer = None
         if not is_capture:
-            self.runtime.stats.record_event()
             event_buffer = self.runtime.get_or_create_event_buffer(track_id)
-            window_buffer = None
-            if self.runtime.mode == "full":
-                _event_buffer, window_buffer = self.runtime.get_or_create_buffer(track_id)
 
         # Attach IWG outputs
         event.iwg_policy_probs = gate_decision.policy_probs.copy()
@@ -608,25 +507,8 @@ class AgentGuardTrackerAdapter:
         )
 
         if not is_capture:
-            # Save checkpoint for TGR (full mode)
-            event_buffer.push(self._lightweight_runtime_event(event, keep_detection=False))
-            self.runtime.stats.record_iwg(
-                event.iwg_gate,
-                base_gate=gate_decision.base_gate,
-                final_gate=gate_decision.final_gate,
-                correction=gate_decision.gate_correction,
-                correction_bound=(
-                    getattr(self.runtime.iwg_rg_cma_model, "correction_bound", None)
-                    if self.runtime.mode == "iwg-rg-cma"
-                    else None
-                ),
-            )
-            if self.runtime.mode == "full" and event.frame_start_state is not None:
-                self.runtime.checkpoints.save_checkpoint(
-                    track_id, event.event_id, event.frame_start_state
-                )
-                assert window_buffer is not None
-                window_buffer.push(self._lightweight_runtime_event(event, keep_detection=True))
+            assert event_buffer is not None
+            event_buffer.push(self._lightweight_runtime_event(event))
 
         # Accumulate for EventSink
         self._accumulate_event_for_sink(event)
@@ -647,16 +529,15 @@ class AgentGuardTrackerAdapter:
             self._accumulate_event_for_sink(event)
             return
 
-        is_capture = self.capture_only and self.runtime.mode == "off"
+        is_capture = self.capture_only or self.runtime.mode == "capture"
+
+        self.runtime.stats.record_event()
+        event_buffer = None
+        if not is_capture:
+            event_buffer = self.runtime.get_or_create_event_buffer(track_id)
 
         if not is_capture:
-            self.runtime.stats.record_event()
-            event_buffer = self.runtime.get_or_create_event_buffer(track_id)
-            window_buffer = None
-            if self.runtime.mode == "full":
-                _event_buffer, window_buffer = self.runtime.get_or_create_buffer(track_id)
-
-        if not is_capture and self.runtime.mode == "iwg-rg-cma":
+            assert event_buffer is not None
             fb = self.runtime.feature_builder
             rd = self.reid_dim
             src_state = event.pre_update_state or event.frame_start_state
@@ -682,13 +563,8 @@ class AgentGuardTrackerAdapter:
         event.iwg_gate = np.array([0.0, 0.0], dtype=np.float64)
 
         if not is_capture:
-            event_buffer.push(self._lightweight_runtime_event(event, keep_detection=False))
-            if self.runtime.mode == "full" and event.frame_start_state is not None:
-                self.runtime.checkpoints.save_checkpoint(
-                    track_id, event.event_id, event.frame_start_state
-                )
-                assert window_buffer is not None
-                window_buffer.push(self._lightweight_runtime_event(event, keep_detection=True))
+            assert event_buffer is not None
+            event_buffer.push(self._lightweight_runtime_event(event))
 
         # Accumulate for EventSink
         self._accumulate_event_for_sink(event)
@@ -700,15 +576,8 @@ class AgentGuardTrackerAdapter:
     def _lightweight_runtime_event(
         self,
         event: TrackEvent,
-        *,
-        keep_detection: bool,
     ) -> TrackEvent:
-        """Return a runtime-buffer event without heavy snapshots/context.
-
-        IWG history only needs pre-computed features/scalars and masks. Full
-        mode TGR additionally needs the accepted detection and warp for replay.
-        Checkpoints keep the original pre-event state separately.
-        """
+        """Return an event containing only the six-event model context."""
         return TrackEvent(
             event_id=event.event_id,
             dataset=event.dataset,
@@ -720,7 +589,7 @@ class AgentGuardTrackerAdapter:
             has_detection=event.has_detection,
             frame_start_state=None,
             pre_update_state=None,
-            detection=event.detection if keep_detection else None,
+            detection=None,
             association=None,
             association_context=None,
             warp_matrix=np.asarray(event.warp_matrix, dtype=np.float64).copy(),
@@ -750,26 +619,9 @@ class AgentGuardTrackerAdapter:
         if self._pending_frame_record is None:
             return  # begin_frame was not called
 
-        if getattr(self.event_sink, "compact", False):
-            event_dict = self._compact_event_dict(event)
-        else:
-            from agentguard.contracts.serialization import serialize_event
-
-            event_dict = serialize_event(event)
-            event_dict["target_gt_id"] = None
-            event_dict["detection_gt_id"] = None
-            event_dict["accepted_detection_index"] = (
-                event.detection.detection_index
-                if event.has_detection and event.detection is not None
-                else None
-            )
-            event_dict["association_row"] = (
-                event.association.final_cost
-                if event.association is not None
-                else None
-            )
-            # association_context is already serialized by serialize_event via
-            # _context_to_dict — never store raw custom objects here.
+        if not getattr(self.event_sink, "compact", False):
+            raise TypeError("AgentGuard capture requires a compact event sink")
+        event_dict = self._compact_event_dict(event)
         self._pending_frame_events.append(event_dict)
 
     def _compact_snapshot_dict(self, snapshot: Optional[TrackStateSnapshot]) -> Optional[dict]:

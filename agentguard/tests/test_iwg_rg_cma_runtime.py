@@ -31,15 +31,20 @@ def _event(track_id: int, frame_id: int, *, matched: bool = True) -> TrackEvent:
     )
 
 
-def _runtime(model: IWGRGCMA, output: str = "final") -> AgentGuardRuntime:
+def _runtime(
+    model: IWGRGCMA,
+    output: str = "final",
+    alpha: float = 1.0,
+) -> AgentGuardRuntime:
     runtime = AgentGuardRuntime(
         {
             "mode": "iwg-rg-cma",
-            "iwg_rg_cma_output": output,
-            "iwg_rg_cma_max_frame_gap": 30,
+            "rg_cma_output": output,
+            "rg_cma_alpha": alpha,
+            "rg_cma_max_gap": 30,
         },
         device="cpu",
-        iwg_rg_cma_model=model,
+        rg_cma_model=model,
     )
     runtime.init_feature_builder(reid_dim=16)
     return runtime
@@ -74,13 +79,10 @@ def test_iwg_rg_cma_single_batch_parity_unmatched_and_no_second_buffer():
         for key in (
             "gate",
             "base_gate",
-            "refined_gate",
+            "final_gate",
             "gate_correction",
             "policy_probs",
             "cue",
-            "risk",
-            "appearance_token",
-            "motion_token",
         ):
                 np.testing.assert_allclose(
                     batch_item[key], single_item[key], atol=2e-6, rtol=0.0
@@ -91,10 +93,43 @@ def test_iwg_rg_cma_single_batch_parity_unmatched_and_no_second_buffer():
     )
     np.testing.assert_array_equal(result["gate"], [0.0, 0.0])
     np.testing.assert_array_equal(result["base_gate"], [0.0, 0.0])
-    np.testing.assert_array_equal(result["refined_gate"], [0.0, 0.0])
+    np.testing.assert_array_equal(result["final_gate"], [0.0, 0.0])
     np.testing.assert_array_equal(result["policy_probs"], [0.0, 0.0, 0.0, 1.0, 0.0])
-    assert batch_runtime.window_buffers == {}
-    assert batch_runtime.checkpoints.checkpoints == {}
+    assert batch_runtime.event_buffers == {}
+
+
+def test_runtime_alpha_scales_only_the_cma_correction():
+    torch.manual_seed(30)
+    model = IWGRGCMA(16).eval()
+    with torch.no_grad():
+        for head in (model.motion_correction_head, model.appearance_correction_head):
+            torch.nn.init.normal_(head[-1].weight, std=0.05)
+            torch.nn.init.normal_(head[-1].bias, std=0.05)
+    event = _event(4, 10)
+    standard = _runtime(copy.deepcopy(model), alpha=1.0).run_iwg_rg_cma_inference(
+        4, _sequence(event), frame_id=10, has_detection=True
+    )
+    base_only = _runtime(copy.deepcopy(model), alpha=0.0).run_iwg_rg_cma_inference(
+        4, _sequence(event), frame_id=10, has_detection=True
+    )
+    half = _runtime(copy.deepcopy(model), alpha=0.5).run_iwg_rg_cma_inference(
+        4, _sequence(event), frame_id=10, has_detection=True
+    )
+
+    np.testing.assert_allclose(base_only["final_gate"], standard["base_gate"])
+    np.testing.assert_allclose(base_only["gate_correction"], 0.0)
+    np.testing.assert_allclose(
+        half["gate_correction"], 0.5 * standard["gate_correction"], atol=1e-7
+    )
+    np.testing.assert_allclose(
+        half["final_gate"],
+        np.clip(
+            standard["base_gate"] + 0.5 * standard["gate_correction"],
+            0.0,
+            1.0,
+        ),
+        atol=1e-7,
+    )
 
 
 def test_offline_six_event_outputs_match_online_streaming_and_gap_reset():
@@ -134,10 +169,8 @@ def test_offline_six_event_outputs_match_online_streaming_and_gap_reset():
             reset,
         )
     for key in (
-        "appearance_token",
-        "motion_token",
         "base_gate",
-        "refined_gate",
+        "final_gate",
     ):
         expected = np.stack([item[key] for item in online])
         np.testing.assert_allclose(

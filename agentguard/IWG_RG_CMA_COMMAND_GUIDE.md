@@ -174,7 +174,19 @@ shard_cycles=1
 
 warm-start 只严格加载模型权重，不恢复源实验的 optimizer、scheduler、epoch 或 normalization。新数据集使用自己的 normalization，新的 optimizer 和 scheduler 从头开始。25e 保存 epoch 5/10/25；50e 额外保存 epoch50。
 
-### 5.3 sequence sampling
+### 5.3 Base/RG-CMA 分组学习率
+
+默认情况下，`--lr` 同时作为 Base IWG 和 RG-CMA 的学习率，保持旧实验行为。需要做分组学习率消融时，显式指定：
+
+```text
+--lr 0.00001
+--base-lr 0.00001
+--cma-lr 0.000005
+```
+
+这会建立 `base_iwg` 和 `rg_cma` 两个 AdamW 参数组；warmup 和 cosine scheduler 保持两组学习率比例不变。该调整不改变标签、dataset hash、模型输入或 checkpoint 参数形状，不需要重新构造标签。
+
+### 5.4 sequence sampling
 
 默认 `sample-proportional` 与原训练一致。MOT20、SportsMOT 和 MOT17 也可以使用：
 

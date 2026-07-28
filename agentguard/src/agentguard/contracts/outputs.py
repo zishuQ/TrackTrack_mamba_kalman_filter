@@ -13,9 +13,7 @@ class GateDecision:
     motion_gate: float
     appearance_gate: float
     policy_probs: np.ndarray  # (5,) policy distribution
-    confidence: float
     # Optional diagnostics populated by the combined IWG+RG-CMA runtime.
-    # Legacy IWG callers leave these fields unset.
     base_gate: Optional[np.ndarray] = None
     final_gate: Optional[np.ndarray] = None
     gate_correction: Optional[np.ndarray] = None

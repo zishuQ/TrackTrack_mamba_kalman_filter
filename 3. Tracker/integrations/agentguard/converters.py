@@ -9,7 +9,6 @@ from agentguard.contracts.states import (
     AssociationPairFeatures,
     AssociationContext,
 )
-from agentguard.contracts.enums import DetectionSource
 
 
 # ---------------------------------------------------------------------------
@@ -45,40 +44,6 @@ def export_track_state(track) -> TrackStateSnapshot:
         end_frame_id=track.end_frame_id,
         state=track.state,
     )
-
-
-def restore_track_state(track, snapshot: TrackStateSnapshot) -> None:
-    """Restore a Track object's state from a TrackStateSnapshot.
-
-    Copies everything back: ``track_id``, ``box``, ``score``, ``mean``,
-    ``covariance``, ``velocity``, ``feat``, ``history``, ``end_frame_id``,
-    and ``state``.  Does **not** restore the KalmanFilter (it should already
-    exist on the Track object).
-    """
-    track.track_id = snapshot.track_id
-    track.box = snapshot.box.copy()
-    track.score = snapshot.score
-    track.mean = snapshot.mean.copy() if snapshot.mean is not None else None
-    track.covariance = (
-        snapshot.covariance.copy() if snapshot.covariance is not None else None
-    )
-    track.velocity = snapshot.velocity.copy()
-    track.feat = snapshot.feature.copy()
-
-    # Rebuild history with copied arrays.
-    history_copy: Dict[int, Any] = {}
-    for frame_id, entry in snapshot.history.items():
-        copied_entry: list[Any] = []
-        for item in entry:
-            if isinstance(item, np.ndarray):
-                copied_entry.append(copy.deepcopy(item))
-            else:
-                copied_entry.append(item)
-        history_copy[frame_id] = copied_entry
-    track.history = history_copy
-
-    track.end_frame_id = snapshot.end_frame_id
-    track.state = snapshot.state
 
 
 # ---------------------------------------------------------------------------
@@ -165,26 +130,6 @@ def export_association_pair(
         ),
         detection_source=int(meta["detection_source"][track_index, detection_index]),
     )
-
-
-# ---------------------------------------------------------------------------
-# DetectionObservation → TrackTrack update input helper
-# ---------------------------------------------------------------------------
-
-
-def detection_to_update_input(
-    detection: DetectionObservation,
-) -> dict:
-    """Convert a ``DetectionObservation`` to a dict suitable for TrackTrack's
-    ``update_with_gates`` interface (box/score/feature).
-
-    Returns a dict with keys ``box``, ``score``, ``feat``.
-    """
-    return {
-        "box": detection.box.copy(),
-        "score": detection.score,
-        "feat": np.asarray(detection.feature, dtype=np.float64).reshape(-1),
-    }
 
 
 # ---------------------------------------------------------------------------

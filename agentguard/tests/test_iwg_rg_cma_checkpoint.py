@@ -15,6 +15,13 @@ from agentguard.datasets.iwg_rg_cma_dataset import (
     SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
 )
 from agentguard.models.iwg_rg_cma import (
+    ARCHITECTURE_CLEAN_CROSS_MODAL,
+    ARCHITECTURE_DIRECT_BASE,
+    ARCHITECTURE_LEGACY_CLEAN_6X6_CMA,
+    ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA,
+    ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
+    ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED,
+    ARCHITECTURE_SELECTIVE_CORRECTION,
     IWG_RG_CMA_LEGACY_MODEL_SCHEMA,
     IWG_RG_CMA_LEGACY_MODEL_SCHEMA_SHA256,
     IWG_RG_CMA_MODEL_SCHEMA,
@@ -22,10 +29,15 @@ from agentguard.models.iwg_rg_cma import (
     IWGRGCMA,
     RG_CMA_CORRECTION_BOUND,
     RG_CMA_LEGACY_CORRECTION_BOUND,
+    model_contract,
 )
 from agentguard.training.train_iwg_rg_cma import (
     FORMAL_CHECKPOINT_EPOCHS,
+    _build_iwg_rg_cma_optimizer,
+    _optimizer_group_grad_norms,
+    _optimizer_learning_rates,
     _phase_dataset,
+    _resolved_optimizer_lrs,
     _run_training_attempt,
     _validate_formal_config,
     SequenceSqrtSampler,
@@ -134,6 +146,47 @@ def test_iwg_rg_cma_checkpoint_strict_roundtrip(tmp_path):
         validate_iwg_rg_cma_checkpoint_contract(unsupported)
 
 
+@pytest.mark.parametrize(
+    "architecture_variant",
+    [
+        ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
+        ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED,
+        ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA,
+        ARCHITECTURE_LEGACY_CLEAN_6X6_CMA,
+        ARCHITECTURE_DIRECT_BASE,
+        ARCHITECTURE_CLEAN_CROSS_MODAL,
+        ARCHITECTURE_SELECTIVE_CORRECTION,
+    ],
+)
+def test_structural_ablation_checkpoint_roundtrip(tmp_path, architecture_variant):
+    model = IWGRGCMA(
+        16,
+        correction_bound=RG_CMA_LEGACY_CORRECTION_BOUND,
+        architecture_variant=architecture_variant,
+    )
+    checkpoint = _checkpoint()
+    checkpoint.update(
+        model_contract(
+            correction_bound=RG_CMA_LEGACY_CORRECTION_BOUND,
+            context_size=6,
+            architecture_variant=architecture_variant,
+        )
+    )
+    checkpoint.update(
+        {
+            "model_state_dict": model.state_dict(),
+            "correction_bound": RG_CMA_LEGACY_CORRECTION_BOUND,
+            "architecture_variant": architecture_variant,
+            "training_config": {"architecture_variant": architecture_variant},
+        }
+    )
+    path = tmp_path / f"{architecture_variant}.pt"
+    torch.save(checkpoint, path)
+    loaded, metadata = load_iwg_rg_cma_checkpoint(path)
+    assert loaded.architecture_variant == architecture_variant
+    assert metadata["architecture_variant"] == architecture_variant
+
+
 def test_iwg_rg_cma_formal_batch_size_is_explicit():
     base = {
         "seed": 42,
@@ -171,6 +224,62 @@ def test_iwg_rg_cma_formal_batch_size_is_explicit():
     assert _validate_formal_config(extended) == 1024
     with pytest.raises(ValueError, match="epochs must be one of"):
         _validate_formal_config({**extended, "epochs": 300, "shard_cycles": 3})
+
+
+def test_iwg_rg_cma_optimizer_groups_split_base_and_cma():
+    model = IWGRGCMA(16)
+    optimizer = _build_iwg_rg_cma_optimizer(
+        model,
+        base_lr=1e-5,
+        cma_lr=5e-6,
+        weight_decay=1e-4,
+    )
+
+    assert [group["name"] for group in optimizer.param_groups] == [
+        "base_iwg",
+        "rg_cma",
+    ]
+    assert _optimizer_learning_rates(optimizer) == {
+        "base_iwg": 1e-5,
+        "rg_cma": 5e-6,
+    }
+    base_ids = {id(parameter) for parameter in model.iwg.parameters()}
+    optimizer_ids = {
+        id(parameter)
+        for group in optimizer.param_groups
+        for parameter in group["params"]
+    }
+    assert optimizer_ids == {id(parameter) for parameter in model.parameters()}
+    assert {
+        id(parameter) for parameter in optimizer.param_groups[0]["params"]
+    } == base_ids
+    assert not base_ids.intersection(
+        {id(parameter) for parameter in optimizer.param_groups[1]["params"]}
+    )
+
+
+def test_iwg_rg_cma_optimizer_group_diagnostics_and_lr_fallback():
+    model = IWGRGCMA(16)
+    optimizer = _build_iwg_rg_cma_optimizer(
+        model,
+        base_lr=1e-4,
+        cma_lr=1e-4,
+        weight_decay=1e-4,
+    )
+    for group in optimizer.param_groups:
+        group["params"][0].grad = torch.ones_like(group["params"][0])
+    norms = _optimizer_group_grad_norms(optimizer)
+    assert set(norms) == {"base_iwg", "rg_cma"}
+    assert all(value > 0.0 for value in norms.values())
+    assert _resolved_optimizer_lrs({"lr": 1e-4}) == {
+        "base_lr": 1e-4,
+        "cma_lr": 1e-4,
+    }
+    assert _resolved_optimizer_lrs(
+        {"lr": 1e-4, "base_lr": 1e-5, "cma_lr": 5e-6}
+    ) == {"base_lr": 1e-5, "cma_lr": 5e-6}
+    with pytest.raises(ValueError, match="cma_lr must be finite and positive"):
+        _resolved_optimizer_lrs({"lr": 1e-4, "cma_lr": 0.0})
 
 
 def test_extended_training_has_fixed_checkpoint_cadence():

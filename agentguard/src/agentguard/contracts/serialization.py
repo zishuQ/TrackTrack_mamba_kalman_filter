@@ -161,9 +161,6 @@ def serialize_event(event: TrackEvent) -> dict:
         "iwg_gate": (
             _to_list(event.iwg_gate) if event.iwg_gate is not None else None
         ),
-        "revised_gate": (
-            _to_list(event.revised_gate) if event.revised_gate is not None else None
-        ),
     }
     return out
 
@@ -275,11 +272,6 @@ def deserialize_event(data: dict) -> TrackEvent:
         iwg_gate=(
             np.asarray(data["iwg_gate"])
             if data.get("iwg_gate") is not None
-            else None
-        ),
-        revised_gate=(
-            np.asarray(data["revised_gate"])
-            if data.get("revised_gate") is not None
             else None
         ),
     )

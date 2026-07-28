@@ -35,177 +35,54 @@ class Tracker(object):
         # AgentGuard integration
         self.agentguard_adapter = None
         ag_mode = getattr(args, 'agentguard_mode', 'off')
-        capture_events = getattr(args, 'capture_agentguard_events', False)
-
-        if _AGENTGUARD_AVAILABLE and (ag_mode != 'off' or capture_events):
-            import torch
+        if _AGENTGUARD_AVAILABLE and ag_mode in ('capture', 'iwg-rg-cma'):
             from agentguard.runtime.manager import AgentGuardRuntime
-            from agentguard.models.iwg import IWG
-            from agentguard.models.tgr import TGR
 
             event_sink = getattr(args, 'event_sink', None)
 
-            if ag_mode != 'off':
-                runtime_config = build_runtime_config(args)
-                iwg_ckpt = getattr(args, 'iwg_checkpoint', None)
-                tgr_ckpt = getattr(args, 'tgr_checkpoint', None)
+            runtime_config = build_runtime_config(args)
+            device = getattr(args, 'agentguard_device', 'cpu')
+            checkpoint_reid_dim = None
+            checkpoint_norm_stats = None
+            rg_cma_model = None
+
+            if ag_mode == 'iwg-rg-cma':
                 combined_ckpt = getattr(args, 'agentguard_checkpoint', None)
-                device = getattr(args, 'agentguard_device', 'cpu')
-
-                def _load_checkpoint(ckpt_path):
-                    from agentguard.data.cache_schema import FEATURE_SCHEMA_SHA256
-
-                    checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
-
-                    if 'model_state_dict' in checkpoint:
-                        sd = checkpoint['model_state_dict']
-                    elif 'state_dict' in checkpoint:
-                        sd = checkpoint['state_dict']
-                    else:
-                        sd = checkpoint
-
-                    ckpt_reid_dim = checkpoint.get('reid_dim')
-                    scalar_dim = checkpoint.get('scalar_dim')
-                    event_dim = checkpoint.get('event_dim')
-                    policy_prototypes = checkpoint.get('policy_prototypes')
-                    norm_mean = checkpoint.get('normalization_mean')
-                    norm_std = checkpoint.get('normalization_std')
-                    feature_schema_sha256 = checkpoint.get('feature_schema_sha256')
-
-                    if ckpt_reid_dim is None:
-                        raise ValueError(f"Checkpoint {ckpt_path} missing required field 'reid_dim'")
-                    if scalar_dim is None:
-                        raise ValueError(f"Checkpoint {ckpt_path} missing required field 'scalar_dim'")
-                    if scalar_dim != 63:
-                        raise ValueError(f"Checkpoint {ckpt_path} scalar_dim={scalar_dim}, expected 63")
-                    if event_dim is None:
-                        raise ValueError(f"Checkpoint {ckpt_path} missing required field 'event_dim'")
-                    if event_dim != 128:
-                        raise ValueError(f"Checkpoint {ckpt_path} event_dim={event_dim}, expected 128")
-                    if policy_prototypes is None:
-                        raise ValueError(f"Checkpoint {ckpt_path} missing required field 'policy_prototypes'")
-                    if norm_mean is None or norm_std is None:
-                        raise ValueError(f"Checkpoint {ckpt_path} missing normalization_mean/std")
-                    if feature_schema_sha256 is None:
-                        raise ValueError(f"Checkpoint {ckpt_path} missing required field 'feature_schema_sha256'")
-                    if feature_schema_sha256 != FEATURE_SCHEMA_SHA256:
-                        raise ValueError(
-                            f"Checkpoint {ckpt_path} feature schema mismatch: "
-                            f"{feature_schema_sha256!r} != {FEATURE_SCHEMA_SHA256!r}"
-                        )
-                    pp_arr = np.asarray(policy_prototypes)
-                    if pp_arr.shape != (5, 2):
-                        raise ValueError(
-                            f"Checkpoint {ckpt_path} policy_prototypes shape {pp_arr.shape}, expected (5, 2)"
-                        )
-                    if np.asarray(norm_mean).shape != (63,):
-                        raise ValueError(
-                            f"Checkpoint {ckpt_path} normalization_mean shape "
-                            f"{np.asarray(norm_mean).shape}, expected (63,)"
-                        )
-                    if np.asarray(norm_std).shape != (63,):
-                        raise ValueError(
-                            f"Checkpoint {ckpt_path} normalization_std shape "
-                            f"{np.asarray(norm_std).shape}, expected (63,)"
-                        )
-
-                    reid_proj_weight = sd.get('reid_proj.weight')
-                    if reid_proj_weight is None:
-                        reid_proj_weight = sd.get('encoder.reid_proj.weight')
-                    if reid_proj_weight is not None:
-                        inferred_dim = reid_proj_weight.shape[1]
-                        if inferred_dim != ckpt_reid_dim:
-                            raise ValueError(
-                                f"Checkpoint {ckpt_path} reid_dim={ckpt_reid_dim} "
-                                f"inconsistent with weight shape dim={inferred_dim}"
-                            )
-
-                    from agentguard.features.normalization import NormalizationStats
-                    ns = NormalizationStats()
-                    ns.mean = np.asarray(norm_mean, dtype=np.float64)
-                    ns.std = np.asarray(norm_std, dtype=np.float64)
-                    norm_stats = ns
-
-                    return sd, int(ckpt_reid_dim), norm_stats
-
-                iwg_model = None
-                tgr_model = None
-                iwg_rg_cma_model = None
-                checkpoint_reid_dim = None
-                checkpoint_norm_stats = None
-
-                if ag_mode in ('iwg', 'full'):
-                    if iwg_ckpt is None:
-                        raise RuntimeError(
-                            f"IWG checkpoint required for mode={ag_mode} but none provided"
-                        )
-                    sd_iwg, checkpoint_reid_dim, checkpoint_norm_stats = _load_checkpoint(iwg_ckpt)
-                    iwg_model = IWG(reid_dim=checkpoint_reid_dim)
-                    iwg_model.load_state_dict(sd_iwg)
-                    iwg_model.eval()
-
-                if ag_mode == 'full':
-                    if tgr_ckpt is None:
-                        raise RuntimeError(
-                            "TGR checkpoint required for full mode but none provided"
-                        )
-                    sd_tgr, tgr_reid_dim, tgr_norm_stats = _load_checkpoint(tgr_ckpt)
-                    if tgr_reid_dim != checkpoint_reid_dim:
-                        raise ValueError(
-                            f"TGR reid_dim={tgr_reid_dim} does not match IWG reid_dim={checkpoint_reid_dim}"
-                        )
-                    tgr_model = TGR(reid_dim=checkpoint_reid_dim)
-                    tgr_model.load_state_dict(sd_tgr)
-                    tgr_model.eval()
-
-                if ag_mode == 'iwg-rg-cma':
-                    if combined_ckpt is None:
-                        raise RuntimeError(
-                            "Combined AgentGuard checkpoint required for iwg-rg-cma mode"
-                        )
-                    from agentguard.features.normalization import NormalizationStats
-                    from agentguard.training.train_iwg_rg_cma import (
-                        load_iwg_rg_cma_checkpoint,
+                if combined_ckpt is None:
+                    raise RuntimeError(
+                        "Combined AgentGuard checkpoint required for iwg-rg-cma mode"
                     )
-
-                    iwg_rg_cma_model, checkpoint = load_iwg_rg_cma_checkpoint(
-                        combined_ckpt, map_location='cpu'
-                    )
-                    checkpoint_reid_dim = int(checkpoint['reid_dim'])
-                    checkpoint_norm_stats = NormalizationStats()
-                    checkpoint_norm_stats.mean = np.asarray(
-                        checkpoint['normalization_mean'], dtype=np.float64
-                    )
-                    checkpoint_norm_stats.std = np.asarray(
-                        checkpoint['normalization_std'], dtype=np.float64
-                    )
-                    runtime_config['iwg_rg_cma_max_frame_gap'] = int(
-                        checkpoint['max_frame_gap']
-                    )
-                    runtime_config['iwg_context_size'] = int(
-                        checkpoint['context_size']
-                    )
-                    iwg_rg_cma_model.eval()
-
-                runtime = AgentGuardRuntime(
-                    runtime_config,
-                    iwg_model,
-                    tgr_model,
-                    device,
-                    iwg_rg_cma_model=iwg_rg_cma_model,
+                from agentguard.features.normalization import NormalizationStats
+                from agentguard.training.train_iwg_rg_cma import (
+                    load_iwg_rg_cma_checkpoint,
                 )
-                runtime.event_sink = event_sink
 
-                if checkpoint_reid_dim is not None:
-                    runtime.init_feature_builder(
-                        reid_dim=checkpoint_reid_dim,
-                        norm_stats=checkpoint_norm_stats,
-                    )
+                rg_cma_model, checkpoint = load_iwg_rg_cma_checkpoint(
+                    combined_ckpt, map_location='cpu'
+                )
+                checkpoint_reid_dim = int(checkpoint['reid_dim'])
+                checkpoint_norm_stats = NormalizationStats()
+                checkpoint_norm_stats.mean = np.asarray(
+                    checkpoint['normalization_mean'], dtype=np.float64
+                )
+                checkpoint_norm_stats.std = np.asarray(
+                    checkpoint['normalization_std'], dtype=np.float64
+                )
+                runtime_config['rg_cma_max_gap'] = int(checkpoint['max_frame_gap'])
+                runtime_config['iwg_context_size'] = int(checkpoint['context_size'])
 
-            else:
-                # Capture-only mode: minimal runtime for event recording
-                runtime = AgentGuardRuntime({"mode": "off"}, None, None, "cpu")
-                runtime.event_sink = event_sink
+            runtime = AgentGuardRuntime(
+                runtime_config,
+                rg_cma_model=rg_cma_model,
+                device=device,
+            )
+            runtime.event_sink = event_sink
+
+            if checkpoint_reid_dim is not None:
+                runtime.init_feature_builder(
+                    reid_dim=checkpoint_reid_dim,
+                    norm_stats=checkpoint_norm_stats,
+                )
 
             self.agentguard_adapter = AgentGuardTrackerAdapter(args, vid_name, agentguard_runtime=runtime)
 
@@ -385,7 +262,7 @@ class Tracker(object):
                         ).reshape(-1)
                         event.scalar_features = fb.compute_scalar(event)
                     track.update(self.frame_id, detection)
-                    gate_decision = GateDecision(1.0, 1.0, np.ones(5, dtype=np.float64) / 5.0, 1.0)
+                    gate_decision = GateDecision(1.0, 1.0, np.ones(5, dtype=np.float64) / 5.0)
                     self.agentguard_adapter.record_event(track.track_id, event, gate_decision)
                 else:
                     agentguard_matched_batch.append((track, detection, event))
@@ -430,9 +307,9 @@ class Tracker(object):
             else:
                 track.mark_lost()
 
-        # AgentGuard: finalize first stage (TGR)
+        # AgentGuard: flush the current frame's compact events
         if self.agentguard_adapter:
-            self.agentguard_adapter.finalize_first_stage(tracked_lost)
+            self.agentguard_adapter.end_frame()
 
         # ==============================================================================================================
         # Get remained high confidence detections
@@ -550,9 +427,9 @@ class Tracker(object):
             else:
                 t.mark_lost()
 
-        # AgentGuard: finalize first stage (TGR)
+        # AgentGuard: flush the current frame's compact events
         if self.agentguard_adapter:
-            self.agentguard_adapter.finalize_first_stage(self.tracks)
+            self.agentguard_adapter.end_frame()
 
         # Remove too-old tracks
         for track in self.tracks:

@@ -12,7 +12,7 @@ from agentguard.features.scalar import compute_scalar_features
 
 class EventFeatureBuilder:
     """Builds batched feature tensors from sequences of ``TrackEvent`` objects
-    for IWG and TGR model inference.
+    for the current IWG + RG-CMA model and legacy offline dataset tensors.
 
     Parameters
     ----------
@@ -184,71 +184,16 @@ class EventFeatureBuilder:
             "mask": torch.from_numpy(mask),
         }
 
-    # ------------------------------------------------------------------
-    # TGR input building
-    # ------------------------------------------------------------------
-
-    def build_tgr_input(
-        self,
-        window_events: List[TrackEvent],
-    ) -> Dict[str, torch.Tensor]:
-        """Build batched input tensors for the TGR model.
-
-        Parameters
-        ----------
-        window_events : list of TrackEvent
-            Exactly 4 events (no ``None`` entries).  Ordered oldest first.
-
-        Returns
-        -------
-        dict with keys ``track_feats``, ``det_feats``, ``scalar_feats``,
-        ``iwg_policy_probs``, ``iwg_gates``, ``has_detection_mask`` —
-        each is a ``(1, seq_len, D)`` or ``(1, seq_len)`` tensor.
-        """
-        seq_len = len(window_events)
-        reid_dim = self.reid_dim
-
-        track_feats = np.zeros((seq_len, reid_dim), dtype=np.float64)
-        det_feats = np.zeros((seq_len, reid_dim), dtype=np.float64)
-        scalar_feats = np.zeros((seq_len, self._scalar_dim), dtype=np.float64)
-        iwg_policy_probs = np.full((seq_len, 5), 0.2, dtype=np.float64)
-        iwg_gates = np.ones((seq_len, 2), dtype=np.float64)
-        has_detection_mask = np.zeros(seq_len, dtype=np.bool_)
-
-        for i, evt in enumerate(window_events):
-            track_feats[i] = self._fit_reid(evt.track_feature)
-
-            if evt.has_detection:
-                has_detection_mask[i] = True
-            if evt.has_detection and evt.detection_feature.size > 0:
-                det_feats[i] = self._fit_reid(evt.detection_feature)
-
-            scalar_feats[i] = self._event_scalar(evt)
-
-            if evt.iwg_policy_probs is not None:
-                iwg_policy_probs[i] = evt.iwg_policy_probs.ravel()
-
-            if evt.iwg_gate is not None:
-                iwg_gates[i] = evt.iwg_gate.ravel()
-
-        # Optional normalisation
-        scalar_feats = self.normalize_scalars(scalar_feats)
-
-        # No padding mask for TGR — all 4 positions are valid
-        return {
-            "track_feats": torch.from_numpy(track_feats).unsqueeze(0).float(),
-            "det_feats": torch.from_numpy(det_feats).unsqueeze(0).float(),
-            "scalar_feats": torch.from_numpy(scalar_feats).unsqueeze(0).float(),
-            "iwg_policy_probs": torch.from_numpy(iwg_policy_probs).unsqueeze(0).float(),
-            "iwg_gates": torch.from_numpy(iwg_gates).unsqueeze(0).float(),
-            "has_detection_mask": torch.from_numpy(has_detection_mask).unsqueeze(0),
-        }
-
     def build_tgr_batch_input(
         self,
         windows: List[List[TrackEvent]],
     ) -> Dict[str, torch.Tensor]:
-        """Build TGR tensors for many track windows in one pass."""
+        """Build legacy offline temporal tensors for a batch of windows.
+
+        The online Runtime does not call this helper.  It remains temporarily
+        available to the old offline dataset until that pipeline is removed in
+        Phase 5.
+        """
         if not windows:
             return {
                 "track_feats": torch.empty((0, 0, self.reid_dim), dtype=torch.float32),
@@ -268,27 +213,29 @@ class EventFeatureBuilder:
         iwg_gates = np.ones((batch_size, seq_len, 2), dtype=np.float32)
         has_detection_mask = np.zeros((batch_size, seq_len), dtype=np.bool_)
 
-        for b, window_events in enumerate(windows):
+        for batch_index, window_events in enumerate(windows):
             if len(window_events) != seq_len:
-                raise ValueError("All TGR windows in a batch must have the same length")
-            for i, evt in enumerate(window_events):
-                track_feats[b, i] = self._fit_reid(evt.track_feature)
+                raise ValueError("All temporal windows in a batch must have the same length")
+            for position, event in enumerate(window_events):
+                track_feats[batch_index, position] = self._fit_reid(event.track_feature)
+                has_detection_mask[batch_index, position] = bool(event.has_detection)
+                if event.has_detection and event.detection_feature.size > 0:
+                    det_feats[batch_index, position] = self._fit_reid(
+                        event.detection_feature
+                    )
+                scalar_feats[batch_index, position] = self._event_scalar(event)
+                if event.iwg_policy_probs is not None:
+                    iwg_policy_probs[batch_index, position] = np.asarray(
+                        event.iwg_policy_probs
+                    ).reshape(-1)
+                if event.iwg_gate is not None:
+                    iwg_gates[batch_index, position] = np.asarray(
+                        event.iwg_gate
+                    ).reshape(-1)
 
-                if evt.has_detection:
-                    has_detection_mask[b, i] = True
-                if evt.has_detection and evt.detection_feature.size > 0:
-                    det_feats[b, i] = self._fit_reid(evt.detection_feature)
-
-                scalar_feats[b, i] = self._event_scalar(evt)
-
-                if evt.iwg_policy_probs is not None:
-                    iwg_policy_probs[b, i] = np.asarray(evt.iwg_policy_probs).reshape(-1)
-
-                if evt.iwg_gate is not None:
-                    iwg_gates[b, i] = np.asarray(evt.iwg_gate).reshape(-1)
-
-        scalar_feats = self.normalize_scalars(scalar_feats).astype(np.float32, copy=False)
-
+        scalar_feats = self.normalize_scalars(scalar_feats).astype(
+            np.float32, copy=False
+        )
         return {
             "track_feats": torch.from_numpy(track_feats),
             "det_feats": torch.from_numpy(det_feats),

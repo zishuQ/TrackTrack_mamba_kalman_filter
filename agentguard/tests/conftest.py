@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, "src")
 
-from agentguard.contracts.enums import DetectionSource, EventType, TrackLifecycle
+from agentguard.contracts.enums import DetectionSource
 from agentguard.contracts.events import TrackEvent
 from agentguard.contracts.outputs import GateDecision
 from agentguard.contracts.states import (
@@ -101,7 +101,7 @@ def mock_track_snapshot(
         feature=mock_feature.copy(),
         history=mock_history,
         end_frame_id=98,
-        state=TrackLifecycle.TRACKED,
+        state=1,
     )
 
 

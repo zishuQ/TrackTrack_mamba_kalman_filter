@@ -1,10 +1,9 @@
-from agentguard.runtime.buffers import EventBuffer, WindowBuffer
-from agentguard.runtime.checkpoint import CheckpointManager
+from agentguard.runtime.buffers import EventBuffer
 from agentguard.runtime.manager import AgentGuardRuntime
+from agentguard.runtime.statistics import RuntimeStatistics
 
 __all__ = [
     "AgentGuardRuntime",
     "EventBuffer",
-    "WindowBuffer",
-    "CheckpointManager",
+    "RuntimeStatistics",
 ]

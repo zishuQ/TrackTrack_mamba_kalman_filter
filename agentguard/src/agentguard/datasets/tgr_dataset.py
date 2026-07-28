@@ -137,7 +137,7 @@ class TGRDataset(torch.utils.data.Dataset):
         window_events = [self.events[i] for i in window_info["event_indices"]]
 
         # Build TGR input tensors via the feature builder.
-        inputs = self.feature_builder.build_tgr_input(window_events)
+        inputs = self.feature_builder.build_tgr_batch_input([window_events])
 
         # Squeeze batch dimension (feature builder adds leading 1).
         sample = {

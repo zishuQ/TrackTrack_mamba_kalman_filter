@@ -287,7 +287,7 @@ class CompactV0TGRDataset(_CompactDatasetBase):
         indices = self._windows[idx]
         records = [self.records[i] for i in indices]
         events = [self._event(r) for r in records]
-        inputs = self.feature_builder.build_tgr_input(events)
+        inputs = self.feature_builder.build_tgr_batch_input([events])
         target_gate = np.asarray([r.get("target_gate", [1.0, 1.0]) for r in records], dtype=np.float64)
         sample_weight = np.asarray([r.get("sample_weight", 1.0) for r in records], dtype=np.float64)
         valid_motion = np.asarray([r.get("valid_motion", True) for r in records], dtype=bool)

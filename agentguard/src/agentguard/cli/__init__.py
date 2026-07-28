@@ -3018,6 +3018,18 @@ def _add_train_iwg_rg_cma_parser(subparsers: argparse._SubParsersAction) -> None
     parser.add_argument("--batch-size", type=int, default=2048)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument(
+        "--base-lr",
+        type=float,
+        default=None,
+        help="Base IWG learning rate; defaults to --lr.",
+    )
+    parser.add_argument(
+        "--cma-lr",
+        type=float,
+        default=None,
+        help="RG-CMA learning rate; defaults to --lr.",
+    )
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--warmup-epochs", type=int, default=1)
     parser.add_argument("--grad-clip", type=float, default=1.0)
@@ -3043,6 +3055,21 @@ def _add_train_iwg_rg_cma_parser(subparsers: argparse._SubParsersAction) -> None
         help="Reliability token input mode; no-scalar masks normalized scalar features.",
     )
     parser.add_argument(
+        "--architecture-variant",
+        choices=[
+            "legacy",
+            "legacy-clean-cross-modal",
+            "legacy-clean-cross-modal-base-conditioned",
+            "legacy-clean-bidirectional-cma",
+            "legacy-clean-6x6-cma",
+            "direct-base",
+            "clean-cross-modal",
+            "selective-correction",
+        ],
+        default="legacy",
+        help="Model structure used for controlled RG-CMA ablations.",
+    )
+    parser.add_argument(
         "--residual-beta",
         type=float,
         default=1.0,
@@ -3065,6 +3092,22 @@ def _add_train_iwg_rg_cma_parser(subparsers: argparse._SubParsersAction) -> None
         type=float,
         default=0.0,
         help="Extra residual-loss weight for targets near the correction bound.",
+    )
+    parser.add_argument(
+        "--no-harm-weight",
+        type=float,
+        default=0.0,
+        help="Penalty when a final gate has larger target error than its base gate.",
+    )
+    parser.add_argument(
+        "--residual-target-mode",
+        choices=["safe", "oracle-confidence", "safe-selective"],
+        default="safe",
+        help=(
+            "CMA residual target. safe-selective learns only the additional "
+            "safe-to-oracle correction and exactly abstains on uncertain or "
+            "indecisive labels."
+        ),
     )
     parser.add_argument(
         "--init-checkpoint",
@@ -3113,6 +3156,12 @@ def _cmd_train_iwg_rg_cma(args: argparse.Namespace) -> None:
         "batch_size": int(args.batch_size),
         "num_workers": int(args.num_workers),
         "lr": float(args.lr),
+        "base_lr": (
+            float(args.base_lr) if args.base_lr is not None else float(args.lr)
+        ),
+        "cma_lr": (
+            float(args.cma_lr) if args.cma_lr is not None else float(args.lr)
+        ),
         "weight_decay": float(args.weight_decay),
         "warmup_epochs": int(args.warmup_epochs),
         "grad_clip": float(args.grad_clip),
@@ -3120,10 +3169,13 @@ def _cmd_train_iwg_rg_cma(args: argparse.Namespace) -> None:
         "correction_bound": float(args.correction_bound),
         "context_size": int(args.context_size),
         "reliability_mode": str(args.reliability_mode),
+        "architecture_variant": str(args.architecture_variant),
         "residual_beta": float(args.residual_beta),
         "residual_weight": float(args.residual_weight),
         "revision_weight": float(args.revision_weight),
         "hard_example_gain": float(args.hard_example_gain),
+        "no_harm_weight": float(args.no_harm_weight),
+        "residual_target_mode": str(args.residual_target_mode),
         "init_checkpoint": (
             str(Path(args.init_checkpoint).resolve()) if args.init_checkpoint else ""
         ),

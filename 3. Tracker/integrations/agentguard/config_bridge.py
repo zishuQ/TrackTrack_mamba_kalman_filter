@@ -12,23 +12,15 @@ def build_runtime_config(args) -> dict:
     Returns
     -------
     dict
-        A flat dictionary with keys ``mode``, ``iwg_checkpoint``,
-        ``tgr_checkpoint``, and ``device``.  Each value defaults to a safe
-        fallback when the corresponding attribute is absent from *args*.
+    A flat dictionary with the current Runtime keys ``mode``,
+    ``rg_cma_output``, ``rg_cma_alpha``, ``rg_cma_max_gap``, and ``device``. Each value
+    defaults to a safe fallback when the corresponding attribute is absent
+    from *args*.
     """
     return {
         "mode": getattr(args, "agentguard_mode", "off"),
-        "iwg_checkpoint": getattr(args, "iwg_checkpoint", None),
-        "tgr_checkpoint": getattr(args, "tgr_checkpoint", None),
-        "agentguard_checkpoint": getattr(args, "agentguard_checkpoint", None),
-        "iwg_rg_cma_output": getattr(args, "iwg_rg_cma_output", "final"),
-        "iwg_rg_cma_max_frame_gap": 30,
+        "rg_cma_output": getattr(args, "rg_cma_output", "final"),
+        "rg_cma_alpha": getattr(args, "rg_cma_alpha", 1.0),
+        "rg_cma_max_gap": 30,
         "device": getattr(args, "agentguard_device", "cpu"),
-        "replay_diff_threshold": float(
-            getattr(args, "agentguard_replay_diff_threshold", 0.0) or 0.0
-        ),
-        "tgr_frame_stride": max(
-            int(getattr(args, "agentguard_tgr_frame_stride", 1) or 1),
-            1,
-        ),
     }

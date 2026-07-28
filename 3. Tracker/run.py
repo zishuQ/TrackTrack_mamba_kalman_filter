@@ -116,52 +116,25 @@ def make_parser():
                        help="Disable Global Motion Compensation for robustness testing")
     parser.add_argument("--tracker-suffix", type=str, default="",
                        help="Suffix appended to tracker output folder name for unique results")
-    parser.add_argument(
-        "--legacy-output-naming",
-        action="store_true",
-        help=(
-            "Keep the historical AgentGuard output-folder spelling. By default, "
-            "iwg-rg-cma outputs use the shorter '<suffix>_iwg_rg_cma_<base|final>' name."
-        ),
-    )
     parser.add_argument("--sequences", type=str, nargs="+", default=None,
                        help="Only track specific sequences (e.g. --sequences MOT20-01)")
 
     # AgentGuard parameters
     parser.add_argument("--agentguard-mode", type=str, default="off",
-                       choices=["off", "iwg", "full", "iwg-rg-cma"],
-                       help="AgentGuard mode: off, iwg, full, or IWG+RG-CMA")
-    parser.add_argument("--iwg-checkpoint", type=str, default=None,
-                       help="Path to IWG model checkpoint (.pt)")
-    parser.add_argument("--tgr-checkpoint", type=str, default=None,
-                       help="Path to TGR model checkpoint (.pt)")
+                       choices=["off", "capture", "iwg-rg-cma"],
+                       help="AgentGuard mode: off, capture, or IWG+RG-CMA")
     parser.add_argument("--agentguard-checkpoint", type=str, default=None,
                        help="Path to one combined IWG+RG-CMA checkpoint file (.pt); directories are not accepted")
-    parser.add_argument("--iwg-rg-cma-output", choices=["base", "final"], default="final",
+    parser.add_argument(
+                       "--iwg-rg-cma-output", "--rg-cma-output",
+                       dest="rg_cma_output", choices=["base", "final"], default="final",
                        help="Apply base or RG-CMA-refined gate from an IWG RG-CMA checkpoint")
+    parser.add_argument(
+                       "--iwg-rg-cma-alpha", "--rg-cma-alpha",
+                       dest="rg_cma_alpha", type=float, default=1.0,
+                       help="Inference-only RG-CMA correction multiplier (alpha >= 0; 1.0 is the checkpoint final gate)")
     parser.add_argument("--agentguard-device", type=str, default="cpu",
                        help="Device for AgentGuard inference (cpu or cuda)")
-    parser.add_argument(
-        "--agentguard-replay-diff-threshold",
-        type=float,
-        default=0.0,
-        help=(
-            "Full mode speed knob. If the max absolute TGR gate revision "
-            "within a window is <= this threshold, skip live replay and "
-            "checkpoint roll for that window. 0.0 preserves the exact path "
-            "except for numerically identical gates."
-        ),
-    )
-    parser.add_argument(
-        "--agentguard-tgr-frame-stride",
-        type=int,
-        default=1,
-        help=(
-            "Full mode speed knob. Run TGR/replay only every N tracker frames; "
-            "full windows on skipped frames are slid forward without revision. "
-            "1 preserves the exact full path."
-        ),
-    )
     parser.add_argument(
         "--detection-cache-root",
         type=str,
@@ -452,15 +425,10 @@ def run():
         trackers_to_eval += '_' + args.kf_type
     if hasattr(args, 'tracker_suffix') and args.tracker_suffix:
         trackers_to_eval += '_' + args.tracker_suffix
-    if args.agentguard_mode == 'iwg':
-        trackers_to_eval += '_agentguard_iwg'
-    elif args.agentguard_mode == 'full':
-        trackers_to_eval += '_agentguard_full'
+    if args.agentguard_mode == 'capture':
+        trackers_to_eval += '_agentguard_capture'
     elif args.agentguard_mode == 'iwg-rg-cma':
-        if args.legacy_output_naming:
-            trackers_to_eval += f'_agentguard_iwg_rg_cma_{args.iwg_rg_cma_output}'
-        else:
-            trackers_to_eval += f'_iwg_rg_cma_{args.iwg_rg_cma_output}'
+        trackers_to_eval += f'_iwg_rg_cma_{args.rg_cma_output}'
     result_folder_base = os.path.join(args.output_dir, trackers_to_eval)
     if 'dance' in args.dataset.lower() and args.mode == 'test':
         result_folder = os.path.join(result_folder_base, 'tracker')
@@ -544,13 +512,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # AgentGuard validation
-    if args.agentguard_mode == 'iwg' and args.iwg_checkpoint is None:
-        parser.error("--iwg-checkpoint is required when --agentguard-mode=iwg")
-    if args.agentguard_mode == 'full':
-        if args.iwg_checkpoint is None:
-            parser.error("--iwg-checkpoint is required when --agentguard-mode=full")
-        if args.tgr_checkpoint is None:
-            parser.error("--tgr-checkpoint is required when --agentguard-mode=full")
     if args.agentguard_mode == 'iwg-rg-cma' and args.agentguard_checkpoint is None:
         parser.error("--agentguard-checkpoint is required when --agentguard-mode=iwg-rg-cma")
 

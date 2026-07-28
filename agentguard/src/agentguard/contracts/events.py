@@ -17,8 +17,8 @@ from agentguard.contracts.states import (
 class TrackEvent:
     """Mutable container holding all data associated with a single track event.
 
-    Fields are populated incrementally during tracking and optionally revised
-    during offline replay / verification.
+    Fields are populated incrementally during tracking and can be persisted
+    by the compact event cache.
     """
 
     # --- Identity & frame metadata ---
@@ -55,6 +55,3 @@ class TrackEvent:
     # --- IWG outputs (set during online inference or rollout) ---
     iwg_policy_probs: Optional[np.ndarray] = None
     iwg_gate: Optional[np.ndarray] = None
-
-    # --- TGR revised gate (set during full-mode replay) ---
-    revised_gate: Optional[np.ndarray] = None

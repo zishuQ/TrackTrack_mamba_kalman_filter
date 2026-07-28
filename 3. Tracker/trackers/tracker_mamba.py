@@ -37,11 +37,10 @@ class TrackerMamba(object):
         # Native Mamba events are captured for offline training only. Online
         # AgentGuard inference stays attached to the NSA tracker.
         self.agentguard_adapter = None
-        capture_events = getattr(args, 'capture_agentguard_events', False)
-        if _AGENTGUARD_AVAILABLE and capture_events:
+        if _AGENTGUARD_AVAILABLE and getattr(args, 'agentguard_mode', 'off') == 'capture':
             from agentguard.runtime.manager import AgentGuardRuntime
 
-            runtime = AgentGuardRuntime({"mode": "off"}, None, None, "cpu")
+            runtime = AgentGuardRuntime({"mode": "capture"}, device="cpu")
             runtime.event_sink = getattr(args, 'event_sink', None)
             self.agentguard_adapter = AgentGuardTrackerAdapter(
                 args, vid_name, agentguard_runtime=runtime
@@ -364,7 +363,6 @@ class TrackerMamba(object):
                     1.0,
                     1.0,
                     np.ones(5, dtype=np.float64) / 5.0,
-                    1.0,
                 )
                 self.agentguard_adapter.record_event(
                     track.track_id, event, decision
@@ -388,7 +386,7 @@ class TrackerMamba(object):
             track.mark_lost()
 
         if self.agentguard_adapter:
-            self.agentguard_adapter.finalize_first_stage(tracked_lost)
+            self.agentguard_adapter.end_frame()
 
         dets_high_left = [
             detection_pool[index]
@@ -504,7 +502,7 @@ class TrackerMamba(object):
             track.mark_lost()
 
         if self.agentguard_adapter:
-            self.agentguard_adapter.finalize_first_stage(self.tracks)
+            self.agentguard_adapter.end_frame()
 
         for track in self.tracks:
             if self.frame_id - track.end_frame_id > self.max_time_lost:

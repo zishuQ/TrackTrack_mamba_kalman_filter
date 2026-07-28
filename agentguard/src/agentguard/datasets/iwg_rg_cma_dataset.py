@@ -436,7 +436,7 @@ def accepted_iwg_rg_cma_dataset_schema_sha256(
         }
     )
 COMPACT_INDEX_FORMAT = "compact_memmap_v1"
-COMPACT_SAMPLE_ARRAY_FILES = {
+COMPACT_SAMPLE_ARRAY_FILES_V1 = {
     "event_indices": "event_indices.npy",
     "event_shard_ids": "event_shard_ids.npy",
     "event_offsets": "event_offsets.npy",
@@ -449,6 +449,14 @@ COMPACT_SAMPLE_ARRAY_FILES = {
     "valid_channels": "valid_channels.npy",
     "sample_weight": "sample_weight.npy",
 }
+COMPACT_RESIDUAL_TARGET_ARRAY_FILES = {
+    "oracle_gate_target": "oracle_gate_target.npy",
+    "gate_confidence": "gate_confidence.npy",
+}
+COMPACT_SAMPLE_ARRAY_FILES = {
+    **COMPACT_SAMPLE_ARRAY_FILES_V1,
+    **COMPACT_RESIDUAL_TARGET_ARRAY_FILES,
+}
 COMPACT_TIMELINE_ARRAY_FILES = {
     "timeline_track_feats": "timeline_track_feats.npy",
     "timeline_scalar_feats": "timeline_scalar_feats.npy",
@@ -456,7 +464,7 @@ COMPACT_TIMELINE_ARRAY_FILES = {
     "timeline_detection_indices": "timeline_detection_indices.npy",
 }
 COMPACT_INDEX_ARRAY_FILES = {
-    **COMPACT_SAMPLE_ARRAY_FILES,
+    **COMPACT_SAMPLE_ARRAY_FILES_V1,
     **COMPACT_TIMELINE_ARRAY_FILES,
 }
 
@@ -545,9 +553,10 @@ def _dataset_source_contract(
 def _write_compact_index_arrays(
     index_dir: Path,
     arrays: dict[str, np.ndarray],
+    filenames: dict[str, str] | None = None,
 ) -> list[Path]:
     paths: list[Path] = []
-    filenames = COMPACT_SAMPLE_ARRAY_FILES
+    filenames = filenames or COMPACT_SAMPLE_ARRAY_FILES_V1
     for name, value in arrays.items():
         if name not in filenames:
             continue
@@ -707,7 +716,16 @@ def _build_compact_sequence_index(
         "valid_channels": np.asarray(labels["valid_channels"]),
         "sample_weight": np.asarray(labels["sample_weight"]),
     }
-    paths = _write_compact_index_arrays(index_dir, arrays)
+    sample_array_files = dict(COMPACT_SAMPLE_ARRAY_FILES_V1)
+    if "oracle_gate_target" in labels and "gate_confidence" in labels:
+        arrays["oracle_gate_target"] = np.asarray(labels["oracle_gate_target"])
+        arrays["gate_confidence"] = np.asarray(labels["gate_confidence"])
+        sample_array_files.update(COMPACT_RESIDUAL_TARGET_ARRAY_FILES)
+    paths = _write_compact_index_arrays(
+        index_dir,
+        arrays,
+        filenames=sample_array_files,
+    )
     paths.extend(
         index_dir / filename for filename in COMPACT_TIMELINE_ARRAY_FILES.values()
     )
@@ -794,6 +812,8 @@ def build_iwg_rg_cma_dataset(
     timeline_counts: dict[str, dict[str, int]] = {}
     manifest_paths: list[Path] = []
     reid_dims: set[int] = set()
+    residual_target_schema = "safe-v1"
+    compact_label_schema_sha256 = None
     output_dir.mkdir(parents=True)
     norm_path = output_dir / "norm_stats.npz"
     if dataset == "MOT17":
@@ -856,6 +876,28 @@ def build_iwg_rg_cma_dataset(
             raise ValueError("only NSA rollout labels are supported")
         index_root = output_dir / "compact_index"
         index_root.mkdir()
+        first_manifest = json.loads(
+            (label_dir / sequences[0] / "manifest.json").read_text()
+        )
+        compact_label_schema_sha256 = str(
+            first_manifest.get("compact_label_schema_sha256", "")
+        )
+        first_array_files = first_manifest.get("array_files", {})
+        if (
+            "oracle_gate_target" in first_array_files
+            and "gate_confidence" in first_array_files
+        ):
+            residual_target_schema = "oracle-confidence-v1"
+            sample_array_files = {
+                **COMPACT_SAMPLE_ARRAY_FILES_V1,
+                **COMPACT_RESIDUAL_TARGET_ARRAY_FILES,
+            }
+        else:
+            sample_array_files = dict(COMPACT_SAMPLE_ARRAY_FILES_V1)
+        compact_index_array_files = {
+            **sample_array_files,
+            **COMPACT_TIMELINE_ARRAY_FILES,
+        }
         compact_index_paths: list[Path] = []
         segment_offset = 0
         for sequence in sequences:
@@ -895,7 +937,7 @@ def build_iwg_rg_cma_dataset(
         label_files_sha256 = _sha256_relative_file_set(label_paths, label_dir)
         index_metadata = {
             "train_index_dir": index_root.name,
-            "compact_index_array_files": COMPACT_INDEX_ARRAY_FILES,
+            "compact_index_array_files": compact_index_array_files,
         }
         num_train_samples = sum(
             counts["labeled_endpoints"] for counts in timeline_counts.values()
@@ -955,6 +997,12 @@ def build_iwg_rg_cma_dataset(
         "timeline_counts": timeline_counts,
         "dataset_schema_version": IWG_RG_CMA_DATASET_SCHEMA_VERSION,
         "dataset_schema_sha256": dataset_schema_sha256,
+        "residual_target_schema": residual_target_schema,
+        **(
+            {"compact_label_schema_sha256": compact_label_schema_sha256}
+            if compact_label_schema_sha256 is not None
+            else {}
+        ),
         "label_schema_version": ROLLOUT_LABEL_SCHEMA_VERSION,
         "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
         "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
@@ -980,6 +1028,9 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
         self.labels: dict[str, dict[str, Any]] = {}
         self._compact_indexes: dict[str, dict[str, np.ndarray]] = {}
         self._compact_boundaries: list[int] = []
+        self._compact_index_array_files = dict(
+            self.metadata.get("compact_index_array_files", COMPACT_INDEX_ARRAY_FILES)
+        )
         if self.index_format == "jsonl_v1":
             with (self.dataset_dir / self.metadata["train_index_file"]).open() as handle:
                 self.samples = [json.loads(line) for line in handle if line.strip()]
@@ -990,10 +1041,20 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
         elif self.index_format == COMPACT_INDEX_FORMAT:
             total = 0
             index_root = self.dataset_dir / self.metadata["train_index_dir"]
-            sample_array_files = dict(COMPACT_SAMPLE_ARRAY_FILES)
+            timeline_names = set(COMPACT_TIMELINE_ARRAY_FILES)
+            index_array_files = dict(self._compact_index_array_files)
+            sample_array_files = {
+                name: filename
+                for name, filename in index_array_files.items()
+                if name not in timeline_names
+            }
             index_array_files = {
                 **sample_array_files,
-                **COMPACT_TIMELINE_ARRAY_FILES,
+                **{
+                    name: filename
+                    for name, filename in index_array_files.items()
+                    if name in timeline_names
+                },
             }
             for sequence in self.metadata["train_sequences"]:
                 sequence_dir = index_root / sequence
@@ -1223,7 +1284,7 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
         ):
             index_root = self.dataset_dir / self.metadata["train_index_dir"]
             for sequence in self.metadata["train_sequences"]:
-                for filename in COMPACT_INDEX_ARRAY_FILES.values():
+                for filename in self._compact_index_array_files.values():
                     path = index_root / sequence / filename
                     descriptor = os.open(path, os.O_RDONLY)
                     try:
@@ -1248,6 +1309,8 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
             index += len(self)
         if index < 0 or index >= len(self):
             raise IndexError(index)
+        oracle_gate = None
+        gate_confidence = None
         if self.index_format == "jsonl_v1":
             sample = self.samples[index]
             sequence = str(sample["sequence"])
@@ -1259,6 +1322,17 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
             label = self.labels[sample["label_key"]]
             safe_gate = np.asarray(
                 [label["motion_safe_target"], label["appearance_safe_target"]],
+                dtype=np.float32,
+            )
+            oracle_gate = np.asarray(
+                [label["motion_soft_target"], label["appearance_soft_target"]],
+                dtype=np.float32,
+            )
+            gate_confidence = np.asarray(
+                [
+                    label["motion_label_confidence"],
+                    label["appearance_label_confidence"],
+                ],
                 dtype=np.float32,
             )
             policy_target = np.asarray(
@@ -1303,12 +1377,35 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
                 dtype=np.float32,
                 copy=True,
             )
+            if "oracle_gate_target" in compact:
+                oracle_gate = np.array(
+                    compact["oracle_gate_target"][local_index],
+                    dtype=np.float32,
+                    copy=True,
+                )
+                gate_confidence = np.array(
+                    compact["gate_confidence"][local_index],
+                    dtype=np.float32,
+                    copy=True,
+                )
             cue_target = np.array(
                 compact["cue_target"][local_index], dtype=np.float32, copy=True
             )
             risk_target = np.array(
                 compact["risk_target"][local_index], dtype=np.float32, copy=True
             )
+            if oracle_gate is None and gate_confidence is None:
+                # Legacy v3 compact labels already contain both signals in
+                # encoded form: risk[0:2] = 1 - oracle gate and cue[0:2]
+                # = motion/appearance label confidence. Keep the old files
+                # immutable and materialize the fields only for this sample.
+                if risk_target.shape != (4,) or cue_target.shape != (3,):
+                    raise ValueError(
+                        "legacy compact labels cannot derive oracle-confidence "
+                        f"targets: risk={risk_target.shape}, cue={cue_target.shape}"
+                    )
+                oracle_gate = np.clip(1.0 - risk_target[:2], 0.0, 1.0)
+                gate_confidence = np.clip(cue_target[:2], 0.0, 1.0)
             valid = compact["valid_channels"][local_index]
             valid_motion = bool(valid[0])
             valid_appearance = bool(valid[1])
@@ -1373,7 +1470,7 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
         reset[pad_left] = True
         scalar = self.norm_stats.transform(scalar).astype(np.float32)
         scalar[padding] = 0.0
-        return {
+        result = {
             "track_feats": torch.from_numpy(track),
             "det_feats": torch.from_numpy(detection),
             "scalar_feats": torch.from_numpy(scalar),
@@ -1393,6 +1490,10 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
             "segment_id": segment_id,
             "label_key": label_key,
         }
+        if oracle_gate is not None and gate_confidence is not None:
+            result["oracle_gate_target"] = torch.from_numpy(oracle_gate)
+            result["gate_confidence"] = torch.from_numpy(gate_confidence)
+        return result
 
     @staticmethod
     def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:

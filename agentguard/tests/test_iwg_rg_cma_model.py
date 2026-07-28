@@ -5,11 +5,23 @@ import torch.nn.functional as F
 
 from agentguard.models.event_encoder import EventEncoder
 from agentguard.models.iwg_rg_cma import (
+    ARCHITECTURE_CLEAN_CROSS_MODAL,
+    ARCHITECTURE_DIRECT_BASE,
+    ARCHITECTURE_LEGACY_CLEAN_6X6_CMA,
+    ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA,
+    ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
+    ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED,
+    ARCHITECTURE_SELECTIVE_CORRECTION,
+    CLEAN_MOTION_SCALAR_INDICES,
+    CLEAN_RELIABILITY_SCALAR_INDICES,
     IWGRGCMA,
     RG_CMA_CORRECTION_BOUND,
     SafeDirectIWG,
 )
-from agentguard.training.loss_iwg_rg_cma import compute_iwg_rg_cma_loss
+from agentguard.training.loss_iwg_rg_cma import (
+    _safe_selective_correction_target,
+    compute_iwg_rg_cma_loss,
+)
 
 
 def _batch(batch_size: int = 2, length: int = 8, reid_dim: int = 16) -> dict:
@@ -302,3 +314,360 @@ def test_loss_v2_is_explicit_and_reports_correction_diagnostics():
     assert components_v2["correction_abs_p95"] >= components_v2["correction_abs_p50"]
     assert 0.0 <= components_v2["correction_nonzero_rate"] <= 1.0
     assert 0.0 <= components_v2["correction_saturation_rate"] <= 1.0
+
+
+def test_safe_selective_target_has_exact_abstention_and_decisive_residuals():
+    safe = torch.tensor([[0.8, 0.8], [0.325, 0.925]])
+    oracle = torch.tensor([[0.1, 0.55], [0.1, 0.9]])
+    confidence = torch.tensor([[0.49, 0.9], [0.75, 0.75]])
+
+    target, unlock = _safe_selective_correction_target(
+        safe,
+        oracle,
+        confidence,
+        correction_bound=0.05,
+    )
+
+    torch.testing.assert_close(unlock[0], torch.zeros(2))
+    torch.testing.assert_close(target[0], torch.zeros(2))
+    torch.testing.assert_close(unlock[1], torch.ones(2))
+    torch.testing.assert_close(target[1], torch.tensor([-0.05, -0.025]))
+    assert (target <= 0.0).all()
+
+
+def test_safe_selective_auxiliary_losses_do_not_oppose_exact_target():
+    batch = _batch(batch_size=2, length=6)
+    base = torch.tensor([[0.4, 0.4], [0.1, 0.1]])
+    correction = torch.full((2, 2), -0.05, requires_grad=True)
+    batch.update(
+        {
+            "safe_gate_target": torch.tensor(
+                [[0.4375, 0.4375], [0.28, 0.28]]
+            ),
+            "oracle_gate_target": torch.full((2, 2), 0.1),
+            "gate_confidence": torch.tensor(
+                [[0.625, 0.625], [0.8, 0.8]]
+            ),
+        }
+    )
+    outputs = {
+        "base_gate": base,
+        "refined_gate": torch.clamp(base + correction, 0.0, 1.0),
+        "gate_correction": correction,
+        "policy_probs": batch["policy_safe_soft_target"],
+        "cue_logits": torch.zeros((2, 3)),
+        "risk_logits": torch.zeros((2, 4)),
+    }
+
+    _, components = compute_iwg_rg_cma_loss(
+        outputs,
+        batch,
+        correction_bound=0.05,
+        residual_target_mode="safe-selective",
+        revision_weight=0.05,
+        no_harm_weight=0.1,
+    )
+
+    torch.testing.assert_close(components["residual_loss"], torch.tensor(0.0))
+    torch.testing.assert_close(components["revision_loss"], torch.tensor(0.0))
+    torch.testing.assert_close(components["no_harm_loss"], torch.tensor(0.0))
+
+    wrong = dict(outputs)
+    wrong_correction = torch.full((2, 2), 0.01)
+    wrong["gate_correction"] = wrong_correction
+    wrong["refined_gate"] = torch.clamp(base + wrong_correction, 0.0, 1.0)
+    _, wrong_components = compute_iwg_rg_cma_loss(
+        wrong,
+        batch,
+        correction_bound=0.05,
+        residual_target_mode="safe-selective",
+        revision_weight=0.05,
+        no_harm_weight=0.1,
+    )
+    assert wrong_components["no_harm_loss"] > 0.0
+
+
+def test_safe_selective_cma_gradient_is_nonzero_and_base_is_isolated():
+    torch.manual_seed(29)
+    model = IWGRGCMA(
+        16,
+        correction_bound=0.05,
+        architecture_variant=ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
+    ).train()
+    batch = _batch(batch_size=2, length=6)
+    oracle = torch.tensor([[0.1, 0.9], [0.2, 0.8]])
+    confidence = torch.full((2, 2), 0.75)
+    batch["oracle_gate_target"] = oracle
+    batch["gate_confidence"] = confidence
+    batch["safe_gate_target"] = confidence * oracle + (1.0 - confidence)
+
+    outputs = _forward(model, batch)
+    _, components = compute_iwg_rg_cma_loss(
+        outputs,
+        batch,
+        correction_bound=0.05,
+        residual_target_mode="safe-selective",
+        residual_weight=0.5,
+        revision_weight=0.05,
+        no_harm_weight=0.1,
+    )
+    cma_objective = (
+        components["final_loss"]
+        + 0.5 * components["residual_loss"]
+        + 0.05 * components["revision_loss"]
+        + 0.1 * components["no_harm_loss"]
+    )
+    cma_objective.backward()
+
+    assert _has_no_grad(model.iwg)
+    assert _has_finite_nonzero_grad(model.motion_correction_head)
+    assert _has_finite_nonzero_grad(model.appearance_correction_head)
+
+
+def test_direct_base_gate_is_continuous_and_policy_is_auxiliary_only():
+    torch.manual_seed(101)
+    model = IWGRGCMA(
+        16,
+        correction_bound=0.05,
+        architecture_variant=ARCHITECTURE_DIRECT_BASE,
+    ).eval()
+    batch = _batch()
+    with torch.no_grad():
+        before = _forward(model, batch)
+        for parameter in model.iwg.policy_head.parameters():
+            parameter.add_(torch.randn_like(parameter) * 20.0)
+        after = _forward(model, batch)
+    torch.testing.assert_close(before["base_gate"], after["base_gate"])
+    assert not torch.equal(before["policy_probs"], after["policy_probs"])
+    assert ((before["base_gate"] > 0.0) & (before["base_gate"] < 1.0)).all()
+
+
+def test_clean_cross_modal_uses_pure_motion_indices_and_two_tokens():
+    torch.manual_seed(103)
+    model = IWGRGCMA(
+        16,
+        correction_bound=0.05,
+        architecture_variant=ARCHITECTURE_CLEAN_CROSS_MODAL,
+    ).eval()
+    scalar = torch.randn(2, 6, 63)
+    reliability_changed = scalar.clone()
+    reliability_changed[..., list(CLEAN_RELIABILITY_SCALAR_INDICES)] += 50.0
+    motion_changed = scalar.clone()
+    motion_changed[..., CLEAN_MOTION_SCALAR_INDICES[0]] += 50.0
+    with torch.no_grad():
+        clean = model._encode_clean_motion(scalar)
+        same_motion = model._encode_clean_motion(reliability_changed)
+        changed_motion = model._encode_clean_motion(motion_changed)
+        outputs = _forward(model, _batch())
+    torch.testing.assert_close(clean, same_motion)
+    assert not torch.equal(clean, changed_motion)
+    assert outputs["cross_modal_attention_weights"].shape == (2, 4, 2, 2)
+    assert not hasattr(model, "reliability_projection")
+
+
+def test_legacy_clean_cross_modal_preserves_legacy_base_and_uses_two_tokens():
+    torch.manual_seed(105)
+    legacy = IWGRGCMA(16, correction_bound=0.05).eval()
+    clean = IWGRGCMA(
+        16,
+        correction_bound=0.05,
+        architecture_variant=ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
+    ).eval()
+    clean.iwg.load_state_dict(legacy.iwg.state_dict(), strict=True)
+    batch = _batch()
+    with torch.no_grad():
+        legacy_base = legacy.iwg(
+            batch["track_feats"],
+            batch["det_feats"],
+            batch["scalar_feats"],
+            batch["padding_mask"],
+            batch["reset_mask"],
+        )
+        clean_base = clean.iwg(
+            batch["track_feats"],
+            batch["det_feats"],
+            batch["scalar_feats"],
+            batch["padding_mask"],
+            batch["reset_mask"],
+        )
+        outputs = _forward(clean, batch)
+    torch.testing.assert_close(legacy_base["base_gate"], clean_base["base_gate"])
+    assert outputs["cross_modal_attention_weights"].shape == (2, 4, 2, 2)
+    assert not hasattr(clean, "reliability_projection")
+
+
+def test_base_conditioned_correction_heads_add_one_base_gate_feature():
+    torch.manual_seed(106)
+    model = IWGRGCMA(
+        16,
+        correction_bound=0.05,
+        architecture_variant=ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED,
+    ).eval()
+    batch = _batch()
+    with torch.no_grad():
+        outputs = _forward(model, batch)
+    assert model.motion_correction_head[0].in_features == 129
+    assert model.appearance_correction_head[0].in_features == 129
+    assert outputs["cross_modal_attention_weights"].shape == (2, 4, 2, 2)
+    assert not hasattr(model, "reliability_projection")
+
+
+def test_bidirectional_cma_uses_both_opposite_modality_histories():
+    torch.manual_seed(108)
+    legacy = IWGRGCMA(16, correction_bound=0.05).eval()
+    model = IWGRGCMA(
+        16,
+        correction_bound=0.05,
+        architecture_variant=ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA,
+    ).eval()
+    model.iwg.load_state_dict(legacy.iwg.state_dict(), strict=True)
+    batch = _batch()
+    with torch.no_grad():
+        legacy_base = legacy.iwg(
+            batch["track_feats"],
+            batch["det_feats"],
+            batch["scalar_feats"],
+            batch["padding_mask"],
+            batch["reset_mask"],
+        )
+        enhanced_base = model.iwg(
+            batch["track_feats"],
+            batch["det_feats"],
+            batch["scalar_feats"],
+            batch["padding_mask"],
+            batch["reset_mask"],
+        )
+        outputs = _forward(model, batch)
+    torch.testing.assert_close(legacy_base["base_gate"], enhanced_base["base_gate"])
+    assert outputs["appearance_to_motion_attention_weights"].shape == (2, 4, 6)
+    assert outputs["motion_to_appearance_attention_weights"].shape == (2, 4, 6)
+    assert outputs["cross_modal_attention_weights"].shape == (2, 4, 2, 2)
+    assert hasattr(model, "appearance_to_motion_cross_attention")
+    assert hasattr(model, "motion_to_appearance_cross_attention")
+    assert model.motion_correction_head[0].in_features == 128
+    assert model.appearance_correction_head[0].in_features == 128
+    assert not hasattr(model, "reliability_projection")
+
+    model.train()
+    for head in (model.motion_correction_head, model.appearance_correction_head):
+        torch.nn.init.normal_(head[-1].weight, std=0.1)
+        torch.nn.init.normal_(head[-1].bias, std=0.1)
+    _forward(model, batch)["refined_gate"].sum().backward()
+    assert _has_finite_nonzero_grad(model.appearance_to_motion_cross_attention)
+    assert _has_finite_nonzero_grad(model.motion_to_appearance_cross_attention)
+
+
+def test_full_history_6x6_cma_precedes_endpoint_temporal_readout():
+    torch.manual_seed(110)
+    legacy = IWGRGCMA(16, correction_bound=0.05).eval()
+    model = IWGRGCMA(
+        16,
+        correction_bound=0.05,
+        architecture_variant=ARCHITECTURE_LEGACY_CLEAN_6X6_CMA,
+    ).eval()
+    model.iwg.load_state_dict(legacy.iwg.state_dict(), strict=True)
+    batch = _batch()
+    with torch.no_grad():
+        legacy_base = legacy.iwg(
+            batch["track_feats"],
+            batch["det_feats"],
+            batch["scalar_feats"],
+            batch["padding_mask"],
+            batch["reset_mask"],
+        )
+        enhanced_base = model.iwg(
+            batch["track_feats"],
+            batch["det_feats"],
+            batch["scalar_feats"],
+            batch["padding_mask"],
+            batch["reset_mask"],
+        )
+        outputs = _forward(model, batch)
+    torch.testing.assert_close(legacy_base["base_gate"], enhanced_base["base_gate"])
+    assert outputs["appearance_to_motion_6x6_attention_weights"].shape == (
+        2,
+        4,
+        6,
+        6,
+    )
+    assert outputs["motion_to_appearance_6x6_attention_weights"].shape == (
+        2,
+        4,
+        6,
+        6,
+    )
+    assert outputs["motion_attention_weights"].shape == (2, 4, 6)
+    assert outputs["appearance_attention_weights"].shape == (2, 4, 6)
+    assert "cross_modal_attention_weights" not in outputs
+    assert hasattr(model, "bidirectional_history_cross_attention")
+    assert not hasattr(model, "appearance_to_motion_cross_attention")
+    assert not hasattr(model, "motion_to_appearance_cross_attention")
+    assert not hasattr(model, "cross_modal_attention")
+
+    model.train()
+    for head in (model.motion_correction_head, model.appearance_correction_head):
+        torch.nn.init.normal_(head[-1].weight, std=0.1)
+        torch.nn.init.normal_(head[-1].bias, std=0.1)
+    _forward(model, batch)["refined_gate"].sum().backward()
+    assert _has_finite_nonzero_grad(model.bidirectional_history_cross_attention)
+    assert _has_finite_nonzero_grad(model.motion_temporal_attention)
+    assert _has_finite_nonzero_grad(model.appearance_temporal_attention)
+
+
+def test_selective_correction_scales_raw_delta_and_no_harm_is_explicit():
+    torch.manual_seed(107)
+    model = IWGRGCMA(
+        16,
+        correction_bound=0.05,
+        architecture_variant=ARCHITECTURE_SELECTIVE_CORRECTION,
+    ).eval()
+    batch = _batch()
+    with torch.no_grad():
+        for head in (model.motion_correction_head, model.appearance_correction_head):
+            torch.nn.init.normal_(head[-1].weight, std=0.1)
+            torch.nn.init.normal_(head[-1].bias, std=0.1)
+        outputs = _forward(model, batch)
+    assert ((outputs["correction_scale"] >= 0.0) & (outputs["correction_scale"] <= 1.0)).all()
+    torch.testing.assert_close(
+        outputs["gate_correction"],
+        outputs["raw_gate_correction"] * outputs["correction_scale"],
+    )
+
+    controlled = dict(outputs)
+    controlled["base_gate"] = batch["safe_gate_target"].clone()
+    controlled["refined_gate"] = torch.clamp(
+        batch["safe_gate_target"] + 0.2, 0.0, 1.0
+    )
+    controlled["gate_correction"] = (
+        controlled["refined_gate"] - controlled["base_gate"]
+    )
+    loss_without, components = compute_iwg_rg_cma_loss(
+        controlled, batch, correction_bound=0.05, no_harm_weight=0.0
+    )
+    loss_with, _ = compute_iwg_rg_cma_loss(
+        controlled, batch, correction_bound=0.05, no_harm_weight=1.0
+    )
+    assert components["no_harm_loss"] > 0.0
+    torch.testing.assert_close(
+        loss_with - loss_without, components["no_harm_loss"]
+    )
+
+
+def test_clean_and_selective_variants_share_identical_common_initialization():
+    torch.manual_seed(109)
+    clean = IWGRGCMA(
+        16,
+        correction_bound=0.05,
+        architecture_variant=ARCHITECTURE_CLEAN_CROSS_MODAL,
+    )
+    torch.manual_seed(109)
+    selective = IWGRGCMA(
+        16,
+        correction_bound=0.05,
+        architecture_variant=ARCHITECTURE_SELECTIVE_CORRECTION,
+    )
+    clean_state = clean.state_dict()
+    selective_state = selective.state_dict()
+    assert set(clean_state).issubset(selective_state)
+    for key, value in clean_state.items():
+        torch.testing.assert_close(value, selective_state[key])

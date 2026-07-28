@@ -21,11 +21,13 @@ from agentguard.contracts.enums import POLICY_PROTOTYPE_MATRIX
 from agentguard.data.cache_schema import COMPACT_CACHE_SCHEMA_VERSION, FEATURE_SCHEMA_SHA256
 from agentguard.data.label_schema import ROLLOUT_LABEL_SCHEMA_SHA256
 from agentguard.datasets.iwg_rg_cma_dataset import (
+    COMPACT_INDEX_FORMAT,
     accepted_iwg_rg_cma_dataset_schema_sha256,
     SUPPORTED_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
     StreamingIWGRGCMADataset,
 )
 from agentguard.models.iwg_rg_cma import (
+    ARCHITECTURE_LEGACY,
     IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA,
     IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA_SHA256,
     IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA,
@@ -35,7 +37,9 @@ from agentguard.models.iwg_rg_cma import (
     IWG_RG_CMA_MODEL_SCHEMA,
     IWG_RG_CMA_MODEL_SCHEMA_SHA256,
     IWGRGCMA,
+    MODEL_CONTRACT_SPECS,
     RELIABILITY_MODE_FULL,
+    SUPPORTED_ARCHITECTURE_VARIANTS,
     SUPPORTED_RELIABILITY_MODES,
     RG_CMA_CORRECTION_BOUND,
     RG_CMA_LEGACY_CORRECTION_BOUND,
@@ -76,6 +80,9 @@ SEQUENCE_SAMPLING_SAMPLE_PROPORTIONAL = "sample-proportional"
 SEQUENCE_SAMPLING_SQRT_SIZE = "sqrt-size"
 SUPPORTED_SEQUENCE_SAMPLING = frozenset(
     {SEQUENCE_SAMPLING_SAMPLE_PROPORTIONAL, SEQUENCE_SAMPLING_SQRT_SIZE}
+)
+SUPPORTED_RESIDUAL_TARGET_MODES = frozenset(
+    {"safe", "oracle-confidence", "safe-selective"}
 )
 
 
@@ -450,7 +457,7 @@ def build_memory_shard_schedule(
 
 
 def _phase_dataset(
-    dataset: StreamingIWGAttnDataset,
+    dataset: StreamingIWGRGCMADataset,
     phase: dict[str, Any],
 ) -> Dataset:
     subsets = [
@@ -492,9 +499,58 @@ def _resolved_loss_settings(config: dict[str, Any]) -> dict[str, float]:
         "residual_weight": float(config.get("residual_weight", 0.5)),
         "revision_weight": float(config.get("revision_weight", 0.01)),
         "hard_example_gain": float(config.get("hard_example_gain", 0.0)),
+        "no_harm_weight": float(config.get("no_harm_weight", 0.0)),
     }
     validate_iwg_rg_cma_loss_config(**settings)
     return settings
+
+
+def _resolve_residual_target_mode(config: dict[str, Any]) -> str:
+    mode = str(config.get("residual_target_mode", "safe")).strip().lower()
+    if mode not in SUPPORTED_RESIDUAL_TARGET_MODES:
+        raise ValueError(
+            "unsupported residual_target_mode: "
+            f"{mode!r}; expected {sorted(SUPPORTED_RESIDUAL_TARGET_MODES)}"
+        )
+    return mode
+
+
+def _validate_residual_target_dataset(
+    dataset: StreamingIWGRGCMADataset,
+    mode: str,
+) -> None:
+    mode = str(mode).strip().lower()
+    if mode in {"oracle-confidence", "safe-selective"}:
+        required = {"oracle_gate_target", "gate_confidence"}
+        available = set(
+            dataset.metadata.get("compact_index_array_files", {})
+        )
+        # v2 compact datasets store the fields explicitly. Existing v3
+        # compact datasets encode the same values in risk_target/cue_target;
+        # StreamingIWGRGCMADataset derives them per sample without rewriting
+        # the label or index files.
+        derived = {"risk_target", "cue_target"}
+        if dataset.index_format == COMPACT_INDEX_FORMAT and not (
+            required.issubset(available) or derived.issubset(available)
+        ):
+            raise ValueError(
+                "oracle-confidence dataset is missing explicit residual targets "
+                "and cannot derive them from risk_target/cue_target"
+            )
+
+
+def _resolved_optimizer_lrs(config: dict[str, Any]) -> dict[str, float]:
+    """Resolve legacy shared LR and optional Base/CMA learning rates."""
+    shared_lr = float(config.get("lr", 1e-4))
+    base_value = config.get("base_lr")
+    cma_value = config.get("cma_lr")
+    base_lr = shared_lr if base_value is None else float(base_value)
+    cma_lr = shared_lr if cma_value is None else float(cma_value)
+    resolved = {"base_lr": base_lr, "cma_lr": cma_lr}
+    for name, value in resolved.items():
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} must be finite and positive, got {value}")
+    return resolved
 
 
 def _resolve_reliability_mode(config: dict[str, Any]) -> str:
@@ -505,6 +561,19 @@ def _resolve_reliability_mode(config: dict[str, Any]) -> str:
             f"{mode!r}; expected one of {sorted(SUPPORTED_RELIABILITY_MODES)}"
         )
     return mode
+
+
+def _resolve_architecture_variant(config: dict[str, Any]) -> str:
+    variant = str(
+        config.get("architecture_variant", ARCHITECTURE_LEGACY)
+    ).strip().lower()
+    if variant not in SUPPORTED_ARCHITECTURE_VARIANTS:
+        raise ValueError(
+            "unsupported architecture_variant: "
+            f"{variant!r}; expected one of "
+            f"{sorted(SUPPORTED_ARCHITECTURE_VARIANTS)}"
+        )
+    return variant
 
 
 def _write_training_log(handle, message: str) -> None:
@@ -542,6 +611,62 @@ def _scheduler(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, multiplier)
 
 
+def _build_iwg_rg_cma_optimizer(
+    model: IWGRGCMA,
+    *,
+    base_lr: float,
+    cma_lr: float,
+    weight_decay: float,
+) -> torch.optim.Optimizer:
+    """Build the Base IWG/RG-CMA parameter groups used by the trainer."""
+    base_params = list(model.iwg.parameters())
+    base_param_ids = {id(parameter) for parameter in base_params}
+    cma_params = [
+        parameter
+        for parameter in model.parameters()
+        if id(parameter) not in base_param_ids
+    ]
+    all_params = list(model.parameters())
+    if len(base_params) + len(cma_params) != len(all_params):
+        raise AssertionError("IWG/RG-CMA optimizer parameter groups overlap or omit parameters")
+    if not base_params or not cma_params:
+        raise AssertionError("IWG/RG-CMA optimizer parameter groups must both be non-empty")
+    return torch.optim.AdamW(
+        [
+            {"name": "base_iwg", "params": base_params, "lr": float(base_lr)},
+            {"name": "rg_cma", "params": cma_params, "lr": float(cma_lr)},
+        ],
+        weight_decay=float(weight_decay),
+    )
+
+
+def _optimizer_learning_rates(optimizer: torch.optim.Optimizer) -> dict[str, float]:
+    return {
+        str(group.get("name", f"group_{index}")): float(group["lr"])
+        for index, group in enumerate(optimizer.param_groups)
+    }
+
+
+def _optimizer_group_grad_norms(
+    optimizer: torch.optim.Optimizer,
+) -> dict[str, float]:
+    """Return pre-clipping L2 norms for each optimizer parameter group."""
+    norms: dict[str, float] = {}
+    for index, group in enumerate(optimizer.param_groups):
+        group_norms = [
+            parameter.grad.detach().float().norm(2)
+            for parameter in group["params"]
+            if parameter.grad is not None
+        ]
+        name = str(group.get("name", f"group_{index}"))
+        norms[name] = (
+            0.0
+            if not group_norms
+            else float(torch.linalg.vector_norm(torch.stack(group_norms), ord=2))
+        )
+    return norms
+
+
 def _checkpoint_payload(
     *,
     model: IWGRGCMA,
@@ -561,6 +686,7 @@ def _checkpoint_payload(
         **model_contract(
             correction_bound=float(model.correction_bound),
             context_size=int(model.context_size),
+            architecture_variant=str(model.architecture_variant),
         ),
         "epoch": int(epoch),
         "model_state_dict": model.state_dict(),
@@ -577,6 +703,7 @@ def _checkpoint_payload(
         "index_format": str(metadata.get("index_format", "jsonl_v1")),
         "correction_bound": float(model.correction_bound),
         "reliability_mode": str(model.reliability_mode),
+        "architecture_variant": str(model.architecture_variant),
         "policy_prototypes": np.asarray(POLICY_PROTOTYPE_MATRIX).tolist(),
         "dataset_schema_sha256": str(metadata["dataset_schema_sha256"]),
         "dataset_sha256": str(metadata["dataset_sha256"]),
@@ -594,6 +721,7 @@ def _checkpoint_payload(
         "tracker_seed": 10000,
         "training_config": dict(config),
         "resolved_batch_size": int(resolved_batch_size),
+        "optimizer_learning_rates": _resolved_optimizer_lrs(config),
         "validation_policy": (
             f"none_epoch{int(config['epochs'])}_warm_start"
             if initialization and initialization.get("mode") == "warm_start"
@@ -615,37 +743,17 @@ def validate_iwg_rg_cma_checkpoint_contract(
         str(checkpoint.get("model_schema", "")),
         str(checkpoint.get("model_schema_sha256", "")),
     )
-    supported_model_contracts = {
-        (IWG_RG_CMA_MODEL_SCHEMA, IWG_RG_CMA_MODEL_SCHEMA_SHA256): (
-            RG_CMA_CORRECTION_BOUND,
-            6,
-        ),
-        (IWG_RG_CMA_LEGACY_MODEL_SCHEMA, IWG_RG_CMA_LEGACY_MODEL_SCHEMA_SHA256): (
-            RG_CMA_LEGACY_CORRECTION_BOUND,
-            6,
-        ),
-        (
-            IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA,
-            IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA_SHA256,
-        ): (
-            RG_CMA_CORRECTION_BOUND,
-            8,
-        ),
-        (
-            IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA,
-            IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA_SHA256,
-        ): (
-            RG_CMA_LEGACY_CORRECTION_BOUND,
-            8,
-        ),
-    }
-    expected_contract = supported_model_contracts.get(model_contract_key)
+    expected_contract = MODEL_CONTRACT_SPECS.get(model_contract_key)
     if expected_contract is None:
         raise ValueError(
             "IWG RG-CMA checkpoint contract mismatch: unsupported model contract "
             f"{model_contract_key!r}"
         )
-    expected_bound, expected_context_size = expected_contract
+    expected_bound = float(expected_contract["correction_bound"])
+    expected_context_size = int(expected_contract["context_size"])
+    expected_architecture_variant = str(
+        expected_contract["architecture_variant"]
+    )
     required = {
         "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
         "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
@@ -660,6 +768,20 @@ def validate_iwg_rg_cma_checkpoint_contract(
     }
     if mismatches:
         raise ValueError(f"IWG RG-CMA checkpoint contract mismatch: {mismatches}")
+    checkpoint_architecture_variant = str(
+        checkpoint.get(
+            "architecture_variant",
+            checkpoint.get("training_config", {}).get(
+                "architecture_variant", ARCHITECTURE_LEGACY
+            ),
+        )
+    ).strip().lower()
+    if checkpoint_architecture_variant != expected_architecture_variant:
+        raise ValueError(
+            "IWG RG-CMA checkpoint contract mismatch: architecture_variant "
+            f"{checkpoint_architecture_variant!r} != "
+            f"{expected_architecture_variant!r}"
+        )
     reliability_mode = str(
         checkpoint.get(
             "reliability_mode",
@@ -735,6 +857,14 @@ def load_iwg_rg_cma_checkpoint(
                 ),
             )
         ),
+        architecture_variant=str(
+            checkpoint.get(
+                "architecture_variant",
+                checkpoint.get("training_config", {}).get(
+                    "architecture_variant", ARCHITECTURE_LEGACY
+                ),
+            )
+        ),
     )
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     return model, checkpoint
@@ -764,6 +894,20 @@ def initialize_iwg_rg_cma_model(
         raise ValueError(
             "initial checkpoint context size does not match the requested "
             f"training context: {checkpoint_context_size} != {model.context_size}"
+        )
+    checkpoint_architecture_variant = str(
+        checkpoint.get(
+            "architecture_variant",
+            checkpoint.get("training_config", {}).get(
+                "architecture_variant", ARCHITECTURE_LEGACY
+            ),
+        )
+    )
+    if model.architecture_variant != checkpoint_architecture_variant:
+        raise ValueError(
+            "initial checkpoint architecture variant does not match requested "
+            f"training variant: {checkpoint_architecture_variant} != "
+            f"{model.architecture_variant}"
         )
     expected_dims = {
         "reid_dim": int(dataset_metadata["reid_dim"]),
@@ -800,7 +944,10 @@ def _run_training_attempt(
     _seed_everything(seed)
     device = torch.device(config["device"])
     loss_settings = _resolved_loss_settings(config)
+    residual_target_mode = _resolve_residual_target_mode(config)
+    _validate_residual_target_dataset(dataset, residual_target_mode)
     reliability_mode = _resolve_reliability_mode(config)
+    architecture_variant = _resolve_architecture_variant(config)
     training_schedule = build_memory_shard_schedule(dataset, config)
     epoch_plan = [
         (phase, phase_epoch)
@@ -828,6 +975,7 @@ def _run_training_attempt(
         ),
         context_size=int(config.get("context_size", 6)),
         reliability_mode=reliability_mode,
+        architecture_variant=architecture_variant,
     ).to(device)
     init_checkpoint = str(config.get("init_checkpoint", "")).strip()
     initialization = (
@@ -839,9 +987,11 @@ def _run_training_attempt(
         if init_checkpoint
         else {"mode": "random"}
     )
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(config["lr"]),
+    optimizer_lrs = _resolved_optimizer_lrs(config)
+    optimizer = _build_iwg_rg_cma_optimizer(
+        model,
+        base_lr=optimizer_lrs["base_lr"],
+        cma_lr=optimizer_lrs["cma_lr"],
         weight_decay=float(config["weight_decay"]),
     )
     scheduler = _scheduler(
@@ -868,6 +1018,11 @@ def _run_training_attempt(
             "Config: " + json.dumps(config, indent=2, sort_keys=True),
         )
         _write_training_log(training_log, f"Device: {device}")
+        _write_training_log(
+            training_log,
+            "Optimizer learning rates: "
+            + json.dumps(_optimizer_learning_rates(optimizer), sort_keys=True),
+        )
         _write_training_log(
             training_log,
             "Initialization: " + json.dumps(initialization, indent=2, sort_keys=True),
@@ -942,7 +1097,22 @@ def _run_training_attempt(
                 context_size = int(config.get("context_size", model.context_size))
                 motion_positions = torch.zeros(context_size, dtype=torch.float64)
                 appearance_positions = torch.zeros(context_size, dtype=torch.float64)
-                cross_matrix = torch.zeros((3, 3), dtype=torch.float64)
+                appearance_to_motion_positions = torch.zeros(
+                    context_size, dtype=torch.float64
+                )
+                motion_to_appearance_positions = torch.zeros(
+                    context_size, dtype=torch.float64
+                )
+                appearance_to_motion_6x6_matrix = torch.zeros(
+                    (context_size, context_size), dtype=torch.float64
+                )
+                motion_to_appearance_6x6_matrix = torch.zeros(
+                    (context_size, context_size), dtype=torch.float64
+                )
+                cross_matrix = torch.zeros(
+                    (model.cross_modal_token_count, model.cross_modal_token_count),
+                    dtype=torch.float64,
+                )
                 motion_entropy = 0.0
                 appearance_entropy = 0.0
                 if device.type == "cuda":
@@ -964,9 +1134,11 @@ def _run_training_attempt(
                         outputs,
                         batch,
                         correction_bound=model.correction_bound,
+                        residual_target_mode=residual_target_mode,
                         **loss_settings,
                     )
                     loss.backward()
+                    group_grad_norms = _optimizer_group_grad_norms(optimizer)
                     grad_norm = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), float(config["grad_clip"])
                     )
@@ -980,6 +1152,9 @@ def _run_training_attempt(
                     totals["grad_norm"] = totals.get("grad_norm", 0.0) + float(
                         grad_norm
                     ) * count
+                    for group_name, group_grad_norm in group_grad_norms.items():
+                        key = f"{group_name}_grad_norm"
+                        totals[key] = totals.get(key, 0.0) + group_grad_norm * count
                     motion_positions += (
                         outputs["motion_attention_weights"]
                         .detach()
@@ -996,14 +1171,49 @@ def _run_training_attempt(
                         .sum(dim=0)
                         .cpu()
                     )
-                    cross_matrix += (
-                        outputs["cross_modal_attention_weights"]
-                        .detach()
-                        .double()
-                        .mean(dim=1)
-                        .sum(dim=0)
-                        .cpu()
-                    )
+                    if "appearance_to_motion_attention_weights" in outputs:
+                        appearance_to_motion_positions += (
+                            outputs["appearance_to_motion_attention_weights"]
+                            .detach()
+                            .double()
+                            .mean(dim=1)
+                            .sum(dim=0)
+                            .cpu()
+                        )
+                        motion_to_appearance_positions += (
+                            outputs["motion_to_appearance_attention_weights"]
+                            .detach()
+                            .double()
+                            .mean(dim=1)
+                            .sum(dim=0)
+                            .cpu()
+                        )
+                    if "appearance_to_motion_6x6_attention_weights" in outputs:
+                        appearance_to_motion_6x6_matrix += (
+                            outputs["appearance_to_motion_6x6_attention_weights"]
+                            .detach()
+                            .double()
+                            .mean(dim=1)
+                            .sum(dim=0)
+                            .cpu()
+                        )
+                        motion_to_appearance_6x6_matrix += (
+                            outputs["motion_to_appearance_6x6_attention_weights"]
+                            .detach()
+                            .double()
+                            .mean(dim=1)
+                            .sum(dim=0)
+                            .cpu()
+                        )
+                    if "cross_modal_attention_weights" in outputs:
+                        cross_matrix += (
+                            outputs["cross_modal_attention_weights"]
+                            .detach()
+                            .double()
+                            .mean(dim=1)
+                            .sum(dim=0)
+                            .cpu()
+                        )
                     motion_entropy += float(
                         outputs["motion_attention_entropy"].detach().mean()
                     ) * count
@@ -1044,7 +1254,8 @@ def _run_training_attempt(
                                 f"base_loss={float(components['base_loss'].detach()):.6f} | "
                                 f"final_loss={float(components['final_loss'].detach()):.6f} | "
                                 f"corr_abs={float(components['correction_abs_mean'].detach()):.6f} | "
-                                f"lr={optimizer.param_groups[0]['lr']:.2e}"
+                                f"base_lr={optimizer.param_groups[0]['lr']:.2e} | "
+                                f"cma_lr={optimizer.param_groups[1]['lr']:.2e}"
                             ),
                         )
 
@@ -1055,6 +1266,7 @@ def _run_training_attempt(
                 epoch_time = time.time() - epoch_start
                 total_samples_seen += samples
                 total_channel_weight = sum(channel_weight)
+                current_lrs = _optimizer_learning_rates(optimizer)
                 metrics = {
                     "epoch": epoch,
                     "phase": int(phase["phase"]),
@@ -1068,7 +1280,11 @@ def _run_training_attempt(
                     "optimizer_steps": global_step,
                     "effective_full_epochs_completed": total_samples_seen / len(dataset),
                     **{key: value / max(samples, 1) for key, value in totals.items()},
-                    "learning_rate": float(optimizer.param_groups[0]["lr"]),
+                    # Keep learning_rate as a backward-compatible Base-IWG alias.
+                    "learning_rate": current_lrs["base_iwg"],
+                    "base_learning_rate": current_lrs["base_iwg"],
+                    "cma_learning_rate": current_lrs["rg_cma"],
+                    "optimizer_learning_rates": current_lrs,
                     "epoch_time_s": epoch_time,
                     "gate_accuracy": sum(channel_correct)
                     / max(total_channel_weight, 1.0),
@@ -1085,10 +1301,25 @@ def _run_training_attempt(
                     "appearance_history_attention": (
                         appearance_positions / max(samples, 1)
                     ).tolist(),
-                    "cross_modal_attention": (
-                        cross_matrix / max(samples, 1)
-                    ).tolist(),
                 }
+                if not model.uses_full_history_cma:
+                    metrics["cross_modal_attention"] = (
+                        cross_matrix / max(samples, 1)
+                    ).tolist()
+                if model.uses_bidirectional_history_cma:
+                    metrics["appearance_to_motion_history_attention"] = (
+                        appearance_to_motion_positions / max(samples, 1)
+                    ).tolist()
+                    metrics["motion_to_appearance_history_attention"] = (
+                        motion_to_appearance_positions / max(samples, 1)
+                    ).tolist()
+                if model.uses_full_history_cma:
+                    metrics["appearance_to_motion_6x6_attention"] = (
+                        appearance_to_motion_6x6_matrix / max(samples, 1)
+                    ).tolist()
+                    metrics["motion_to_appearance_6x6_attention"] = (
+                        motion_to_appearance_6x6_matrix / max(samples, 1)
+                    ).tolist()
                 metrics_file.write(json.dumps(metrics, sort_keys=True) + "\n")
                 metrics_file.flush()
                 print(json.dumps(metrics, sort_keys=True), flush=True)
@@ -1104,7 +1335,8 @@ def _run_training_attempt(
                         f"corr_abs={metrics['correction_abs_mean']:.4f}  "
                         f"corr_target={metrics['correction_target_abs_mean']:.4f}  "
                         f"corr_sign={metrics['correction_sign_agreement']:.3f}  "
-                        f"lr={metrics['learning_rate']:.2e}  "
+                        f"base_lr={metrics['base_learning_rate']:.2e}  "
+                        f"cma_lr={metrics['cma_learning_rate']:.2e}  "
                         f"time={epoch_time:.1f}s  train_only=true"
                     ),
                 )
@@ -1169,6 +1401,8 @@ def _run_training_attempt(
         "training_schedule": training_schedule,
         "resolved_batch_size": int(batch_size),
         "num_train_samples": len(dataset),
+        "optimizer_learning_rates": _resolved_optimizer_lrs(config),
+        "architecture_variant": str(model.architecture_variant),
         "checkpoint": str(checkpoint_dir / "iwg_rg_cma_last.pt"),
         "elapsed_s": time.time() - start_time,
         "validation": "disabled",
@@ -1180,12 +1414,16 @@ def _run_training_attempt(
 def _validate_formal_config(config: dict[str, Any]) -> int:
     _resolve_sequence_sampling(config)
     _resolved_loss_settings(config)
+    _resolve_residual_target_mode(config)
+    _resolved_optimizer_lrs(config)
     _resolve_reliability_mode(config)
+    architecture_variant = _resolve_architecture_variant(config)
     model_contract(
         correction_bound=float(
             config.get("correction_bound", RG_CMA_CORRECTION_BOUND)
         ),
         context_size=int(config.get("context_size", 6)),
+        architecture_variant=architecture_variant,
     )
     init_checkpoint = str(config.get("init_checkpoint", "")).strip()
     required = FINETUNE_REQUIRED_CONFIG if init_checkpoint else REQUIRED_CONFIG
@@ -1295,6 +1533,14 @@ def validate_iwg_rg_cma_checkpoint(
         raise ValueError("checkpoint context_size does not match dataset metadata")
     if checkpoint["dataset_schema_sha256"] != dataset.metadata["dataset_schema_sha256"]:
         raise ValueError("checkpoint dataset schema does not match the requested dataset")
+    _validate_residual_target_dataset(
+        dataset,
+        str(
+            checkpoint.get("training_config", {}).get(
+                "residual_target_mode", "safe"
+            )
+        ),
+    )
     model.to(device).eval()
     loader = DataLoader(
         dataset,
@@ -1317,6 +1563,11 @@ def validate_iwg_rg_cma_checkpoint(
                     outputs,
                     batch,
                     correction_bound=float(checkpoint["correction_bound"]),
+                    residual_target_mode=str(
+                        checkpoint.get("training_config", {}).get(
+                            "residual_target_mode", "safe"
+                        )
+                    ),
                     **_resolved_loss_settings(
                         checkpoint.get("training_config", {})
                     ),
@@ -1340,6 +1591,9 @@ def validate_iwg_rg_cma_checkpoint(
             "metrics": {key: value / count for key, value in totals.items()},
             "dataset_sha256": checkpoint["dataset_sha256"],
             "model_schema": checkpoint["model_schema"],
+            "architecture_variant": checkpoint.get(
+                "architecture_variant", ARCHITECTURE_LEGACY
+            ),
         }
     finally:
         dataset.close()
