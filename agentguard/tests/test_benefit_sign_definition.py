@@ -51,17 +51,6 @@ def test_soft_target_sigmoid():
     assert target_neg < 0.5  # favors skip
 
 
-def test_oracle_gate_provider_benefit_to_hard():
-    from agentguard.oracle.gate_provider import OracleGateProvider
-
-    assert OracleGateProvider._benefit_to_hard(0.0) == 1.0
-    assert OracleGateProvider._benefit_to_hard(-1e-9) == 1.0
-    assert OracleGateProvider._benefit_to_hard(-1e-6) == 1.0
-    assert OracleGateProvider._benefit_to_hard(-1e-5) == 0.0
-    assert OracleGateProvider._benefit_to_hard(0.5) == 1.0
-    assert OracleGateProvider._benefit_to_hard(-0.5) == 0.0
-
-
 def test_compute_soft_target_uses_sigmoid():
     """Soft target uses sigmoid(B / tau)."""
 

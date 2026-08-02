@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Dict
-
 import numpy as np
 import pytest
 
-from agentguard.contracts.enums import DetectionSource, TrackLifecycle
+from agentguard.contracts.enums import DetectionSource
 from agentguard.contracts.events import TrackEvent
 from agentguard.contracts.states import (
     AssociationPairFeatures,
@@ -79,7 +77,7 @@ def sample_snapshot() -> TrackStateSnapshot:
         feature=feat,
         history=history,
         end_frame_id=98,
-        state=TrackLifecycle.TRACKED,
+        state=1,
     )
 
 
@@ -120,22 +118,6 @@ class TestComputeScalarFeatures:
         feats = compute_scalar_features(sample_event)
         assert feats.shape == (63,)
         assert feats.dtype == np.float64
-
-    def test_accepts_dict(self, sample_event):
-        from agentguard.contracts.serialization import serialize_event
-
-        data = serialize_event(sample_event)
-        # Add extra fields not covered by serialization
-        data["track_cost_row"] = [0.30, 0.50, 0.70]
-        data["detection_cost_col"] = [0.30, 0.45, 0.60, 0.90]
-        data["max_iou_with_other"] = 0.15
-
-        feats = compute_scalar_features(data)
-        assert feats.shape == (63,)
-
-        # Both paths should produce the same result
-        feats_event = compute_scalar_features(sample_event)
-        np.testing.assert_array_almost_equal(feats, feats_event)
 
     def test_association_block(self, sample_event):
         feats = compute_scalar_features(sample_event)
@@ -346,7 +328,7 @@ class TestComputeScalarFeatures:
                 feature=np.zeros((1, 64)),
                 history={95: [np.array([0,0,10,10]), 0.8, np.zeros(8), np.eye(8)*0.01, np.zeros((1,64))]},
                 end_frame_id=95,
-                state=TrackLifecycle.TRACKED,
+                state=1,
             ),
         )
         feats = compute_scalar_features(ev)
@@ -387,9 +369,9 @@ class TestComputeScalarFeatures:
     def test_state_one_hot(self):
         """Verify state one-hot encoding for all three states."""
         for state_val, expected in [
-            (TrackLifecycle.NEW, (1, 0, 0)),
-            (TrackLifecycle.TRACKED, (0, 1, 0)),
-            (TrackLifecycle.LOST, (0, 0, 1)),
+            (0, (1, 0, 0)),
+            (1, (0, 1, 0)),
+            (2, (0, 0, 1)),
         ]:
             snap = TrackStateSnapshot(
                 track_id=1,

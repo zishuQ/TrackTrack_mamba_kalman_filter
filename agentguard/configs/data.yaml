@@ -1,19 +1,19 @@
 cache:
-  shard_size: 10000
-  output_dir: "outputs/agentguard/cache"
+  detection_root: "outputs/agentguard/detection_cache"
+  event_root: "outputs/agentguard/event_cache_v3_iwg_v2"
 
 detection:
   high_threshold: 0.6
   nms_iou_threshold: 0.97
 
-gt:
+labels:
   matching_iou_threshold: 0.5
   identity_reliable_votes: 3
   identity_reliable_ratio: 0.75
 
-oracle:
+rollout:
   future_frames: 5
-  oracle_iou_threshold: 0.5
+  oracle_detection_iou_threshold: 0.3
 
 identity:
   prototype_min_score: 0.6

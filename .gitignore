@@ -3,6 +3,7 @@ __pycache__/
 outputs/
 .vscode/
 *.json
+!agentguard/configs/official_baselines.json
 *.pth.tar
 *.pth
 *.log

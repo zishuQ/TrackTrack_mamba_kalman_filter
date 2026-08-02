@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -18,12 +19,77 @@ from agentguard.data.detection_cache import SequenceDetectionCache
 
 
 def _load_split_module():
-    path = Path(__file__).resolve().parents[2] / "scripts" / "agentguard" / "00_split_detection_cache.py"
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "agentguard"
+        / "build_detection_mmap_cache.py"
+    )
     spec = importlib.util.spec_from_file_location("split_detection_cache", path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
-    return module
+    write_sequence = module._write_sequence
+
+    def write_compat(
+        output_dir,
+        sequence,
+        frames,
+        compact_index,
+        *,
+        dataset,
+        split,
+        source_pickle,
+    ):
+        if compact_index is not None:
+            try:
+                return write_sequence(
+                    output_dir,
+                    dataset=dataset,
+                    split=split,
+                    sequence=sequence,
+                    frames=frames,
+                    compact_index=compact_index,
+                    source_pickle=source_pickle,
+                )
+            except ValueError as exc:
+                if "compact target index lacks" in str(exc):
+                    raise RuntimeError(
+                        "Target compact index does not contain sequence"
+                    ) from exc
+                raise
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=False)
+        arrays = module._stack_sequence(frames)
+        names = (
+            "frame_offsets",
+            "boxes",
+            "scores",
+            "features",
+            "sources",
+            "class_ids",
+        )
+        for name, value in zip(names, arrays):
+            np.save(output_dir / f"{name}.npy", value, allow_pickle=False)
+        manifest = {
+            "schema_version": module.SCHEMA_VERSION,
+            "dataset": dataset,
+            "split": split,
+            "sequence": sequence,
+            "source_pickle": str(source_pickle),
+            "num_frames": int(len(arrays[0]) - 1),
+            "num_detections": int(len(arrays[1])),
+            "num_target_detections": 0,
+            "reid_dim": int(arrays[3].shape[1]),
+            "complete": True,
+        }
+        (output_dir / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        )
+        return manifest
+
+    return SimpleNamespace(_write_sequence=write_compat)
 
 
 def _det(x: float, score: float = 0.9, dim: int = 4) -> np.ndarray:

@@ -105,7 +105,7 @@ run.py test（CPU、final、post、无 TrackEval）
 
 | 训练数据 | dataset 目录 |
 | --- | --- |
-| MOT17 FRCNN train/all | `outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_jsonl_native_log` |
+| MOT17 FRCNN train/all | `outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_compact` |
 | MOT20 train/all，NSA 事件 | `outputs/agentguard/datasets/iwg_rg_cma/MOT20/nsa_all_v3_compact` |
 | SportsMOT train | `outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_train_v3_compact` |
 | SportsMOT train+val | `outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_trainval_v3_compact` |
@@ -124,7 +124,7 @@ outputs/agentguard/event_cache_v3_iwg_v2
 所有仍使用的 IWG 标签统一存放在：
 
 ```text
-outputs/agentguard/labels/iwg_rg_cma/MOT17/nsa_candidate_a_json
+outputs/agentguard/labels/iwg_rg_cma/MOT17/nsa_candidate_a_compact
 outputs/agentguard/labels/iwg_rg_cma/MOT20/nsa_v3_compact
 outputs/agentguard/labels/iwg_rg_cma/SportsMOT/nsa_train_v3_compact
 outputs/agentguard/labels/iwg_rg_cma/SportsMOT/nsa_trainval_v3_compact
@@ -264,7 +264,7 @@ mkdir -p outputs/agentguard/experiments/iwg_rg_cma_mot17_new_seed42_bs1024_100e/
          outputs/agentguard/experiments/iwg_rg_cma_mot17_new_seed42_bs1024_100e/logs
 
 ./.venv/bin/python -u -m agentguard.cli train_iwg_rg_cma \
-  --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_jsonl_native_log \
+  --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_compact \
   --checkpoint-dir outputs/agentguard/experiments/iwg_rg_cma_mot17_new_seed42_bs1024_100e/checkpoints \
   --device cuda --epochs 100 --batch-size 1024 --num-workers 4 \
   --lr 0.0001 --weight-decay 0.0001 --warmup-epochs 1 \
@@ -344,7 +344,7 @@ mkdir -p outputs/agentguard/experiments/iwg_rg_cma_mot20e050_to_mot17_new_finetu
          outputs/agentguard/experiments/iwg_rg_cma_mot20e050_to_mot17_new_finetune25_seed42_bs1024/logs
 
 ./.venv/bin/python -u -m agentguard.cli train_iwg_rg_cma \
-  --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_jsonl_native_log \
+  --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_compact \
   --checkpoint-dir outputs/agentguard/experiments/iwg_rg_cma_mot20e050_to_mot17_new_finetune25_seed42_bs1024/checkpoints \
   --device cuda --epochs 25 --batch-size 1024 --num-workers 4 \
   --lr 0.00001 --weight-decay 0.0001 --warmup-epochs 1 \
@@ -365,7 +365,6 @@ mkdir -p outputs/agentguard/experiments/iwg_rg_cma_mot20e050_to_mot17_new_finetu
 | SportsMOT train+val 可配置训练 | `bash scripts/agentguard/run_iwg_rg_cma_sportsmot_trainval_100e.sh` |
 | SportsMOT train+val 200e 旧分片方式 | `bash scripts/agentguard/run_iwg_rg_cma_sportsmot_trainval_200e.sh` |
 | MOT20 e050 到 MOT17 warm-start 25e | `bash scripts/agentguard/run_iwg_rg_cma_mot20_to_mot17_finetune25.sh` |
-| MOT17 50e + SportsMOT/MOT20 分片调参（严格串行） | `bash scripts/agentguard/run_iwg_rg_cma_overnight_tuning.sh` |
 
 MOT17 历史脚本默认 batch size 是 `2048`。若要按本文的 `1024` 规范首次运行，必须显式覆盖，并使用新的实验名：
 

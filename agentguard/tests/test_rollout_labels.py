@@ -31,9 +31,6 @@ from agentguard.rollout.losses import (
     sigmoid,
 )
 from agentguard.rollout.motion import compute_motion_benefit, compute_motion_rollout
-from agentguard.rollout.window import (
-    compute_tgr_window_labels,
-)
 from agentguard.rollout_labels import (
     compute_dataset_stats,
     compute_policy_soft_target,
@@ -403,78 +400,6 @@ class TestAppearanceRollout:
         assert abs(B_a) < 1e-10
         np.testing.assert_allclose(write_feats[0], skip_feats[0])
 
-
-# =========================================================================
-#  Tests: Window / TGR
-# =========================================================================
-
-
-class TestWindowLabels:
-    def test_compute_tgr_window_labels(self, make_event, kf, identity_prototype):
-        # Create 4 events with slight box drift
-        events = []
-        boxes = []
-        for i in range(4):
-            box = np.array([75.0 + i * 2, 75.0 + i * 2, 125.0 + i * 2, 125.0 + i * 2],
-                           dtype=np.float64)
-            boxes.append(box)
-            evt = make_event(track_id=1, frame_id=100 + i, det_box=box)
-            events.append(evt)
-
-        future_data = {
-            "future_oracle_detections": [
-                np.array([85.0, 85.0, 135.0, 135.0], dtype=np.float64),
-                np.array([87.0, 87.0, 137.0, 137.0], dtype=np.float64),
-                np.array([89.0, 89.0, 139.0, 139.0], dtype=np.float64),
-            ],
-            "future_warp_matrices": [np.eye(2, 3, dtype=np.float64)] * 3,
-            "future_oracle_features": [
-                np.ones((1, 64), dtype=np.float64) * 0.7,
-                np.ones((1, 64), dtype=np.float64) * 0.75,
-                np.ones((1, 64), dtype=np.float64) * 0.8,
-            ],
-            "future_oracle_scores": [0.9, 0.88, 0.85],
-        }
-
-        result = compute_tgr_window_labels(
-            events, future_data, kf, identity_prototype, future_frames=3
-        )
-
-        assert "motion_sequence" in result
-        assert "appearance_sequence" in result
-        assert "valid_mask" in result
-        assert result["motion_sequence"].shape == (4,)
-        assert result["appearance_sequence"].shape == (4,)
-        assert result["valid_mask"].shape == (4,)
-        assert result["motion_losses"].shape == (16,)
-        assert result["appearance_losses"].shape == (16,)
-
-        # Valid mask should be all True (all events have detections)
-        assert result["valid_mask"].all()
-
-    def test_window_no_detection_positions(self, make_event, kf, identity_prototype):
-        events = []
-        for i in range(4):
-            # Event at index 1 has no detection
-            has_det = i != 1
-            box = np.array([75.0, 75.0, 125.0, 125.0], dtype=np.float64) if has_det else None
-            evt = make_event(track_id=1, frame_id=100 + i, has_detection=has_det, det_box=box)
-            events.append(evt)
-
-        future_data = {
-            "future_oracle_detections": [np.array([85.0, 85.0, 135.0, 135.0], dtype=np.float64)],
-            "future_warp_matrices": [np.eye(2, 3, dtype=np.float64)],
-            "future_oracle_features": [np.ones((1, 64), dtype=np.float64) * 0.7],
-            "future_oracle_scores": [0.9],
-        }
-
-        result = compute_tgr_window_labels(
-            events, future_data, kf, identity_prototype, future_frames=1
-        )
-        assert not result["valid_mask"][1]
-        assert result["valid_mask"][0]
-        assert result["valid_mask"][2]
-        assert result["valid_mask"][3]
 
 # =========================================================================
 #  Tests: Labels module

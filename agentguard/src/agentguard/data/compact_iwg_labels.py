@@ -329,3 +329,196 @@ def load_compact_label_arrays(
     if any(value.shape[0] != count for value in arrays.values()):
         raise ValueError(f"compact label array length mismatch in {sequence_dir}")
     return manifest, arrays
+
+
+def convert_json_label_directory_to_compact(
+    *,
+    dataset: str,
+    source_root: str | Path,
+    output_root: str | Path,
+    sequences: list[str],
+    event_cache_root: str | Path | None = None,
+    detection_cache_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Migrate an existing v3 JSON label directory to compact arrays.
+
+    This is an explicit one-time migration path. Runtime dataset loading only
+    accepts compact labels and never falls back to the JSON representation.
+    """
+    source_root = Path(source_root).resolve()
+    output_root = Path(output_root).resolve()
+    event_cache_root = Path(event_cache_root).resolve() if event_cache_root else None
+    detection_cache_root = (
+        Path(detection_cache_root).resolve() if detection_cache_root else None
+    )
+    if not source_root.is_dir():
+        raise FileNotFoundError(f"source label directory not found: {source_root}")
+    if output_root.exists():
+        raise FileExistsError(f"refusing to overwrite compact labels: {output_root}")
+
+    output_root.mkdir(parents=True)
+    sequence_summaries: dict[str, dict[str, Any]] = {}
+    for sequence in sequences:
+        source_path = source_root / f"{sequence}_labels.json"
+        if not source_path.is_file():
+            raise FileNotFoundError(f"source labels not found: {source_path}")
+        records = json.loads(source_path.read_text())
+        if not isinstance(records, list):
+            raise ValueError(f"source labels must be a JSON list: {source_path}")
+
+        labels: list[dict[str, Any]] = []
+        for index, label in enumerate(records):
+            if not isinstance(label, dict):
+                raise ValueError(f"source label is not an object: {source_path}:{index}")
+            validate_rollout_label(label)
+            if str(label.get("candidate_type", "A")) == "A":
+                labels.append(label)
+        if not labels:
+            raise RuntimeError(f"no candidate-A labels found in {source_path}")
+
+        event_keys = np.asarray(
+            [
+                (int(label["event_shard_id"]) << 32)
+                | int(label["event_offset"])
+                for label in labels
+            ],
+            dtype=np.int64,
+        )
+        order = np.argsort(event_keys, kind="stable")
+        event_keys = event_keys[order]
+        if np.any(event_keys[1:] == event_keys[:-1]):
+            raise ValueError(f"duplicate label event key in {source_path}")
+
+        safe_gate = np.asarray(
+            [
+                [label["motion_safe_target"], label["appearance_safe_target"]]
+                for label in labels
+            ],
+            dtype=np.float32,
+        )[order]
+        oracle_gate = np.asarray(
+            [
+                [label["motion_soft_target"], label["appearance_soft_target"]]
+                for label in labels
+            ],
+            dtype=np.float32,
+        )[order]
+        gate_confidence = np.asarray(
+            [
+                [
+                    label["motion_label_confidence"],
+                    label["appearance_label_confidence"],
+                ]
+                for label in labels
+            ],
+            dtype=np.float32,
+        )[order]
+        policy = np.asarray(
+            [label["policy_safe_soft_target"] for label in labels],
+            dtype=np.float32,
+        )[order]
+        cue = np.asarray(
+            [label["cue_target"] for label in labels], dtype=np.float32
+        )[order]
+        risk = np.asarray(
+            [label["risk_targets"] for label in labels], dtype=np.float32
+        )[order]
+        valid = np.asarray(
+            [
+                [bool(label["valid_motion"]), bool(label["valid_appearance"])]
+                for label in labels
+            ],
+            dtype=np.bool_,
+        )[order]
+        sample_weight = np.asarray(
+            [float(label["sample_weight"]) for label in labels],
+            dtype=np.float32,
+        )[order]
+
+        sequence_dir = output_root / sequence
+        temporary = output_root / f"{sequence}.incomplete.{os.getpid()}"
+        temporary.mkdir()
+        array_sha256 = _write_arrays(
+            temporary,
+            event_keys=event_keys,
+            safe_gate=safe_gate,
+            oracle_gate=oracle_gate,
+            gate_confidence=gate_confidence,
+            policy=policy,
+            cue=cue,
+            risk=risk,
+            valid=valid,
+            sample_weight=sample_weight,
+        )
+        manifest: dict[str, Any] = {
+            "complete": True,
+            "dataset": dataset,
+            "sequence": sequence,
+            "source_format": "rollout_labels_json_v3",
+            "source_label_file_sha256": _sha256_file(source_path),
+            "source_labels": len(records),
+            "retained_labels": len(labels),
+            "retention_rate": len(labels) / max(len(records), 1),
+            "compact_label_schema_version": COMPACT_IWG_LABEL_SCHEMA_VERSION,
+            "compact_label_schema_sha256": COMPACT_IWG_LABEL_SCHEMA_SHA256,
+            "label_schema_version": ROLLOUT_LABEL_SCHEMA_VERSION,
+            "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
+            "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
+            "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
+            "array_files": COMPACT_LABEL_ARRAY_FILES,
+            "array_sha256": array_sha256,
+        }
+        if event_cache_root is not None:
+            event_manifest = (
+                event_cache_root / dataset / "all" / sequence / "manifest.json"
+            )
+            if event_manifest.is_file():
+                manifest["event_cache_manifest_sha256"] = _sha256_file(event_manifest)
+        if detection_cache_root is not None:
+            detection_manifest = (
+                detection_cache_root / dataset / "all" / sequence / "manifest.json"
+            )
+            if detection_manifest.is_file():
+                manifest["detection_cache_manifest_sha256"] = _sha256_file(
+                    detection_manifest
+                )
+        (temporary / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        )
+        temporary.rename(sequence_dir)
+        sequence_summaries[sequence] = {
+            "source_labels": len(records),
+            "retained_labels": len(labels),
+            "source_label_file_sha256": manifest["source_label_file_sha256"],
+        }
+
+    source_summary = source_root / "summary.json"
+    summary: dict[str, Any] = {
+        "complete": True,
+        "dataset": dataset,
+        "mode": "all",
+        "split": "all",
+        "label_mode": "all_a_only",
+        "motion_label_mode": "nsa_rollout",
+        "candidate_types": ["A"],
+        "num_labels": sum(item["retained_labels"] for item in sequence_summaries.values()),
+        "num_sequences": len(sequence_summaries),
+        "sequences": sequence_summaries,
+        "source_format": "rollout_labels_json_v3",
+        "source_summary_sha256": _sha256_file(source_summary)
+        if source_summary.is_file()
+        else "",
+        "compact_label_schema_version": COMPACT_IWG_LABEL_SCHEMA_VERSION,
+        "compact_label_schema_sha256": COMPACT_IWG_LABEL_SCHEMA_SHA256,
+        "label_schema_version": ROLLOUT_LABEL_SCHEMA_VERSION,
+        "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
+        "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
+        "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
+    }
+    summary["retention_rate"] = summary["num_labels"] / max(
+        sum(item["source_labels"] for item in sequence_summaries.values()), 1
+    )
+    (output_root / "summary.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n"
+    )
+    return summary

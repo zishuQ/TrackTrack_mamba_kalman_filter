@@ -8,7 +8,7 @@ RUN_ROOT="${ROOT}/outputs/agentguard/experiments/${RUN_NAME}"
 CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
 LOG_DIR="${RUN_ROOT}/logs"
 PROVENANCE_DIR="${RUN_ROOT}/provenance"
-DATASET_DIR="${MOT17_DATASET_DIR:-${ROOT}/outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_jsonl}"
+DATASET_DIR="${MOT17_DATASET_DIR:-${ROOT}/outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_compact}"
 INIT_CHECKPOINT="${MOT20_INIT_CHECKPOINT:-${ROOT}/outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_trainall_seed42_bs1024_shard20x2/checkpoints/iwg_rg_cma_epoch050.pt}"
 LAST_CHECKPOINT="${CHECKPOINT_DIR}/iwg_rg_cma_last.pt"
 
@@ -28,7 +28,7 @@ if [[ -e "${RUN_ROOT}/running" || -e "${LAST_CHECKPOINT}" ]]; then
 fi
 
 "${PY}" -c \
-  "from agentguard.datasets.iwg_rg_cma_dataset import StreamingIWGRGCMADataset; d=StreamingIWGRGCMADataset(r'${DATASET_DIR}', max_samples=1); assert d.index_format == 'jsonl_v1', d.index_format; r=d._reader(d.metadata['train_sequences'][0]); assert r.max_cached_shards is None, r.max_cached_shards; print('MOT17 event-shard cache: unbounded resident (cachefix active)'); d.close()"
+  "from agentguard.datasets.iwg_rg_cma_dataset import StreamingIWGRGCMADataset; d=StreamingIWGRGCMADataset(r'${DATASET_DIR}', max_samples=1); assert d.index_format == 'compact_memmap_v1', d.index_format; print('MOT17 compact dataset preflight passed'); d.close()"
 
 mkdir -p "${CHECKPOINT_DIR}" "${LOG_DIR}" "${PROVENANCE_DIR}"
 touch "${RUN_ROOT}/running"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -11,8 +11,7 @@ from agentguard.features.scalar import compute_scalar_features
 
 
 class EventFeatureBuilder:
-    """Builds batched feature tensors from sequences of ``TrackEvent`` objects
-    for the current IWG + RG-CMA model and legacy offline dataset tensors.
+    """Build batched feature tensors for the current IWG + RG-CMA model.
 
     Parameters
     ----------
@@ -182,67 +181,6 @@ class EventFeatureBuilder:
             "det_feats": torch.from_numpy(det_feats),
             "scalar_feats": torch.from_numpy(scalar_feats),
             "mask": torch.from_numpy(mask),
-        }
-
-    def build_tgr_batch_input(
-        self,
-        windows: List[List[TrackEvent]],
-    ) -> Dict[str, torch.Tensor]:
-        """Build legacy offline temporal tensors for a batch of windows.
-
-        The online Runtime does not call this helper.  It remains temporarily
-        available to the old offline dataset until that pipeline is removed in
-        Phase 5.
-        """
-        if not windows:
-            return {
-                "track_feats": torch.empty((0, 0, self.reid_dim), dtype=torch.float32),
-                "det_feats": torch.empty((0, 0, self.reid_dim), dtype=torch.float32),
-                "scalar_feats": torch.empty((0, 0, self._scalar_dim), dtype=torch.float32),
-                "iwg_policy_probs": torch.empty((0, 0, 5), dtype=torch.float32),
-                "iwg_gates": torch.empty((0, 0, 2), dtype=torch.float32),
-                "has_detection_mask": torch.empty((0, 0), dtype=torch.bool),
-            }
-
-        batch_size = len(windows)
-        seq_len = len(windows[0])
-        track_feats = np.zeros((batch_size, seq_len, self.reid_dim), dtype=np.float32)
-        det_feats = np.zeros((batch_size, seq_len, self.reid_dim), dtype=np.float32)
-        scalar_feats = np.zeros((batch_size, seq_len, self._scalar_dim), dtype=np.float32)
-        iwg_policy_probs = np.full((batch_size, seq_len, 5), 0.2, dtype=np.float32)
-        iwg_gates = np.ones((batch_size, seq_len, 2), dtype=np.float32)
-        has_detection_mask = np.zeros((batch_size, seq_len), dtype=np.bool_)
-
-        for batch_index, window_events in enumerate(windows):
-            if len(window_events) != seq_len:
-                raise ValueError("All temporal windows in a batch must have the same length")
-            for position, event in enumerate(window_events):
-                track_feats[batch_index, position] = self._fit_reid(event.track_feature)
-                has_detection_mask[batch_index, position] = bool(event.has_detection)
-                if event.has_detection and event.detection_feature.size > 0:
-                    det_feats[batch_index, position] = self._fit_reid(
-                        event.detection_feature
-                    )
-                scalar_feats[batch_index, position] = self._event_scalar(event)
-                if event.iwg_policy_probs is not None:
-                    iwg_policy_probs[batch_index, position] = np.asarray(
-                        event.iwg_policy_probs
-                    ).reshape(-1)
-                if event.iwg_gate is not None:
-                    iwg_gates[batch_index, position] = np.asarray(
-                        event.iwg_gate
-                    ).reshape(-1)
-
-        scalar_feats = self.normalize_scalars(scalar_feats).astype(
-            np.float32, copy=False
-        )
-        return {
-            "track_feats": torch.from_numpy(track_feats),
-            "det_feats": torch.from_numpy(det_feats),
-            "scalar_feats": torch.from_numpy(scalar_feats),
-            "iwg_policy_probs": torch.from_numpy(iwg_policy_probs),
-            "iwg_gates": torch.from_numpy(iwg_gates),
-            "has_detection_mask": torch.from_numpy(has_detection_mask),
         }
 
     # ------------------------------------------------------------------

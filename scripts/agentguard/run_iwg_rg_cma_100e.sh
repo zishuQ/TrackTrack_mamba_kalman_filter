@@ -4,15 +4,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PY="${PYTHON_BIN:-${ROOT}/.venv/bin/python}"
 RUN_NAME="${RUN_NAME:-iwg_rg_cma_v1_trainall_seed42}"
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2048}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-1024}"
 RUN_ROOT="${ROOT}/outputs/agentguard/experiments/${RUN_NAME}"
-DATASET_DIR="${DATASET_DIR:-${ROOT}/outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_jsonl}"
+DATASET_DIR="${DATASET_DIR:-${ROOT}/outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_compact}"
 CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
 LOG_DIR="${RUN_ROOT}/logs"
 PROVENANCE_DIR="${RUN_ROOT}/provenance"
 EVENT_CACHE_ROOT="${ROOT}/outputs/agentguard/event_cache_v3_iwg_v2"
 DETECTION_CACHE_ROOT="${ROOT}/outputs/agentguard/detection_cache"
-LABEL_DIR="${ROOT}/outputs/agentguard/labels/iwg_rg_cma/MOT17/nsa_candidate_a_json"
+LABEL_DIR="${ROOT}/outputs/agentguard/labels/iwg_rg_cma/MOT17/nsa_candidate_a_compact"
 TRACKER_ROOT="${ROOT}/outputs/3. track"
 CHECKPOINT="${CHECKPOINT_DIR}/iwg_rg_cma_last.pt"
 SEQUENCES=(
@@ -66,7 +66,7 @@ sha256sum \
   > "${PROVENANCE_DIR}/training_sources.sha256"
 "${PY}" -c "import sys,torch; print(sys.version); print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())" \
   > "${PROVENANCE_DIR}/environment.txt"
-sha256sum "${LABEL_DIR}"/*_labels.json > "${PROVENANCE_DIR}/label_files.sha256"
+find "${LABEL_DIR}" -type f -print0 | sort -z | xargs -0 sha256sum > "${PROVENANCE_DIR}/label_files.sha256"
 
 if [[ ! -f "${DATASET_DIR}/metadata.json" ]]; then
   "${PY}" -m agentguard.cli build_iwg_rg_cma_data \

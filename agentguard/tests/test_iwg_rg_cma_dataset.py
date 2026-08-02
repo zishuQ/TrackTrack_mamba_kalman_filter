@@ -5,7 +5,6 @@ import json
 import numpy as np
 import torch
 
-import agentguard.datasets.iwg_rg_cma_dataset as iwg_rg_cma_dataset
 from agentguard.data.cache_reader import CompactEventCacheReader
 from agentguard.data.cache_schema import (
     COMPACT_CACHE_SCHEMA_VERSION,
@@ -24,55 +23,14 @@ from agentguard.datasets.iwg_rg_cma_dataset import (
     SPORTSMOT_TRAIN_SEQUENCES,
     SPORTSMOT_VAL_SEQUENCES,
     StreamingIWGRGCMADataset,
-    build_streaming_sample_index,
-    event_key,
     resolve_iwg_rg_cma_dataset_spec,
-    segment_track_timelines,
 )
-
-
-def _record(frame: int, *, track: int = 1, matched: bool = True, history: int | None = None):
-    return {
-        "sequence": "seq",
-        "event_shard_id": 0,
-        "event_offset": frame,
-        "event_id": f"event-{frame}",
-        "frame_id": frame,
-        "track_id": track,
-        "matched": matched,
-        "history_count": frame if history is None else history,
-    }
-
-
-def test_streaming_index_includes_unmatched_history_without_crossing_segments():
-    timeline = [
-        _record(1),
-        _record(2, matched=False),
-        _record(3),
-        _record(100, history=1),
-        _record(101, matched=False, history=2),
-        _record(102, history=3),
-    ]
-    segments = segment_track_timelines(timeline, max_frame_gap=30)
-    labels = {
-        event_key("seq", 0, 3): {},
-        event_key("seq", 0, 102): {},
-    }
-    samples = build_streaming_sample_index(segments, labels)
-    assert len(samples) == 2
-    assert [event["frame_id"] for event in samples[0]["events"]] == [1, 2, 3]
-    assert [event["matched"] for event in samples[0]["events"]] == [True, False, True]
-    assert [event["frame_id"] for event in samples[1]["events"]] == [100, 101, 102]
-    assert samples[0]["segment_id"] != samples[1]["segment_id"]
-    for sample in samples:
-        assert len({event["sequence"] for event in sample["events"]}) == 1
-        assert len({event["track_id"] for event in sample["events"]}) == 1
 
 
 def test_mot17_schema_hash_is_stable_and_mot20_is_separate():
     assert (
         IWG_RG_CMA_DATASET_SCHEMA_SHA256
-        == "5b905322077353dc44041b4db93462d5a613c578873bac63545769e13669265b"
+        == "7b6d571293275f03c04686b5a88b2525a8fc2022111d12ca91bbb91aa94e9367"
     )
     assert (
         "cf1d1fc4731a53902157ee3a44584e384e5b61453dc51b2796a6437782440158"
@@ -148,33 +106,6 @@ def test_compact_reader_bounds_lru_shard_cache(tmp_path):
         reader.close()
 
 
-def test_jsonl_dataset_reader_keeps_event_shards_resident(monkeypatch):
-    calls = []
-
-    class ReaderStub:
-        def __init__(self, *args, **kwargs):
-            calls.append((args, kwargs))
-            self.max_cached_shards = kwargs["max_cached_shards"]
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(iwg_rg_cma_dataset, "CompactEventCacheReader", ReaderStub)
-    dataset = object.__new__(StreamingIWGRGCMADataset)
-    dataset.metadata = {
-        "event_cache_root": "/events",
-        "detection_cache_root": "/detections",
-        "dataset": "MOT17",
-        "split": "train",
-    }
-    dataset._readers = {}
-
-    reader = dataset._reader("MOT17-02-FRCNN")
-
-    assert reader.max_cached_shards is None
-    assert calls[0][1]["max_cached_shards"] is None
-
-
 def test_compact_index_getitem_does_not_open_event_shard_reader():
     class DetectionReaderStub:
         def get_detection(self, index):
@@ -201,6 +132,8 @@ def test_compact_index_getitem_does_not_open_event_shard_reader():
             "policy_safe_soft_target": np.asarray([[0.5, 0.5]], dtype=np.float32),
             "cue_target": np.asarray([[0.0, 1.0]], dtype=np.float32),
             "risk_target": np.asarray([[0.0, 0.0]], dtype=np.float32),
+            "oracle_gate_target": np.asarray([[0.25, 0.75]], dtype=np.float32),
+            "gate_confidence": np.asarray([[0.8, 0.9]], dtype=np.float32),
             "valid_channels": np.asarray([[True, True]]),
             "sample_weight": np.asarray([1.0], dtype=np.float32),
             "track_ids": np.asarray([3]),

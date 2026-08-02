@@ -1,0 +1,99 @@
+{
+  "manifest_version": 1,
+  "name": "agentguard-iwg-rg-cma-official-baselines",
+  "model": {
+    "schema": "agentguard_iwg_rg_cma_v1",
+    "schema_sha256": "9e4c68fa578f3fcfd526e421b4f1a6430fff5f4a1f6961a9cda236a25ddca135",
+    "reid_dim": 2048,
+    "scalar_dim": 63,
+    "event_dim": 128,
+    "context_size": 6,
+    "correction_bound": 0.05,
+    "max_frame_gap": 30,
+    "feature_schema_sha256": "8e3082d75d7886acdea41e0e6a0a7e8ca1864429ee127ec1c4ba1ba03bb84245",
+    "label_schema_sha256": "716df3064d31baa842202df71fc0302337a341c3fcfa2753fe6dd337c4d4c03e",
+    "cache_schema_version": 3
+  },
+  "baselines": {
+    "MOT17": {
+      "dataset": "MOT17",
+      "split": "all",
+      "epoch": 50,
+      "checkpoint": "outputs/agentguard/experiments/iwg_rg_cma_mot20s4e100_to_mot17_finetune50_lr1e5_bs1024/checkpoints/iwg_rg_cma_epoch050.pt",
+      "checkpoint_sha256": "e77dfed08cf61a1771630910764af467925122aa9a2bf7a81054d576bd275f86",
+      "source_experiment": "iwg_rg_cma_mot20s4e100_to_mot17_finetune50_lr1e5_bs1024",
+      "dataset_dir": "outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_compact",
+      "dataset_metadata": "outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_compact/metadata.json",
+      "dataset_metadata_sha256": "e0da8c08fa4579fbaacfb2e3704f3905c0963202d69c861a2f2170788051f66a",
+      "dataset_sha256": "8fbbee64738205dc4308bf5c834f4e85f945cae82d2219d25e41dbe4085ee560",
+      "checkpoint_source_dataset_sha256": "d005e1418d587b0dc419ea73c95ab6b366c062f9b991baf3641c8842de0752a6",
+      "data_config": {
+        "sequence_sampling": "sample-proportional",
+        "batch_size": 1024,
+        "memory_shards": 1,
+        "epochs_per_shard": 50,
+        "shard_cycles": 1,
+        "train_split": "all",
+        "warm_start_from": "outputs/agentguard/experiments/iwg_rg_cma_v1_mot20_interleaved_shard4x1_seed42_bs1024_100e/checkpoints/iwg_rg_cma_epoch100.pt",
+        "finetune_epochs": 50,
+        "finetune_lr": 0.00001
+      },
+      "metrics": {
+        "raw_hota_percent": 77.7277,
+        "test_final_post_hota_percent": 67.79
+      }
+    },
+    "MOT20": {
+      "dataset": "MOT20",
+      "split": "all",
+      "epoch": 100,
+      "checkpoint": "outputs/agentguard/experiments/iwg_rg_cma_sqrt_size_mot20_bound005_context6_seed42_bs1024_shard4x1_100e/checkpoints/iwg_rg_cma_epoch100.pt",
+      "checkpoint_sha256": "cfb2667d912d941c96ee867ff6f8627e867a5a7f6d94814af35d4e26a70ec3cf",
+      "source_experiment": "iwg_rg_cma_sqrt_size_mot20_bound005_context6_seed42_bs1024_shard4x1_100e",
+      "dataset_dir": "outputs/agentguard/datasets/iwg_rg_cma/MOT20/nsa_all_v3_compact",
+      "dataset_metadata": "outputs/agentguard/datasets/iwg_rg_cma/MOT20/nsa_all_v3_compact/metadata.json",
+      "dataset_metadata_sha256": "fc00a9fcce34074c75487fc5cfab4e282c21f7c1c0ce49e91140cf9329d8f98e",
+      "dataset_sha256": "7ad974d3eaf0f03f8beb7bd77e001b068d4a5091a6c502eab1292b0a9624e45f",
+      "data_config": {
+        "sequence_sampling": "sqrt-size",
+        "batch_size": 1024,
+        "memory_shards": 4,
+        "epochs_per_shard": 1,
+        "shard_cycles": 25,
+        "shard_order": "1,2,3,4",
+        "train_split": "all",
+        "sqrt_size": true
+      },
+      "metrics": {
+        "raw_hota_percent": 79.1448,
+        "test_final_post_hota_percent": 66.40
+      }
+    },
+    "SportsMOT": {
+      "dataset": "SportsMOT",
+      "split": "trainval",
+      "epoch": 200,
+      "checkpoint": "outputs/agentguard/experiments/iwg_rg_cma_v1_sportsmot_trainval_interleaved_shard4x1_seed42_bs1024_200e/checkpoints/iwg_rg_cma_epoch200.pt",
+      "checkpoint_sha256": "adb94eeb0eb5919511bf9adbd20a25aa3b62f14036ead867564f5a7dc615027d",
+      "source_experiment": "iwg_rg_cma_v1_sportsmot_trainval_interleaved_shard4x1_seed42_bs1024_200e",
+      "dataset_dir": "outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_trainval_v3_compact",
+      "dataset_metadata": "outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_trainval_v3_compact/metadata.json",
+      "dataset_metadata_sha256": "77cc52b56027f31f211da010ad36433fc86e4a2fa13210a4a7b17e1c8fac8d82",
+      "dataset_sha256": "50c9b73cd00f3ec048b970dbcf419f84264ab40b0634f3d01092a873c57f1d30",
+      "data_config": {
+        "sequence_sampling": "sqrt-size",
+        "batch_size": 1024,
+        "memory_shards": 4,
+        "epochs_per_shard": 1,
+        "shard_cycles": 50,
+        "shard_order": "1,2,3,4",
+        "train_split": "trainval",
+        "sqrt_size": true
+      },
+      "metrics": {
+        "raw_hota_percent": 83.2326,
+        "test_final_post_hota_percent": 76.47
+      }
+    }
+  }
+}

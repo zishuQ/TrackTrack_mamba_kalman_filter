@@ -1,31 +1,16 @@
-iwg:
-  epochs: 30
-  batch_size: 256
-  learning_rate: 0.0003
+iwg_rg_cma:
+  epochs: 100
+  batch_size: 1024
+  num_workers: 4
+  lr: 0.0001
   weight_decay: 0.0001
   warmup_epochs: 1
-  gradient_clip_norm: 5
-  early_stop_patience: 5
-  amp: true
+  grad_clip: 1.0
   seed: 42
-
-tgr:
-  epochs: 30
-  batch_size: 128
-  learning_rate: 0.0002
-  weight_decay: 0.0001
-  warmup_epochs: 1
-  gradient_clip_norm: 5
-  early_stop_patience: 5
-  amp: true
-  seed: 42
-
-student_v1:
-  epochs: 15
-  batch_size: 256
-  learning_rate: 0.0001
-  weight_decay: 0.0001
-  warmup_epochs: 1
-  gradient_clip_norm: 5
-  early_stop_patience: 5
-  amp: true
+  amp: false
+  correction_bound: 0.05
+  context_size: 6
+  sequence_sampling: sqrt-size
+  memory_shards: 4
+  epochs_per_shard: 1
+  shard_cycles: 25

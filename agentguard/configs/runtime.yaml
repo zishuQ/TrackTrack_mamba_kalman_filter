@@ -1,21 +1,7 @@
 agentguard:
-  mode: "off"  # off, iwg, full
+  mode: "off"  # off, capture, iwg-rg-cma
   device: "cpu"
-
-iwg:
-  checkpoint: null
-
-tgr:
-  checkpoint: null
-
-maturity:
-  min_history: 6
-
-iwg_buffer:
-  max_len: 6
-
-tgr_window:
-  window_size: 4
-
-replay:
-  max_replay_events: 4
+  rg_cma_output: "final"
+  rg_cma_alpha: 1.0
+  iwg_context_size: 6
+  rg_cma_max_gap: 30

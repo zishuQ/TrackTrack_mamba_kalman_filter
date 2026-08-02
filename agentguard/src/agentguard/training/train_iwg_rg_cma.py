@@ -700,7 +700,7 @@ def _checkpoint_payload(
         "dataset": str(metadata["dataset"]),
         "split": str(metadata["split"]),
         "train_sequences": list(metadata["train_sequences"]),
-        "index_format": str(metadata.get("index_format", "jsonl_v1")),
+        "index_format": str(metadata["index_format"]),
         "correction_bound": float(model.correction_bound),
         "reliability_mode": str(model.reliability_mode),
         "architecture_variant": str(model.architecture_variant),

@@ -1,163 +1,122 @@
 # AgentGuard
 
-AgentGuard is a modular guard system for online multi-object tracking that combines
-an Interaction-Wise Gating (IWG) module for per-frame gate prediction with a
-Temporal Gate Revision (TGR) module for temporal consistency refinement.
+AgentGuard is the current IWG-RG-CMA guard for online multi-object tracking.
+The maintained path uses a six-event context, a Safe-Direct IWG gate, and a
+bounded RG-CMA correction. Historical experiments under
+`outputs/agentguard/experiments/` are retained as reproducibility records.
 
-## Quick Start: Cache and Validate Events
+## Pipeline
 
-```bash
-# 0. Verify environment
-DATASET=MOT17 bash scripts/agentguard/00_verify_environment.sh
-
-# 1. Run baseline tracking
-DATASET=MOT17 MODE=val_custom bash scripts/agentguard/01_run_baseline.sh
-
-# 2. Cache events for training
-DATASET=MOT17 bash scripts/agentguard/02_cache_events.sh
-
-# 3. Validate cache
-DATASET=MOT17 bash scripts/agentguard/03_validate_cache.sh
+```text
+detection cache
+      |
+      v
+compact event cache
+      |
+      v
+rollout labels -> streaming IWG-RG-CMA dataset -> training checkpoint
+                                                        |
+                                                        v
+                                              raw / post evaluation
 ```
 
-## Quick Start: Generate Labels and Run Teacher
+The shared cache roots are:
 
-```bash
-# 4. Generate GT labels
-DATASET=MOT17 bash scripts/agentguard/04_generate_labels.sh
-
-# 5. Run teacher annotation (requires API key)
-export BAILIAN_API_KEY="your-api-key"
-DATASET=MOT17 bash scripts/agentguard/05_run_teacher.sh
-
-# 6. Build identity prototypes
-DATASET=MOT17 bash scripts/agentguard/06_build_prototypes.sh
-
-# 7. Run oracle matching
-DATASET=MOT17 bash scripts/agentguard/07_run_oracle.sh
-
-# 8. Fuse labels
-DATASET=MOT17 bash scripts/agentguard/08_fuse_labels.sh
-
-# 9. Generate rollout labels
-DATASET=MOT17 bash scripts/agentguard/09_generate_rollout.sh
+```text
+outputs/agentguard/detection_cache
+outputs/agentguard/event_cache_v3_iwg_v2
 ```
 
-## Quick Start: Train Models
+## Quick Start
+
+The standard experiment scripts prepare data, train, validate the checkpoint,
+and record provenance in one run:
 
 ```bash
-# Student-V0 default path: accepted-update A-only labels.
-DATASET=MOT17 MODE=all bash scripts/agentguard/04_build_rollout_labels.sh
-DATASET=MOT17 MODE=all bash scripts/agentguard/06_build_student_v0_data.sh
-DATASET=MOT17 MODE=all DEVICE=cuda bash scripts/agentguard/07_train_student_v0.sh
-
-# 10. Train IWG
-DATASET=MOT17 DEVICE=cuda bash scripts/agentguard/10_train_iwg.sh
-
-# 11. Validate IWG
-DATASET=MOT17 DEVICE=cuda bash scripts/agentguard/11_validate_iwg.sh
-
-# 12. Train TGR (requires trained IWG)
-DATASET=MOT17 DEVICE=cuda bash scripts/agentguard/12_train_tgr.sh
-
-# 13. Train Student V1 (requires trained IWG)
-DATASET=MOT17 DEVICE=cuda bash scripts/agentguard/13_train_student_v1.sh
+bash scripts/agentguard/run_iwg_rg_cma_100e.sh
+bash scripts/agentguard/run_iwg_rg_cma_mot20_100e.sh
+bash scripts/agentguard/run_iwg_rg_cma_sportsmot_trainval_200e.sh
 ```
 
-## Quick Start: Run AgentGuard Inference
-
-After training, run the tracker with AgentGuard enabled:
+For an existing dataset, use the CLI directly:
 
 ```bash
-# IWG-only mode
+python -m agentguard.cli build_iwg_rg_cma_data \
+  --dataset MOT20 --mode all \
+  --event-cache-root outputs/agentguard/event_cache_v3_iwg_v2 \
+  --detection-cache-root outputs/agentguard/detection_cache \
+  --label-dir outputs/agentguard/labels/iwg_rg_cma/MOT20/nsa_all_v3_compact \
+  --output-dir outputs/agentguard/datasets/iwg_rg_cma/MOT20/nsa_all_v3_compact
+
+python -m agentguard.cli train_iwg_rg_cma \
+  --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/MOT20/nsa_all_v3_compact \
+  --checkpoint-dir outputs/agentguard/experiments/<run>/checkpoints \
+  --device cuda --epochs 100 --batch-size 1024 --num-workers 4 \
+  --lr 0.0001 --weight-decay 0.0001 --warmup-epochs 1 \
+  --grad-clip 1.0 --seed 42 --memory-shards 4 \
+  --epochs-per-shard 1 --shard-cycles 25 \
+  --sequence-sampling sqrt-size
+```
+
+The CLI supports these maintained commands:
+
+```text
+cache_events
+validate_cache
+rollout_smoke
+build_rollout_labels
+build_iwg_rg_cma_data
+train_iwg_rg_cma
+validate_iwg_rg_cma_checkpoint
+```
+
+## Official Baselines
+
+The authoritative checkpoint paths, hashes, dataset metadata, and metrics are
+in `agentguard/configs/official_baselines.json`. All three baselines use
+`correction_bound=0.05`, `context_size=6`, and `batch_size=1024`.
+
+| Dataset | Checkpoint epoch | Raw HOTA | Test final + post HOTA |
+| --- | ---: | ---: | ---: |
+| MOT17 | 50 | 77.7277% | 67.79 |
+| MOT20 | 100 | 79.1448% | 66.40 |
+| SportsMOT | 200 | 83.2326% | 76.47 |
+
+The recorded MOT20 schedule is `4 x 1 x 25` with `sqrt-size` sampling, and the
+recorded SportsMOT schedule is `4 x 1 x 50` with `sqrt-size` sampling. The
+MOT17 baseline is a warm start from the historical MOT20 interleaved epoch100
+checkpoint followed by 50 full-data fine-tuning epochs using the default
+sample-proportional (`full_shuffle`) policy at learning rate `1e-5`.
+
+## Runtime
+
+Run the tracker with a combined checkpoint:
+
+```bash
 cd "3. Tracker"
-../.venv/bin/python run.py --dataset MOT17 --mode val_custom \
-  --agentguard-mode iwg \
-  --iwg-checkpoint outputs/agentguard/models/iwg/iwg_best.pt
-
-# Full mode (IWG + TGR)
-../.venv/bin/python run.py --dataset MOT17 --mode val_custom \
-  --agentguard-mode full \
-  --iwg-checkpoint outputs/agentguard/models/iwg/iwg_best.pt \
-  --tgr-checkpoint outputs/agentguard/models/tgr/tgr_best.pt
+../.venv/bin/python run.py --dataset MOT20 --mode all \
+  --agentguard-mode iwg-rg-cma \
+  --agentguard-checkpoint \
+  ../outputs/agentguard/experiments/iwg_rg_cma_sqrt_size_mot20_bound005_context6_seed42_bs1024_shard4x1_100e/checkpoints/iwg_rg_cma_epoch100.pt \
+  --iwg-rg-cma-output final
 ```
 
-## Output Directory Reference
+Use raw evaluation without `--use_post`. Add `--use_post` only for the final
+test output. `base` evaluates the Safe-Direct IWG gate; `final` applies the
+bounded RG-CMA correction.
 
-| Directory | Contents |
-|---|---|
-| `outputs/agentguard/cache/` | Cached detection events and GT matches (sharded) |
-| `outputs/agentguard/labels/` | Generated GT labels per event |
-| `outputs/agentguard/teacher/` | Teacher annotation responses and evidence packets |
-| `outputs/agentguard/prototypes/` | Identity prototype embeddings |
-| `outputs/agentguard/oracle/` | Oracle future-frame matching results |
-| `outputs/agentguard/fused/` | Fused labels combining teacher + oracle |
-| `outputs/agentguard/rollout/` | Rollout training labels for IWG/TGR |
-| `outputs/agentguard/models/iwg/` | IWG model checkpoints |
-| `outputs/agentguard/models/tgr/` | TGR model checkpoints |
-| `outputs/agentguard/models/student_v1/` | Student V1 model checkpoints |
+## Outputs and Configuration
 
-Student-V0 uses accepted-update A-only rollout labels in
-`outputs/agentguard/labels/<dataset>/<mode>_a_only/`. Label builders reject
-records with any other candidate type.
+| Path | Purpose |
+| --- | --- |
+| `outputs/agentguard/detection_cache/` | Shared detection mmap cache |
+| `outputs/agentguard/event_cache_v3_iwg_v2/` | Compact event cache |
+| `outputs/agentguard/labels/iwg_rg_cma/` | Current rollout labels |
+| `outputs/agentguard/datasets/iwg_rg_cma/` | Streaming training datasets |
+| `outputs/agentguard/experiments/` | Checkpoints, logs, evaluation, and provenance |
+| `agentguard/configs/official_baselines.json` | Official baseline manifest |
 
-## Configuration
-
-All configuration is in `agentguard/configs/`:
-
-| File | Purpose |
-|---|---|
-| `runtime.yaml` | Runtime mode, buffer sizes, replay settings |
-| `data.yaml` | Cache sharding, detection thresholds, GT matching |
-| `training.yaml` | Hyperparameters for IWG, TGR, and Student V1 |
-| `bailian.yaml.example` | Bailian API configuration (copy to `bailian.yaml`) |
-| `splits/MOT17.yaml` | MOT17 train/val split |
-| `splits/MOT20.yaml` | MOT20 train/val split |
-| `splits/SportsMOT.yaml` | SportsMOT train/val split |
-
-## Pipeline Overview
-
-```
-Baseline Tracking ──> Cache Events ──> Generate Labels
-                          │
-                          ├──> Teacher Annotation ──┐
-                          │                         │
-                          └──> Oracle Matching ──────┤
-                                                     │
-                                              Fuse Labels
-                                                     │
-                                           Generate Rollout
-                                                     │
-                                            ┌────────┴────────┐
-                                      Train IWG          Train TGR
-                                            │                │
-                                     Validate IWG     Run Full Mode
-                                            │
-                                     Train Student V1
-```
-
-## Project Structure
-
-```
-agentguard/
-├── configs/                  # YAML configuration files
-├── src/agentguard/
-│   ├── cli/                  # CLI entry points
-│   ├── contracts/            # Data contracts (events, outputs, enums)
-│   ├── data/                 # Data loading, caching, GT matching
-│   ├── datasets/             # PyTorch Datasets for IWG/TGR training
-│   ├── evaluation/           # Evaluation metrics
-│   ├── features/             # Feature building and normalization
-│   ├── hard_events/          # Hard event mining
-│   ├── labels/               # Label generation
-│   ├── models/               # IWG, TGR, and event encoder models
-│   ├── motion/               # Motion models (NSA Kalman filter)
-│   ├── oracle/               # Oracle future-frame matching
-│   ├── rollout/              # Rollout label generation
-│   ├── runtime/              # Online inference runtime
-│   ├── teacher/              # Teacher annotation pipeline
-│   ├── training/             # Training loops and utilities
-│   └── verifier/             # Verification and label fusion
-├── tests/                    # Unit tests
-└── README.md
-```
+Configuration references are in `agentguard/configs/runtime.yaml`,
+`agentguard/configs/data.yaml`, and `agentguard/configs/training.yaml`.
+The detailed training and evaluation guide is
+`agentguard/IWG_RG_CMA_COMMAND_GUIDE.md`.

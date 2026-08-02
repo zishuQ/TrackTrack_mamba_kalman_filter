@@ -10,12 +10,6 @@ from agentguard.contracts.states import (
 )
 from agentguard.contracts.events import TrackEvent
 from agentguard.contracts.outputs import GateDecision
-from agentguard.contracts.serialization import (
-    serialize_event,
-    deserialize_event,
-    serialize_events,
-    deserialize_events,
-)
 
 __all__ = [
     "DetectionSource",
@@ -26,8 +20,4 @@ __all__ = [
     "AssociationContext",
     "TrackEvent",
     "GateDecision",
-    "serialize_event",
-    "deserialize_event",
-    "serialize_events",
-    "deserialize_events",
 ]

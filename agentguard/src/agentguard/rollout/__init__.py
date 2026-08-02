@@ -6,9 +6,7 @@ from agentguard.rollout.appearance import (
     compute_appearance_benefit,
     ema_update,
 )
-from agentguard.rollout.window import (
-    compute_tgr_window_labels,
-)
+from agentguard.rollout.context import RolloutContext
 from agentguard.rollout.losses import (
     iou_loss,
     l1_normalized_loss,
@@ -23,8 +21,7 @@ __all__ = [
     # Appearance
     "compute_appearance_benefit",
     "ema_update",
-    # Window / TGR
-    "compute_tgr_window_labels",
+    "RolloutContext",
     # Losses
     "iou_loss",
     "l1_normalized_loss",

@@ -14,21 +14,20 @@ import torch
 
 from agentguard.data.cache_reader import CompactEventCacheReader
 from agentguard.data.cache_schema import COMPACT_CACHE_SCHEMA_VERSION, FEATURE_SCHEMA_SHA256
-from agentguard.data.compact_iwg_labels import load_compact_label_arrays
+from agentguard.data.compact_iwg_labels import (
+    SUPPORTED_COMPACT_IWG_LABEL_SCHEMA_SHA256,
+    load_compact_label_arrays,
+)
 from agentguard.data.label_schema import (
     ROLLOUT_LABEL_SCHEMA_SHA256,
     ROLLOUT_LABEL_SCHEMA_VERSION,
-    validate_rollout_label,
 )
 from agentguard.datasets.timeline_utils import (
     IWG_CONTEXT_SIZE,
     _fit_train_normalization,
-    _load_labels,
     _sha256_file,
     _sha256_file_set,
-    compact_timeline_record,
     event_key,
-    segment_track_timelines,
 )
 from agentguard.features.normalization import NormalizationStats
 
@@ -203,6 +202,8 @@ IWG_RG_CMA_DATASET_DESCRIPTOR = {
     "split_policy": "mot17_all_frcnn_train_all",
     "unmatched_history": True,
     "unmatched_supervision": False,
+    "index_format": "compact_memmap_v1",
+    "label_join": "native_current_timeline_event_key",
     "scalar_dim": 63,
     "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
     "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
@@ -475,12 +476,6 @@ def _canonical_sha256(value: Any) -> str:
     ).hexdigest()
 
 
-def _write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
-    with path.open("w") as handle:
-        for record in records:
-            handle.write(json.dumps(record, separators=(",", ":")) + "\n")
-
-
 def _sha256_relative_file_set(paths: Iterable[Path], root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(paths):
@@ -583,6 +578,36 @@ def _build_compact_sequence_index(
     count = int(label_manifest["retained_labels"])
     timeline_size = int(reader.manifest["num_events"])
     reid_dim = int(reader.manifest["reid_dim"])
+
+    # Preserve the legacy deterministic segment numbering while keeping the
+    # actual index construction streaming. The old builder ordered tracks by
+    # track_id before numbering their local segments; event-cache order is not
+    # guaranteed to have that same ordering.
+    segment_counts: dict[int, int] = {}
+    previous_by_track: dict[int, tuple[int, int]] = {}
+    for record in reader.iter_event_records():
+        track_id = int(record["track_id"])
+        frame_id = int(record["frame_id"])
+        history_count = int(record.get("history_count", 0))
+        previous = previous_by_track.get(track_id)
+        reset = previous is None
+        if previous is not None:
+            previous_frame, previous_history_count = previous
+            gap = frame_id - previous_frame
+            reset = (
+                gap <= 0
+                or gap > int(max_frame_gap)
+                or history_count < previous_history_count
+            )
+        if reset:
+            segment_counts[track_id] = segment_counts.get(track_id, 0) + 1
+        previous_by_track[track_id] = (frame_id, history_count)
+    segment_bases: dict[int, int] = {}
+    next_segment = int(segment_offset)
+    for track_id in sorted(segment_counts):
+        segment_bases[track_id] = next_segment
+        next_segment += segment_counts[track_id]
+
     index_dir.mkdir(parents=True, exist_ok=False)
     timeline_track = np.lib.format.open_memmap(
         index_dir / COMPACT_TIMELINE_ARRAY_FILES["timeline_track_feats"],
@@ -615,7 +640,7 @@ def _build_compact_sequence_index(
     segment_ids = np.zeros(count, dtype=np.int64)
 
     histories: dict[int, dict[str, Any]] = {}
-    next_segment = int(segment_offset)
+    segment_positions: dict[int, int] = {}
     label_position = 0
     events = 0
     matched = 0
@@ -651,14 +676,15 @@ def _build_compact_sequence_index(
                 or history_count < int(state["history_count"])
             )
         if reset:
+            segment_position = segment_positions.get(track_id, 0)
             state = {
                 "frame_id": frame_id,
                 "history_count": history_count,
-                "segment_id": next_segment,
+                "segment_id": segment_bases[track_id] + segment_position,
                 "events": deque(maxlen=context_size),
             }
             histories[track_id] = state
-            next_segment += 1
+            segment_positions[track_id] = segment_position + 1
         state["frame_id"] = frame_id
         state["history_count"] = history_count
         shard_id = int(record["event_shard_id"])
@@ -743,36 +769,6 @@ def _build_compact_sequence_index(
     )
 
 
-def build_streaming_sample_index(
-    segments: Iterable[list[dict[str, Any]]],
-    labels: dict[str, dict[str, Any]],
-    context_size: int = IWG_CONTEXT_SIZE,
-) -> list[dict[str, Any]]:
-    context_size = _validate_context_size(context_size)
-    samples: list[dict[str, Any]] = []
-    for segment_id, segment in enumerate(segments):
-        for endpoint, record in enumerate(segment):
-            key = event_key(
-                str(record["sequence"]),
-                int(record["event_shard_id"]),
-                int(record["event_offset"]),
-            )
-            if not bool(record.get("matched", False)) or key not in labels:
-                continue
-            events = segment[max(0, endpoint - context_size + 1) : endpoint + 1]
-            samples.append(
-                {
-                    "sequence": str(record["sequence"]),
-                    "track_id": int(record["track_id"]),
-                    "segment_id": int(segment_id),
-                    "pad_left": context_size - len(events),
-                    "events": events,
-                    "label_key": key,
-                }
-            )
-    return samples
-
-
 def build_iwg_rg_cma_dataset(
     *,
     dataset: str,
@@ -816,132 +812,84 @@ def build_iwg_rg_cma_dataset(
     compact_label_schema_sha256 = None
     output_dir.mkdir(parents=True)
     norm_path = output_dir / "norm_stats.npz"
-    if dataset == "MOT17":
-        labels = _load_labels(label_dir)
-        samples: list[dict[str, Any]] = []
-        segment_offset = 0
-        for sequence in sequences:
-            source_split = source_splits[sequence]
-            cache_dir = event_cache_root / dataset / source_split / sequence
-            detection_dir = detection_cache_root / dataset / source_split / sequence
-            if not detection_dir.is_dir():
-                raise FileNotFoundError(f"detection cache not found: {detection_dir}")
-            reader = CompactEventCacheReader(cache_dir, detection_dir)
-            try:
-                if not bool(reader.manifest.get("complete", False)):
-                    raise ValueError(f"event cache is incomplete: {cache_dir}")
-                reid_dims.add(int(reader.manifest["reid_dim"]))
-                timeline = [
-                    compact_timeline_record(sequence, record)
-                    for record in reader.iter_event_records()
-                ]
-            finally:
-                reader.close()
-            segments = segment_track_timelines(timeline, max_frame_gap=max_frame_gap)
-            sequence_samples = build_streaming_sample_index(
-                segments, labels, context_size
-            )
-            for sample in sequence_samples:
-                sample["segment_id"] += segment_offset
-            segment_offset += len(segments)
-            samples.extend(sequence_samples)
-            timeline_counts[sequence] = {
-                "events": len(timeline),
-                "matched": sum(bool(record["matched"]) for record in timeline),
-                "unmatched": sum(not bool(record["matched"]) for record in timeline),
-                "segments": len(segments),
-                "labeled_endpoints": len(sequence_samples),
-                "samples_with_unmatched_history": sum(
-                    any(
-                        not bool(event["matched"])
-                        for event in sample["events"][:-1]
-                    )
-                    for sample in sequence_samples
-                ),
-            }
-            manifest_paths.append(cache_dir / "manifest.json")
-        index_path = output_dir / "train_samples.jsonl"
-        _write_jsonl(index_path, samples)
-        index_format = "jsonl_v1"
-        index_sha256 = _sha256_file(index_path)
-        label_files_sha256 = _sha256_file_set(label_dir.glob("*_labels.json"))
-        index_metadata = {"train_index_file": index_path.name}
-        num_train_samples = len(samples)
+    label_summary_path = label_dir / "summary.json"
+    if not label_summary_path.is_file():
+        raise FileNotFoundError(f"compact label summary not found: {label_summary_path}")
+    label_summary = json.loads(label_summary_path.read_text())
+    if label_summary.get("motion_label_mode", "nsa_rollout") != "nsa_rollout":
+        raise ValueError("only NSA rollout labels are supported")
+    index_root = output_dir / "compact_index"
+    index_root.mkdir()
+    first_manifest = json.loads(
+        (label_dir / sequences[0] / "manifest.json").read_text()
+    )
+    compact_label_schema_sha256 = str(
+        first_manifest.get("compact_label_schema_sha256", "")
+    )
+    if compact_label_schema_sha256 not in SUPPORTED_COMPACT_IWG_LABEL_SCHEMA_SHA256:
+        raise ValueError(
+            f"unsupported compact label schema: {compact_label_schema_sha256!r}"
+        )
+    first_array_files = first_manifest.get("array_files", {})
+    if (
+        "oracle_gate_target" in first_array_files
+        and "gate_confidence" in first_array_files
+    ):
+        residual_target_schema = "oracle-confidence-v1"
+        sample_array_files = {
+            **COMPACT_SAMPLE_ARRAY_FILES_V1,
+            **COMPACT_RESIDUAL_TARGET_ARRAY_FILES,
+        }
     else:
-        label_summary_path = label_dir / "summary.json"
-        if not label_summary_path.is_file():
-            raise FileNotFoundError(f"compact label summary not found: {label_summary_path}")
-        label_summary = json.loads(label_summary_path.read_text())
-        if label_summary.get("motion_label_mode", "nsa_rollout") != "nsa_rollout":
-            raise ValueError("only NSA rollout labels are supported")
-        index_root = output_dir / "compact_index"
-        index_root.mkdir()
-        first_manifest = json.loads(
-            (label_dir / sequences[0] / "manifest.json").read_text()
-        )
-        compact_label_schema_sha256 = str(
-            first_manifest.get("compact_label_schema_sha256", "")
-        )
-        first_array_files = first_manifest.get("array_files", {})
-        if (
-            "oracle_gate_target" in first_array_files
-            and "gate_confidence" in first_array_files
-        ):
-            residual_target_schema = "oracle-confidence-v1"
-            sample_array_files = {
-                **COMPACT_SAMPLE_ARRAY_FILES_V1,
-                **COMPACT_RESIDUAL_TARGET_ARRAY_FILES,
-            }
-        else:
-            sample_array_files = dict(COMPACT_SAMPLE_ARRAY_FILES_V1)
-        compact_index_array_files = {
-            **sample_array_files,
-            **COMPACT_TIMELINE_ARRAY_FILES,
-        }
-        compact_index_paths: list[Path] = []
-        segment_offset = 0
-        for sequence in sequences:
-            source_split = source_splits[sequence]
-            cache_dir = event_cache_root / dataset / source_split / sequence
-            detection_dir = detection_cache_root / dataset / source_split / sequence
-            if not detection_dir.is_dir():
-                raise FileNotFoundError(f"detection cache not found: {detection_dir}")
-            reader = CompactEventCacheReader(cache_dir, detection_dir)
-            try:
-                if not bool(reader.manifest.get("complete", False)):
-                    raise ValueError(f"event cache is incomplete: {cache_dir}")
-                reid_dims.add(int(reader.manifest["reid_dim"]))
-                counts, segment_offset, paths = _build_compact_sequence_index(
-                    sequence=sequence,
-                    reader=reader,
-                    compact_label_dir=label_dir / sequence,
-                    index_dir=index_root / sequence,
-                    max_frame_gap=max_frame_gap,
-                    segment_offset=segment_offset,
-                    context_size=context_size,
-                )
-            finally:
-                reader.close()
-            timeline_counts[sequence] = counts
-            compact_index_paths.extend(paths)
-            manifest_paths.append(cache_dir / "manifest.json")
-        index_format = COMPACT_INDEX_FORMAT
-        index_sha256 = _sha256_relative_file_set(compact_index_paths, output_dir)
-        label_paths = [
-            path
-            for sequence in sequences
-            for path in (label_dir / sequence).glob("*")
-            if path.is_file()
-        ]
-        label_paths.append(label_dir / "summary.json")
-        label_files_sha256 = _sha256_relative_file_set(label_paths, label_dir)
-        index_metadata = {
-            "train_index_dir": index_root.name,
-            "compact_index_array_files": compact_index_array_files,
-        }
-        num_train_samples = sum(
-            counts["labeled_endpoints"] for counts in timeline_counts.values()
-        )
+        sample_array_files = dict(COMPACT_SAMPLE_ARRAY_FILES_V1)
+    compact_index_array_files = {
+        **sample_array_files,
+        **COMPACT_TIMELINE_ARRAY_FILES,
+    }
+    compact_index_paths: list[Path] = []
+    segment_offset = 0
+    for sequence in sequences:
+        source_split = source_splits[sequence]
+        cache_dir = event_cache_root / dataset / source_split / sequence
+        detection_dir = detection_cache_root / dataset / source_split / sequence
+        if not detection_dir.is_dir():
+            raise FileNotFoundError(f"detection cache not found: {detection_dir}")
+        reader = CompactEventCacheReader(cache_dir, detection_dir)
+        try:
+            if not bool(reader.manifest.get("complete", False)):
+                raise ValueError(f"event cache is incomplete: {cache_dir}")
+            reid_dims.add(int(reader.manifest["reid_dim"]))
+            counts, segment_offset, paths = _build_compact_sequence_index(
+                sequence=sequence,
+                reader=reader,
+                compact_label_dir=label_dir / sequence,
+                index_dir=index_root / sequence,
+                max_frame_gap=max_frame_gap,
+                segment_offset=segment_offset,
+                context_size=context_size,
+            )
+        finally:
+            reader.close()
+        timeline_counts[sequence] = counts
+        compact_index_paths.extend(paths)
+        manifest_paths.append(cache_dir / "manifest.json")
+    index_format = COMPACT_INDEX_FORMAT
+    index_sha256 = _sha256_relative_file_set(compact_index_paths, output_dir)
+    label_paths = [
+        path
+        for sequence in sequences
+        for path in (label_dir / sequence).glob("*")
+        if path.is_file()
+    ]
+    label_paths.append(label_dir / "summary.json")
+    label_files_sha256 = _sha256_relative_file_set(label_paths, label_dir)
+    index_metadata = {
+        "train_index_dir": index_root.name,
+        "compact_index_array_files": compact_index_array_files,
+    }
+    num_train_samples = sum(
+        counts["labeled_endpoints"] for counts in timeline_counts.values()
+    )
     if len(reid_dims) != 1:
         raise ValueError(f"inconsistent ReID dimensions: {sorted(reid_dims)}")
     if any(counts["unmatched"] == 0 for counts in timeline_counts.values()):
@@ -1023,77 +971,61 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
         self.metadata = json.loads((self.dataset_dir / "metadata.json").read_text())
         self._validate_metadata()
         self.context_size = int(self.metadata["context_size"])
-        self.index_format = str(self.metadata.get("index_format", "jsonl_v1"))
-        self.samples: list[dict[str, Any]] = []
-        self.labels: dict[str, dict[str, Any]] = {}
+        self.index_format = str(self.metadata["index_format"])
         self._compact_indexes: dict[str, dict[str, np.ndarray]] = {}
         self._compact_boundaries: list[int] = []
         self._compact_index_array_files = dict(
-            self.metadata.get("compact_index_array_files", COMPACT_INDEX_ARRAY_FILES)
+            self.metadata["compact_index_array_files"]
         )
-        if self.index_format == "jsonl_v1":
-            with (self.dataset_dir / self.metadata["train_index_file"]).open() as handle:
-                self.samples = [json.loads(line) for line in handle if line.strip()]
-            if max_samples > 0:
-                self.samples = self.samples[: int(max_samples)]
-            self.labels = _load_labels(Path(self.metadata["label_dir"]))
-            self._length = len(self.samples)
-        elif self.index_format == COMPACT_INDEX_FORMAT:
-            total = 0
-            index_root = self.dataset_dir / self.metadata["train_index_dir"]
-            timeline_names = set(COMPACT_TIMELINE_ARRAY_FILES)
-            index_array_files = dict(self._compact_index_array_files)
-            sample_array_files = {
+        total = 0
+        index_root = self.dataset_dir / self.metadata["train_index_dir"]
+        timeline_names = set(COMPACT_TIMELINE_ARRAY_FILES)
+        index_array_files = dict(self._compact_index_array_files)
+        sample_array_files = {
+            name: filename
+            for name, filename in index_array_files.items()
+            if name not in timeline_names
+        }
+        index_array_files = {
+            **sample_array_files,
+            **{
                 name: filename
                 for name, filename in index_array_files.items()
-                if name not in timeline_names
+                if name in timeline_names
+            },
+        }
+        for sequence in self.metadata["train_sequences"]:
+            sequence_dir = index_root / sequence
+            arrays = {
+                name: np.load(
+                    sequence_dir / filename,
+                    mmap_mode="r",
+                    allow_pickle=False,
+                )
+                for name, filename in index_array_files.items()
             }
-            index_array_files = {
-                **sample_array_files,
-                **{
-                    name: filename
-                    for name, filename in index_array_files.items()
-                    if name in timeline_names
-                },
-            }
-            for sequence in self.metadata["train_sequences"]:
-                sequence_dir = index_root / sequence
-                arrays = {
-                    name: np.load(
-                        sequence_dir / filename,
-                        mmap_mode="r",
-                        allow_pickle=False,
-                    )
-                    for name, filename in index_array_files.items()
-                }
-                count = int(arrays["track_ids"].shape[0])
-                if any(
-                    arrays[name].shape[0] != count
-                    for name in sample_array_files
-                ):
-                    raise ValueError(f"compact index length mismatch in {sequence_dir}")
-                timeline_count = int(arrays["timeline_track_feats"].shape[0])
-                if any(
-                    arrays[name].shape[0] != timeline_count
-                    for name in COMPACT_TIMELINE_ARRAY_FILES
-                ):
-                    raise ValueError(f"compact timeline length mismatch in {sequence_dir}")
-                event_indices = arrays["event_indices"]
-                if event_indices.size and (
-                    int(event_indices.max()) >= timeline_count
-                    or int(event_indices.min()) < -1
-                ):
-                    raise ValueError(f"compact event index outside timeline in {sequence_dir}")
-                self._compact_indexes[sequence] = arrays
-                total += count
-                self._compact_boundaries.append(total)
-            self._length = min(total, int(max_samples)) if max_samples > 0 else total
-        else:
-            raise ValueError(f"unsupported IWG RG-CMA index format: {self.index_format}")
+            count = int(arrays["track_ids"].shape[0])
+            if any(arrays[name].shape[0] != count for name in sample_array_files):
+                raise ValueError(f"compact index length mismatch in {sequence_dir}")
+            timeline_count = int(arrays["timeline_track_feats"].shape[0])
+            if any(
+                arrays[name].shape[0] != timeline_count
+                for name in COMPACT_TIMELINE_ARRAY_FILES
+            ):
+                raise ValueError(f"compact timeline length mismatch in {sequence_dir}")
+            event_indices = arrays["event_indices"]
+            if event_indices.size and (
+                int(event_indices.max()) >= timeline_count
+                or int(event_indices.min()) < -1
+            ):
+                raise ValueError(f"compact event index outside timeline in {sequence_dir}")
+            self._compact_indexes[sequence] = arrays
+            total += count
+            self._compact_boundaries.append(total)
+        self._length = min(total, int(max_samples)) if max_samples > 0 else total
         self.norm_stats = NormalizationStats.load(
             str(self.dataset_dir / self.metadata["normalization_file"])
         )
-        self._readers: dict[str, CompactEventCacheReader] = {}
         self._detection_readers: dict[str, Any] = {}
 
     def _validate_metadata(self) -> None:
@@ -1120,6 +1052,7 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
             "split_policy": "train_all",
             "candidate_types": ["A"],
             "train_sequences": sequences,
+            "index_format": COMPACT_INDEX_FORMAT,
             "context_size": context_size,
             "dataset_schema_version": IWG_RG_CMA_DATASET_SCHEMA_VERSION,
             "label_schema_version": ROLLOUT_LABEL_SCHEMA_VERSION,
@@ -1142,33 +1075,22 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
         if mismatches:
             raise ValueError(f"IWG RG-CMA dataset metadata mismatch: {mismatches}")
         norm_path = self.dataset_dir / self.metadata["normalization_file"]
-        index_format = str(self.metadata.get("index_format", "jsonl_v1"))
-        if index_format == "jsonl_v1":
-            index_sha256 = _sha256_file(
-                self.dataset_dir / self.metadata["train_index_file"]
-            )
-            label_files_sha256 = _sha256_file_set(
-                Path(self.metadata["label_dir"]).glob("*_labels.json")
-            )
-        elif index_format == COMPACT_INDEX_FORMAT:
-            index_root = self.dataset_dir / self.metadata["train_index_dir"]
-            index_paths = [
-                path
-                for sequence in sequences
-                for path in (index_root / sequence).glob("*.npy")
-            ]
-            index_sha256 = _sha256_relative_file_set(index_paths, self.dataset_dir)
-            label_root = Path(self.metadata["label_dir"])
-            label_paths = [
-                path
-                for sequence in sequences
-                for path in (label_root / sequence).glob("*")
-                if path.is_file()
-            ]
-            label_paths.append(label_root / "summary.json")
-            label_files_sha256 = _sha256_relative_file_set(label_paths, label_root)
-        else:
-            raise ValueError(f"unsupported IWG RG-CMA index format: {index_format}")
+        index_root = self.dataset_dir / self.metadata["train_index_dir"]
+        index_paths = [
+            path
+            for sequence in sequences
+            for path in (index_root / sequence).glob("*.npy")
+        ]
+        index_sha256 = _sha256_relative_file_set(index_paths, self.dataset_dir)
+        label_root = Path(self.metadata["label_dir"])
+        label_paths = [
+            path
+            for sequence in sequences
+            for path in (label_root / sequence).glob("*")
+            if path.is_file()
+        ]
+        label_paths.append(label_root / "summary.json")
+        label_files_sha256 = _sha256_relative_file_set(label_paths, label_root)
         manifest_paths = [
             Path(self.metadata["event_cache_root"])
             / self.metadata["dataset"]
@@ -1198,27 +1120,6 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
         if self.metadata.get("dataset_sha256") != _canonical_sha256(source_contract):
             raise ValueError("IWG RG-CMA dataset content hash mismatch")
 
-    def _reader(self, sequence: str) -> CompactEventCacheReader:
-        if sequence not in self._readers:
-            source_split = self.metadata.get("sequence_source_splits", {}).get(
-                sequence, self.metadata["split"]
-            )
-            self._readers[sequence] = CompactEventCacheReader(
-                Path(self.metadata["event_cache_root"])
-                / self.metadata["dataset"]
-                / source_split
-                / sequence,
-                Path(self.metadata["detection_cache_root"])
-                / self.metadata["dataset"]
-                / source_split
-                / sequence,
-                # JSONL training shuffles across hundreds of event shards. A
-                # bounded LRU repeatedly deserializes the same shards every
-                # epoch, so keep them resident for this legacy index format.
-                max_cached_shards=None,
-            )
-        return self._readers[sequence]
-
     def _detection_reader(self, sequence: str):
         if sequence not in self._detection_readers:
             from agentguard.data.detection_cache import SequenceDetectionCache
@@ -1235,10 +1136,6 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
         return self._detection_readers[sequence]
 
     def close(self) -> None:
-        for reader in getattr(self, "_readers", {}).values():
-            reader.close()
-        if hasattr(self, "_readers"):
-            self._readers.clear()
         for reader in getattr(self, "_detection_readers", {}).values():
             reader.close()
         if hasattr(self, "_detection_readers"):
@@ -1253,10 +1150,6 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
 
     def release_cached_pages(self) -> dict[str, int]:
         """Release clean mmap pages between low-memory training phases."""
-        for reader in getattr(self, "_readers", {}).values():
-            reader.close()
-        if hasattr(self, "_readers"):
-            self._readers.clear()
         for reader in getattr(self, "_detection_readers", {}).values():
             reader.close()
         if hasattr(self, "_detection_readers"):
@@ -1311,109 +1204,60 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
             raise IndexError(index)
         oracle_gate = None
         gate_confidence = None
-        if self.index_format == "jsonl_v1":
-            sample = self.samples[index]
-            sequence = str(sample["sequence"])
-            pad_left = int(sample["pad_left"])
-            references = [
-                (int(item["event_shard_id"]), int(item["event_offset"]))
-                for item in sample["events"]
-            ]
-            label = self.labels[sample["label_key"]]
-            safe_gate = np.asarray(
-                [label["motion_safe_target"], label["appearance_safe_target"]],
-                dtype=np.float32,
+        sequence_position = bisect_right(self._compact_boundaries, index)
+        previous = (
+            self._compact_boundaries[sequence_position - 1]
+            if sequence_position > 0
+            else 0
+        )
+        local_index = index - previous
+        sequence = str(self.metadata["train_sequences"][sequence_position])
+        compact = self._compact_indexes[sequence]
+        timeline_row = compact["event_indices"][local_index]
+        shard_ids = compact["event_shard_ids"][local_index]
+        offsets = compact["event_offsets"][local_index]
+        valid_positions = timeline_row >= 0
+        pad_left = int((~valid_positions).sum())
+        timeline_indices = timeline_row[valid_positions]
+        references = [
+            (int(shard_id), int(offset))
+            for shard_id, offset in zip(
+                shard_ids[valid_positions], offsets[valid_positions]
             )
-            oracle_gate = np.asarray(
-                [label["motion_soft_target"], label["appearance_soft_target"]],
-                dtype=np.float32,
-            )
-            gate_confidence = np.asarray(
-                [
-                    label["motion_label_confidence"],
-                    label["appearance_label_confidence"],
-                ],
-                dtype=np.float32,
-            )
-            policy_target = np.asarray(
-                label["policy_safe_soft_target"], dtype=np.float32
-            )
-            cue_target = np.asarray(label["cue_target"], dtype=np.float32)
-            risk_target = np.asarray(label["risk_targets"], dtype=np.float32)
-            valid_motion = bool(label["valid_motion"])
-            valid_appearance = bool(label["valid_appearance"])
-            sample_weight = float(label["sample_weight"])
-            track_id = int(sample["track_id"])
-            segment_id = int(sample["segment_id"])
-            label_key = str(sample["label_key"])
-            timeline_indices = None
-        else:
-            sequence_position = bisect_right(self._compact_boundaries, index)
-            previous = (
-                self._compact_boundaries[sequence_position - 1]
-                if sequence_position > 0
-                else 0
-            )
-            local_index = index - previous
-            sequence = str(self.metadata["train_sequences"][sequence_position])
-            compact = self._compact_indexes[sequence]
-            timeline_row = compact["event_indices"][local_index]
-            shard_ids = compact["event_shard_ids"][local_index]
-            offsets = compact["event_offsets"][local_index]
-            valid_positions = timeline_row >= 0
-            pad_left = int((~valid_positions).sum())
-            timeline_indices = timeline_row[valid_positions]
-            references = [
-                (int(shard_id), int(offset))
-                for shard_id, offset in zip(
-                    shard_ids[valid_positions], offsets[valid_positions]
-                )
-            ]
-            safe_gate = np.array(
-                compact["safe_gate_target"][local_index], dtype=np.float32, copy=True
-            )
-            policy_target = np.array(
-                compact["policy_safe_soft_target"][local_index],
+        ]
+        safe_gate = np.array(
+            compact["safe_gate_target"][local_index], dtype=np.float32, copy=True
+        )
+        policy_target = np.array(
+            compact["policy_safe_soft_target"][local_index],
+            dtype=np.float32,
+            copy=True,
+        )
+        if "oracle_gate_target" in compact and "gate_confidence" in compact:
+            oracle_gate = np.array(
+                compact["oracle_gate_target"][local_index],
                 dtype=np.float32,
                 copy=True,
             )
-            if "oracle_gate_target" in compact:
-                oracle_gate = np.array(
-                    compact["oracle_gate_target"][local_index],
-                    dtype=np.float32,
-                    copy=True,
-                )
-                gate_confidence = np.array(
-                    compact["gate_confidence"][local_index],
-                    dtype=np.float32,
-                    copy=True,
-                )
-            cue_target = np.array(
-                compact["cue_target"][local_index], dtype=np.float32, copy=True
+            gate_confidence = np.array(
+                compact["gate_confidence"][local_index],
+                dtype=np.float32,
+                copy=True,
             )
-            risk_target = np.array(
-                compact["risk_target"][local_index], dtype=np.float32, copy=True
-            )
-            if oracle_gate is None and gate_confidence is None:
-                # Legacy v3 compact labels already contain both signals in
-                # encoded form: risk[0:2] = 1 - oracle gate and cue[0:2]
-                # = motion/appearance label confidence. Keep the old files
-                # immutable and materialize the fields only for this sample.
-                if risk_target.shape != (4,) or cue_target.shape != (3,):
-                    raise ValueError(
-                        "legacy compact labels cannot derive oracle-confidence "
-                        f"targets: risk={risk_target.shape}, cue={cue_target.shape}"
-                    )
-                oracle_gate = np.clip(1.0 - risk_target[:2], 0.0, 1.0)
-                gate_confidence = np.clip(cue_target[:2], 0.0, 1.0)
-            valid = compact["valid_channels"][local_index]
-            valid_motion = bool(valid[0])
-            valid_appearance = bool(valid[1])
-            sample_weight = float(compact["sample_weight"][local_index])
-            track_id = int(compact["track_ids"][local_index])
-            segment_id = int(compact["segment_ids"][local_index])
-            endpoint_shard, endpoint_offset = references[-1]
-            label_key = event_key(sequence, endpoint_shard, endpoint_offset)
+        cue_target = np.array(
+            compact["cue_target"][local_index], dtype=np.float32, copy=True
+        )
+        risk_target = np.array(
+            compact["risk_target"][local_index], dtype=np.float32, copy=True
+        )
+        valid = compact["valid_channels"][local_index]
+        valid_motion = bool(valid[0])
+        valid_appearance = bool(valid[1])
+        sample_weight = float(compact["sample_weight"][local_index])
+        track_id = int(compact["track_ids"][local_index])
+        segment_id = int(compact["segment_ids"][local_index])
+        endpoint_shard, endpoint_offset = references[-1]
+        label_key = event_key(sequence, endpoint_shard, endpoint_offset)
         reid_dim = int(self.metadata["reid_dim"])
         context_size = int(
             getattr(self, "context_size", self.metadata.get("context_size", 6))
@@ -1424,35 +1268,20 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
         padding = np.ones(context_size, dtype=np.bool_)
         has_detection = np.zeros(context_size, dtype=np.bool_)
         reset = np.zeros(context_size, dtype=np.bool_)
-        reader = (
-            self._reader(sequence)
-            if timeline_indices is None
-            else self._detection_reader(sequence)
-        )
+        reader = self._detection_reader(sequence)
         for history_position, (shard_id, offset) in enumerate(references):
             position = pad_left + history_position
-            if timeline_indices is None:
-                record = reader.get_event_record(shard_id, offset)
-                track_value = np.asarray(
-                    record.get("track_feature", []), dtype=np.float32
-                )
-                scalar_value = np.asarray(
-                    record.get("scalar_features", []), dtype=np.float64
-                )
-                matched = bool(record.get("matched", False))
-                detection_index = int(record.get("accepted_detection_index", -1))
-            else:
-                timeline_index = int(timeline_indices[history_position])
-                track_value = np.asarray(
-                    compact["timeline_track_feats"][timeline_index], dtype=np.float32
-                )
-                scalar_value = np.asarray(
-                    compact["timeline_scalar_feats"][timeline_index], dtype=np.float64
-                )
-                matched = bool(compact["timeline_has_detection"][timeline_index])
-                detection_index = int(
-                    compact["timeline_detection_indices"][timeline_index]
-                )
+            timeline_index = int(timeline_indices[history_position])
+            track_value = np.asarray(
+                compact["timeline_track_feats"][timeline_index], dtype=np.float32
+            )
+            scalar_value = np.asarray(
+                compact["timeline_scalar_feats"][timeline_index], dtype=np.float64
+            )
+            matched = bool(compact["timeline_has_detection"][timeline_index])
+            detection_index = int(
+                compact["timeline_detection_indices"][timeline_index]
+            )
             if track_value.shape != (reid_dim,) or scalar_value.shape != (63,):
                 raise ValueError("cached IWG RG-CMA feature has an invalid shape")
             if not np.isfinite(track_value).all() or not np.isfinite(scalar_value).all():

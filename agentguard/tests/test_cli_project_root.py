@@ -1,7 +1,6 @@
 """Test that PROJECT_ROOT is resolved via pathlib and asserts for key directories."""
 
 import sys
-from unittest.mock import patch
 
 import pytest
 
@@ -40,15 +39,9 @@ def test_mode_to_split_mapping():
         _resolve_split("nonexistent_mode")
 
 
-def test_cache_dir_uses_resolved_split():
-    from agentguard.cli import _cache_dir, PROJECT_ROOT
-    import os
-    path = _cache_dir("MOT17", "val")
+def test_event_cache_dir_uses_resolved_split():
+    from agentguard.cli import _event_cache_dir
+
+    path = _event_cache_dir("MOT17", "val")
     assert "val" in path
     assert "MOT17" in path
-
-
-def test_candidate_type_defaults_are_a_only():
-    from agentguard.cli import _label_mode_name
-
-    assert _label_mode_name("all") == "all_a_only"

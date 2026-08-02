@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
@@ -10,7 +9,6 @@ from typing import Any, Iterable
 import numpy as np
 
 from agentguard.data.cache_reader import CompactEventCacheReader
-from agentguard.data.label_schema import validate_rollout_label
 from agentguard.features.normalization import NormalizationStats
 
 
@@ -89,27 +87,6 @@ def segment_track_timelines(
         if current:
             segments.append(current)
     return segments
-
-
-def _load_labels(label_dir: Path) -> dict[str, dict[str, Any]]:
-    labels: dict[str, dict[str, Any]] = {}
-    for path in sorted(label_dir.glob("*_labels.json")):
-        sequence = path.name[: -len("_labels.json")]
-        records = json.loads(path.read_text())
-        for index, label in enumerate(records):
-            try:
-                validate_rollout_label(label)
-            except ValueError as exc:
-                raise ValueError(f"invalid rollout label {path}:{index}: {exc}") from exc
-            if str(label.get("candidate_type", "A")) != "A":
-                continue
-            key = event_key(sequence, label["event_shard_id"], label["event_offset"])
-            if key in labels:
-                raise ValueError(f"duplicate candidate-A rollout label key: {key}")
-            labels[key] = label
-    if not labels:
-        raise RuntimeError(f"No candidate-A rollout labels found in {label_dir}")
-    return labels
 
 
 def _fit_train_normalization(

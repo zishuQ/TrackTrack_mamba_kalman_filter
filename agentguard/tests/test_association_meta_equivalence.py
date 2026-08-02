@@ -10,9 +10,6 @@ import pytest
 
 sys.path.insert(0, "src")
 
-from agentguard.data.gt_matching import GTMatching
-
-
 # We create a simplified iterative_assignment for testing purposes,
 # since the actual iterative_assignment may be in TrackTrack's main codebase.
 # This tests the contract that the return_meta flag follows.
@@ -215,44 +212,3 @@ class TestIterativeAssignment:
         # Both pairs have cost 0.1 which is <= 0.3, so both assigned in round 0
         for _, _, _, rnd in matches:
             assert rnd == 0
-
-
-class TestGTMatching:
-    """Tests for the GTMatching utility class."""
-
-    def test_match_frame_basic(self):
-        dets = [(np.array([0, 0, 10, 10], dtype=np.float64), 0.9)]
-        gt_boxes = [np.array([0, 0, 10, 10], dtype=np.float64)]
-        gt_ids = [1]
-        result = GTMatching.match_frame(dets, gt_boxes, gt_ids)
-        assert result == [1]
-
-    def test_match_frame_no_overlap(self):
-        dets = [(np.array([0, 0, 10, 10], dtype=np.float64), 0.9)]
-        gt_boxes = [np.array([100, 100, 110, 110], dtype=np.float64)]
-        gt_ids = [1]
-        result = GTMatching.match_frame(dets, gt_boxes, gt_ids)
-        # IoU = 0, below 0.5 threshold -> unmatched
-        assert result == [-1]
-
-    def test_match_frame_no_detections(self):
-        result = GTMatching.match_frame([], [np.array([0, 0, 10, 10])], [1])
-        assert result == []
-
-    def test_match_frame_no_gt(self):
-        dets = [(np.array([0, 0, 10, 10], dtype=np.float64), 0.9)]
-        result = GTMatching.match_frame(dets, [], [])
-        assert result == [-1]
-
-    def test_match_frame_return_all(self):
-        dets = [(np.array([0, 0, 10, 10], dtype=np.float64), 0.9)]
-        gt_boxes = [np.array([0, 0, 10, 10], dtype=np.float64)]
-        gt_ids = [1]
-        matched_ids, iou_mat, cost_mat, assignment = GTMatching.match_frame_return_all(
-            dets, gt_boxes, gt_ids
-        )
-        assert matched_ids == [1]
-        assert iou_mat.shape == (1, 1)
-        assert iou_mat[0, 0] == pytest.approx(1.0)
-        assert cost_mat[0, 0] == pytest.approx(0.0)
-        assert assignment.shape == (2, 1)

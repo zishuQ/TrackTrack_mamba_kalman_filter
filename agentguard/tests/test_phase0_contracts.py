@@ -5,7 +5,6 @@ import inspect
 
 import numpy as np
 import pytest
-import torch
 
 from agentguard.data.cache_schema import (
     COMPACT_CACHE_SCHEMA_VERSION,
@@ -76,8 +75,6 @@ def test_association_context_rejects_invalid_shapes(overrides, match):
     [
         ("build_iwg_input", False),
         ("build_iwg_batch_input", True),
-        ("build_tgr_input", False),
-        ("build_tgr_batch_input", True),
     ],
 )
 def test_feature_builder_recomputes_missing_nonpadding_scalar(
@@ -102,21 +99,3 @@ def test_feature_builder_recomputes_missing_nonpadding_scalar(
         atol=1e-6,
     )
     assert event.scalar_features is not None
-
-
-def test_checkpoint_uses_current_feature_schema(tmp_path):
-    from agentguard.training.checkpointing import save_checkpoint
-
-    model = torch.nn.Linear(2, 1)
-    path = tmp_path / "checkpoint.pt"
-    save_checkpoint(
-        model,
-        optimizer=None,
-        scheduler=None,
-        epoch=0,
-        metadata={"reid_dim": 4, "scalar_dim": 63, "event_dim": 128},
-        path=str(path),
-    )
-    checkpoint = torch.load(path, weights_only=False)
-    assert checkpoint["feature_schema_sha256"] == FEATURE_SCHEMA_SHA256
-    assert checkpoint["cache_schema_version"] == COMPACT_CACHE_SCHEMA_VERSION
