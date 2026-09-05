@@ -398,7 +398,9 @@ class AgentGuardTrackerAdapter:
             seq = [None] * (seq_len - 1) + [event]
         else:
             hist = buffer.get_sequence()
-            seq = hist[-(seq_len - 1):] + [event]
+            history_len = seq_len - 1
+            history_tail = hist[-history_len:] if history_len else []
+            seq = history_tail + [event]
 
         result = self.runtime.run_iwg_rg_cma_inference(
             track_id,
@@ -456,7 +458,9 @@ class AgentGuardTrackerAdapter:
                 seq = [None] * (seq_len - 1) + [event]
             else:
                 hist = buffer.get_sequence()
-                seq = hist[-(seq_len - 1):] + [event]
+                history_len = seq_len - 1
+                history_tail = hist[-history_len:] if history_len else []
+                seq = history_tail + [event]
             sequences.append(seq)
 
         results = self.runtime.run_iwg_rg_cma_batch_inference(
@@ -551,7 +555,9 @@ class AgentGuardTrackerAdapter:
             event.scalar_features = fb.compute_scalar(event)
             history = event_buffer.get_sequence()
             seq_len = self.runtime.iwg_context_size
-            sequence = history[-(seq_len - 1) :] + [event]
+            history_len = seq_len - 1
+            history_tail = history[-history_len:] if history_len else []
+            sequence = history_tail + [event]
             result = self.runtime.run_iwg_rg_cma_inference(
                 track_id,
                 sequence,

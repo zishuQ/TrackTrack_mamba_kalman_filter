@@ -22,6 +22,7 @@ from agentguard.models.iwg_rg_cma import (
     ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
     ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED,
     ARCHITECTURE_SELECTIVE_CORRECTION,
+    ARCHITECTURE_WITHOUT_CMA,
     IWG_RG_CMA_LEGACY_MODEL_SCHEMA,
     IWG_RG_CMA_LEGACY_MODEL_SCHEMA_SHA256,
     IWG_RG_CMA_MODEL_SCHEMA,
@@ -38,6 +39,7 @@ from agentguard.training.train_iwg_rg_cma import (
     _optimizer_learning_rates,
     _phase_dataset,
     _resolved_optimizer_lrs,
+    _resolve_checkpoint_epochs,
     _run_training_attempt,
     _validate_formal_config,
     SequenceSqrtSampler,
@@ -156,6 +158,7 @@ def test_iwg_rg_cma_checkpoint_strict_roundtrip(tmp_path):
         ARCHITECTURE_DIRECT_BASE,
         ARCHITECTURE_CLEAN_CROSS_MODAL,
         ARCHITECTURE_SELECTIVE_CORRECTION,
+        ARCHITECTURE_WITHOUT_CMA,
     ],
 )
 def test_structural_ablation_checkpoint_roundtrip(tmp_path, architecture_variant):
@@ -258,6 +261,50 @@ def test_iwg_rg_cma_optimizer_groups_split_base_and_cma():
     )
 
 
+def test_without_cma_has_no_cma_modules_and_only_base_optimizer_group():
+    model = IWGRGCMA(
+        16,
+        correction_bound=RG_CMA_LEGACY_CORRECTION_BOUND,
+        architecture_variant=ARCHITECTURE_WITHOUT_CMA,
+    ).eval()
+    assert model.uses_cma is False
+    assert model.cross_modal_token_count == 0
+    assert not hasattr(model, "motion_projection")
+    assert not hasattr(model, "reliability_projection")
+    assert not hasattr(model, "motion_correction_head")
+    assert not hasattr(model, "appearance_correction_head")
+
+    track = torch.randn(2, 6, 16)
+    detection = torch.randn(2, 6, 16)
+    scalar = torch.randn(2, 6, 63)
+    has_detection = torch.tensor([[True] * 6, [True, True, True, True, True, False]])
+    with torch.inference_mode():
+        outputs = model(
+            track,
+            detection,
+            scalar,
+            torch.zeros(2, 6, dtype=torch.bool),
+            has_detection,
+            torch.zeros(2, 6, dtype=torch.bool),
+        )
+    assert torch.count_nonzero(outputs["gate_correction"]) == 0
+    assert torch.equal(outputs["final_gate"], outputs["base_gate"])
+    assert torch.equal(outputs["gate"], outputs["base_gate"])
+
+    optimizer = _build_iwg_rg_cma_optimizer(
+        model,
+        base_lr=1e-4,
+        cma_lr=1e-4,
+        weight_decay=1e-4,
+    )
+    assert [group["name"] for group in optimizer.param_groups] == ["base_iwg"]
+    assert {
+        id(parameter)
+        for group in optimizer.param_groups
+        for parameter in group["params"]
+    } == {id(parameter) for parameter in model.parameters()}
+
+
 def test_iwg_rg_cma_optimizer_group_diagnostics_and_lr_fallback():
     model = IWGRGCMA(16)
     optimizer = _build_iwg_rg_cma_optimizer(
@@ -285,6 +332,41 @@ def test_iwg_rg_cma_optimizer_group_diagnostics_and_lr_fallback():
 def test_extended_training_has_fixed_checkpoint_cadence():
     assert FORMAL_CHECKPOINT_EPOCHS[100] == {25, 50, 75, 100}
     assert FORMAL_CHECKPOINT_EPOCHS[200] == {50, 100, 150, 200}
+
+
+def test_checkpoint_cadence_can_be_overridden_without_changing_legacy_defaults():
+    random_init = {"mode": "random"}
+    assert _resolve_checkpoint_epochs(
+        {"epochs": 100, "checkpoint_every": 5}, random_init
+    ) == set(range(5, 101, 5))
+    assert _resolve_checkpoint_epochs({"epochs": 100}, random_init) == {
+        25,
+        50,
+        75,
+        100,
+    }
+    assert _resolve_checkpoint_epochs(
+        {"epochs": 12, "checkpoint_every": 5}, random_init
+    ) == {5, 10, 12}
+    with pytest.raises(ValueError, match="checkpoint_every must be non-negative"):
+        _resolve_checkpoint_epochs({"epochs": 100, "checkpoint_every": -5}, random_init)
+    with pytest.raises(ValueError, match="checkpoint_every must be non-negative"):
+        _validate_formal_config(
+            {
+                "seed": 42,
+                "epochs": 100,
+                "num_workers": 4,
+                "lr": 1e-4,
+                "weight_decay": 1e-4,
+                "warmup_epochs": 1,
+                "amp": False,
+                "batch_size": 1024,
+                "memory_shards": 1,
+                "epochs_per_shard": 100,
+                "shard_cycles": 1,
+                "checkpoint_every": -5,
+            }
+        )
 
 
 def test_iwg_rg_cma_warm_start_has_fixed_finetune_config():
@@ -586,6 +668,7 @@ def test_low_memory_training_switches_phases_without_resetting_progress(tmp_path
         "grad_clip": 1.0,
         "amp": False,
         "sequence_sampling": "sqrt-size",
+        "checkpoint_every": 1,
         "checkpoint_dir": str(tmp_path),
         "memory_shards": 2,
         "epochs_per_shard": 1,
@@ -599,6 +682,9 @@ def test_low_memory_training_switches_phases_without_resetting_progress(tmp_path
     assert [item["memory_shard"] for item in metrics] == [1, 2]
     assert [item["optimizer_steps"] for item in metrics] == [1, 2]
     assert summary["effective_full_epochs"] == pytest.approx(1.0)
+    assert summary["checkpoint_epochs"] == [1, 2]
+    assert (tmp_path / "iwg_rg_cma_epoch001.pt").is_file()
+    assert (tmp_path / "iwg_rg_cma_epoch002.pt").is_file()
     assert checkpoint["training_progress"]["global_step"] == 2
     assert checkpoint["training_schedule"]["memory_shards"] == 2
     assert dataset.release_calls == 3

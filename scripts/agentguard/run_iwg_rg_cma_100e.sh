@@ -83,9 +83,12 @@ fi
 TRAIN_COMMAND=(
   "${PY}" -m agentguard.cli train_iwg_rg_cma
   --dataset-dir "${DATASET_DIR}" --checkpoint-dir "${CHECKPOINT_DIR}"
+  --checkpoint-every 5
   --device cuda --epochs 100 --batch-size "${TRAIN_BATCH_SIZE}" --num-workers 4
   --lr 0.0001 --weight-decay 0.0001 --warmup-epochs 1
   --grad-clip 1.0 --seed 42
+  --memory-shards 1 --epochs-per-shard 100 --shard-cycles 1
+  --sequence-sampling sample-proportional
 )
 printf '%q ' "${TRAIN_COMMAND[@]}" > "${PROVENANCE_DIR}/train.command.txt"
 printf '\n' >> "${PROVENANCE_DIR}/train.command.txt"

@@ -133,6 +133,36 @@ def make_parser():
                        "--iwg-rg-cma-alpha", "--rg-cma-alpha",
                        dest="rg_cma_alpha", type=float, default=1.0,
                        help="Inference-only RG-CMA correction multiplier (alpha >= 0; 1.0 is the checkpoint final gate)")
+    parser.add_argument(
+                       "--agentguard-disable-kf-gate",
+                       action="store_true",
+                       help="Ablation: force the KF motion gate to 1.0 and keep the EMA gate learned")
+    parser.add_argument(
+                       "--agentguard-disable-ema-gate",
+                       action="store_true",
+                       help="Ablation: force the EMA appearance gate to 1.0 and keep the KF gate learned")
+    parser.add_argument(
+        "--agentguard-fallback-threshold",
+        type=float,
+        default=0.0,
+        help=(
+            "Inference-only conservative fallback: apply [1,1] when the "
+            "largest IWG policy probability is below this threshold. "
+            "0 disables the fallback."
+        ),
+    )
+    parser.add_argument(
+        "--agentguard-normalization-stats",
+        type=str,
+        default="",
+        help="Optional norm_stats.npz overriding checkpoint scalar normalization.",
+    )
+    parser.add_argument(
+        "--agentguard-stats-output",
+        type=str,
+        default="",
+        help="Optional JSONL output containing final AgentGuard statistics per sequence.",
+    )
     parser.add_argument("--agentguard-device", type=str, default="cpu",
                        help="Device for AgentGuard inference (cpu or cuda)")
     parser.add_argument(
@@ -218,6 +248,26 @@ def _agentguard_stats(tracker):
     if stats is None:
         return {}
     return {f"agentguard_{key}": value for key, value in stats.summary().items()}
+
+
+def _write_agentguard_sequence_stats(args, tracker, sequence, elapsed_sec):
+    output = getattr(args, 'agentguard_stats_output', '')
+    if not output:
+        return
+    path = Path(output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        'sequence': sequence,
+        'dataset': args.dataset,
+        'split': args.mode,
+        'checkpoint': getattr(args, 'agentguard_checkpoint', None),
+        'normalization_stats': getattr(args, 'agentguard_normalization_stats', ''),
+        'fallback_threshold': getattr(args, 'agentguard_fallback_threshold', 0.0),
+        'elapsed_sec': elapsed_sec,
+        **_agentguard_stats(tracker),
+    }
+    with path.open('a') as handle:
+        handle.write(json.dumps(record, sort_keys=True) + '\n')
 
 
 def _detection_cache_split(dataset, mode):
@@ -345,6 +395,9 @@ def track_mmap_sequences(data_path, result_folder, mode):
 
             result_filename = os.path.join(result_folder, '{}.txt'.format(vid_name))
             write_results(result_filename, results)
+            _write_agentguard_sequence_stats(
+                args, tracker, vid_name, time.time() - sequence_start
+            )
         finally:
             args.agentguard_target_detection_indices = None
             args.agentguard_source_detection_indices = None
@@ -409,6 +462,7 @@ def track(detections, detections_95, data_path, result_folder, mode):
         # Logging & Write results
         result_filename = os.path.join(result_folder, '{}.txt'.format(vid_name))
         write_results(result_filename, results)
+        _write_agentguard_sequence_stats(args, tracker, vid_name, 0.0)
 
     return total_time, total_count
 

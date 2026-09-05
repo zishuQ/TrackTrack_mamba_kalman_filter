@@ -68,6 +68,21 @@ class Tracker(object):
                 checkpoint_norm_stats.std = np.asarray(
                     checkpoint['normalization_std'], dtype=np.float64
                 )
+                normalization_override = getattr(
+                    args, 'agentguard_normalization_stats', ''
+                )
+                if normalization_override:
+                    checkpoint_norm_stats = NormalizationStats.load(
+                        normalization_override
+                    )
+                    if (
+                        checkpoint_norm_stats.mean.shape != (63,)
+                        or checkpoint_norm_stats.std.shape != (63,)
+                    ):
+                        raise ValueError(
+                            "AgentGuard normalization stats must contain "
+                            "63-dimensional mean and std arrays"
+                        )
                 runtime_config['rg_cma_max_gap'] = int(checkpoint['max_frame_gap'])
                 runtime_config['iwg_context_size'] = int(checkpoint['context_size'])
 

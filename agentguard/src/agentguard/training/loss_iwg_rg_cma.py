@@ -118,6 +118,124 @@ def _probability_gate_loss(
     return bce + 0.1 * mse, bce, mse
 
 
+def compute_iwg_without_cma_loss(
+    outputs: dict[str, torch.Tensor],
+    batch: dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Train the base IWG while removing every CMA objective.
+
+    The final gate is the base gate for this architecture. Auxiliary policy,
+    CUE, and risk heads retain their normal supervision; all correction
+    diagnostics are explicit zeros so downstream training reports keep one
+    stable schema without pretending that CMA was evaluated.
+    """
+    valid_channels = torch.stack(
+        [batch["valid_motion"], batch["valid_appearance"]], dim=-1
+    )
+    sample_weight = batch["sample_weight"].float()
+    gate_weights = valid_channels * sample_weight.unsqueeze(-1)
+    safe_target = batch["safe_gate_target"].float()
+
+    base_loss, base_bce, base_mse = _probability_gate_loss(
+        outputs["base_gate"], safe_target, gate_weights
+    )
+    both_valid = batch["valid_motion"] & batch["valid_appearance"]
+    policy_kl = F.kl_div(
+        outputs["policy_probs"].float().clamp(min=1e-8).log(),
+        batch["policy_safe_soft_target"].float().clamp(min=1e-8),
+        reduction="none",
+    ).sum(dim=-1)
+    policy_loss = _weighted_mean(policy_kl, both_valid * sample_weight)
+    policy_loss = policy_loss * outputs.get(
+        "policy_loss_weight", policy_loss.new_tensor(1.0)
+    )
+
+    cue_valid = torch.stack(
+        [
+            batch["valid_motion"],
+            batch["valid_appearance"],
+            batch["valid_motion"] | batch["valid_appearance"],
+        ],
+        dim=-1,
+    )
+    cue_loss = _weighted_mean(
+        F.binary_cross_entropy_with_logits(
+            outputs["cue_logits"], batch["cue_target"].float(), reduction="none"
+        ),
+        cue_valid * sample_weight.unsqueeze(-1),
+    )
+    risk_valid = torch.stack(
+        [
+            batch["valid_motion"],
+            batch["valid_appearance"],
+            batch["valid_motion"] & batch["valid_appearance"],
+            batch["valid_motion"] & batch["valid_appearance"],
+        ],
+        dim=-1,
+    )
+    risk_loss = _weighted_mean(
+        F.binary_cross_entropy_with_logits(
+            outputs["risk_logits"], batch["risk_target"].float(), reduction="none"
+        ),
+        risk_valid * sample_weight.unsqueeze(-1),
+    )
+
+    # This is deliberately one base-gate loss. Adding a second copy for the
+    # identical final gate would change the optimization protocol of the
+    # ablation rather than isolate the removed module.
+    total = base_loss + 0.1 * policy_loss + 0.2 * cue_loss + 0.1 * risk_loss
+    correction = torch.zeros_like(outputs["base_gate"])
+    correction_target = torch.zeros_like(correction)
+    correction_scale = torch.ones_like(correction)
+    valid_correction_mask = gate_weights > 0
+    correction_improvement = torch.zeros_like(correction)
+    zero = total * 0.0
+    return total, {
+        "loss": total,
+        "base_loss": base_loss,
+        "base_bce": base_bce,
+        "base_mse": base_mse,
+        "policy_loss": policy_loss,
+        "cue_loss": cue_loss,
+        "risk_loss": risk_loss,
+        "final_loss": base_loss,
+        "final_bce": base_bce,
+        "final_mse": base_mse,
+        "residual_loss": zero,
+        "revision_loss": zero,
+        "no_harm_loss": zero,
+        "correction_improvement_mean": zero,
+        "correction_help_rate": zero,
+        "correction_harm_rate": zero,
+        "correction_scale_mean": _weighted_mean(correction_scale, gate_weights),
+        "correction_target_confidence_mean": zero,
+        "correction_unlock_mean": zero,
+        "correction_unlock_rate": zero,
+        "correction_abstain_loss": zero,
+        "motion_correction_scale_mean": _weighted_mean(
+            correction_scale[:, 0], gate_weights[:, 0]
+        ),
+        "appearance_correction_scale_mean": _weighted_mean(
+            correction_scale[:, 1], gate_weights[:, 1]
+        ),
+        "correction_abs_mean": _weighted_mean(correction, gate_weights),
+        "correction_abs_p50": _masked_quantile(
+            correction, valid_correction_mask, 0.50
+        ),
+        "correction_abs_p95": _masked_quantile(
+            correction, valid_correction_mask, 0.95
+        ),
+        "correction_target_abs_mean": _weighted_mean(
+            correction_target, gate_weights
+        ),
+        "correction_nonzero_rate": zero,
+        "correction_active_rate": zero,
+        "correction_target_nonzero_rate": zero,
+        "correction_saturation_rate": zero,
+        "correction_sign_agreement": zero,
+    }
+
+
 def compute_iwg_rg_cma_loss(
     outputs: dict[str, torch.Tensor],
     batch: dict[str, torch.Tensor],
@@ -164,6 +282,9 @@ def compute_iwg_rg_cma_loss(
         reduction="none",
     ).sum(dim=-1)
     policy_loss = _weighted_mean(policy_kl, both_valid * sample_weight)
+    policy_loss = policy_loss * outputs.get(
+        "policy_loss_weight", policy_loss.new_tensor(1.0)
+    )
 
     cue_valid = torch.stack(
         [

@@ -250,6 +250,8 @@ def summarize_trackeval_results(res, trackers_to_eval):
             'IDF1': float(pedestrian['Identity']['IDF1']),
             'DetA': float(np.mean(pedestrian['HOTA']['DetA'])),
             'AssA': float(np.mean(pedestrian['HOTA']['AssA'])),
+            'IDSW': float(pedestrian['CLEAR'].get('IDSW', 0.0)),
+            'Frag': float(pedestrian['CLEAR'].get('Frag', 0.0)),
         }
 
     return {

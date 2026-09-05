@@ -21,6 +21,9 @@ class RuntimeStatistics:
         self.correction_abs_max = np.zeros(2, dtype=np.float64)
         self.correction_nonzero_count = np.zeros(2, dtype=np.int64)
         self.correction_saturation_count = np.zeros(2, dtype=np.int64)
+        self.policy_confidence_sum = 0.0
+        self.fallback_count = 0
+        self.fallback_matched_count = 0
 
     def record_event(self) -> None:
         self.total_events += 1
@@ -34,6 +37,8 @@ class RuntimeStatistics:
         *,
         matched: bool,
         correction_bound: float | None = None,
+        policy_confidence: float = 0.0,
+        fallback_applied: bool = False,
         inference_count: int = 1,
     ) -> None:
         """Record one current RG-CMA decision.
@@ -52,6 +57,9 @@ class RuntimeStatistics:
         raw_correction = np.asarray(correction, dtype=np.float64).reshape(2)
 
         self.rg_cma_inference_count += count
+        self.policy_confidence_sum += float(policy_confidence) * count
+        self.fallback_count += int(bool(fallback_applied)) * count
+        self.fallback_matched_count += int(bool(fallback_applied and matched)) * count
         if matched:
             self.matched_events += count
         else:
@@ -82,6 +90,12 @@ class RuntimeStatistics:
             "rg_cma_inference_count": self.rg_cma_inference_count,
             "matched_events": self.matched_events,
             "unmatched_events": self.unmatched_events,
+            "avg_policy_confidence": float(self.policy_confidence_sum / count),
+            "fallback_count": self.fallback_count,
+            "fallback_rate": float(self.fallback_count / count),
+            "fallback_rate_matched": float(
+                self.fallback_matched_count / max(self.matched_events, 1)
+            ),
             "avg_motion_gate": float(self.gate_sum[0] / count),
             "avg_appearance_gate": float(self.gate_sum[1] / count),
             "avg_rg_cma_base_motion_gate": float(self.base_gate_sum[0] / count),

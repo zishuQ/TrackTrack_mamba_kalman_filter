@@ -266,14 +266,17 @@ mkdir -p outputs/agentguard/experiments/iwg_rg_cma_mot17_new_seed42_bs1024_100e/
 ./.venv/bin/python -u -m agentguard.cli train_iwg_rg_cma \
   --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_compact \
   --checkpoint-dir outputs/agentguard/experiments/iwg_rg_cma_mot17_new_seed42_bs1024_100e/checkpoints \
+  --checkpoint-every 5 \
   --device cuda --epochs 100 --batch-size 1024 --num-workers 4 \
   --lr 0.0001 --weight-decay 0.0001 --warmup-epochs 1 \
   --grad-clip 1.0 --seed 42 \
   --memory-shards 1 --epochs-per-shard 100 --shard-cycles 1 \
+  --sequence-sampling sample-proportional \
   2>&1 | tee outputs/agentguard/experiments/iwg_rg_cma_mot17_new_seed42_bs1024_100e/logs/train.log
 ```
 
-这里 100 个名义 epoch 就是 100 个等效全量 epoch。
+这里 100 个 epoch 都是完整数据 epoch；`--checkpoint-every 5` 会保存
+`epoch005`、`epoch010` 一直到 `epoch100`。
 
 ### 7.2 MOT20 新分片方式训练 100e
 

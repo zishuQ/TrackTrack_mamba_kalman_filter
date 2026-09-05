@@ -281,7 +281,7 @@ SUPPORTED_IWG_RG_CMA_DATASET_SCHEMA_SHA256 = frozenset(
         SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
     }
 )
-SUPPORTED_IWG_CONTEXT_SIZES = frozenset({IWG_CONTEXT_SIZE, 8})
+SUPPORTED_IWG_CONTEXT_SIZES = frozenset({1, 2, 4, 6, 8, 10})
 
 
 def _validate_context_size(context_size: int) -> int:
@@ -324,11 +324,37 @@ IWG_RG_CMA_CONTEXT8_DATASET_SCHEMA_SHA256_BY_DATASET = {
 SPORTSMOT_TRAINVAL_CONTEXT8_IWG_RG_CMA_DATASET_SCHEMA_SHA256 = (
     _contextual_schema_sha256(SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_DESCRIPTOR, 8)
 )
+_IWG_RG_CMA_DATASET_DESCRIPTORS = {
+    "MOT17": IWG_RG_CMA_DATASET_DESCRIPTOR,
+    "MOT20": MOT20_IWG_RG_CMA_DATASET_DESCRIPTOR,
+    "DanceTrack": DANCETRACK_IWG_RG_CMA_DATASET_DESCRIPTOR,
+    "SportsMOT": SPORTSMOT_IWG_RG_CMA_DATASET_DESCRIPTOR,
+}
+IWG_RG_CMA_DATASET_SCHEMA_SHA256_BY_DATASET_CONTEXT = {
+    (dataset, context_size): (
+        IWG_RG_CMA_DATASET_SCHEMA_SHA256_BY_DATASET[dataset]
+        if context_size == IWG_CONTEXT_SIZE
+        else _contextual_schema_sha256(descriptor, context_size)
+    )
+    for dataset, descriptor in _IWG_RG_CMA_DATASET_DESCRIPTORS.items()
+    for context_size in SUPPORTED_IWG_CONTEXT_SIZES
+}
+SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_SCHEMA_SHA256_BY_CONTEXT = {
+    context_size: (
+        SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_SCHEMA_SHA256
+        if context_size == IWG_CONTEXT_SIZE
+        else _contextual_schema_sha256(
+            SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_DESCRIPTOR,
+            context_size,
+        )
+    )
+    for context_size in SUPPORTED_IWG_CONTEXT_SIZES
+}
 SUPPORTED_IWG_RG_CMA_DATASET_SCHEMA_SHA256 = frozenset(
     {
         *SUPPORTED_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
-        *IWG_RG_CMA_CONTEXT8_DATASET_SCHEMA_SHA256_BY_DATASET.values(),
-        SPORTSMOT_TRAINVAL_CONTEXT8_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+        *IWG_RG_CMA_DATASET_SCHEMA_SHA256_BY_DATASET_CONTEXT.values(),
+        *SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_SCHEMA_SHA256_BY_CONTEXT.values(),
     }
 )
 
@@ -392,11 +418,9 @@ def resolve_iwg_rg_cma_dataset_spec(
         }
         return (
             list(SPORTSMOT_TRAINVAL_SEQUENCES),
-            (
-                SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_SCHEMA_SHA256
-                if context_size == IWG_CONTEXT_SIZE
-                else SPORTSMOT_TRAINVAL_CONTEXT8_IWG_RG_CMA_DATASET_SCHEMA_SHA256
-            ),
+            SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_SCHEMA_SHA256_BY_CONTEXT[
+                context_size
+            ],
             source_splits,
         )
     expected_split = IWG_RG_CMA_TRAIN_SPLIT_BY_DATASET.get(dataset)
@@ -407,11 +431,9 @@ def resolve_iwg_rg_cma_dataset_spec(
         ]
         raise ValueError(f"IWG RG-CMA supports {', '.join(supported)}")
     sequences = list(IWG_RG_CMA_TRAIN_ALL_SEQUENCES[dataset])
-    dataset_schema_sha256 = IWG_RG_CMA_DATASET_SCHEMA_SHA256_BY_DATASET[dataset]
-    if context_size != IWG_CONTEXT_SIZE:
-        dataset_schema_sha256 = IWG_RG_CMA_CONTEXT8_DATASET_SCHEMA_SHA256_BY_DATASET[
-            dataset
-        ]
+    dataset_schema_sha256 = IWG_RG_CMA_DATASET_SCHEMA_SHA256_BY_DATASET_CONTEXT[
+        (dataset, context_size)
+    ]
     return (
         sequences,
         dataset_schema_sha256,

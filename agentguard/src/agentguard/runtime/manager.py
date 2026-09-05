@@ -16,7 +16,7 @@ class AgentGuardRuntime:
 
     ``off`` leaves TrackTrack untouched, ``capture`` only keeps the compact
     event sink active, and ``iwg-rg-cma`` runs the combined model on the most
-    recent six events for each track.  Track mutation remains in the adapter;
+    the configured number of events for each track.  Track mutation remains in the adapter;
     this class owns model inputs, per-track context, and runtime statistics.
     """
 
@@ -60,6 +60,16 @@ class AgentGuardRuntime:
         self.rg_cma_alpha = float(config.get("rg_cma_alpha", 1.0))
         if not math.isfinite(self.rg_cma_alpha) or self.rg_cma_alpha < 0.0:
             raise ValueError("rg_cma_alpha must be finite and non-negative")
+        self.disable_kf_gate = bool(config.get("disable_kf_gate", False))
+        self.disable_ema_gate = bool(config.get("disable_ema_gate", False))
+        if self.disable_kf_gate and self.disable_ema_gate:
+            raise ValueError(
+                "gate-channel ablation must disable at most one of "
+                "the KF and EMA gates"
+            )
+        self.fallback_threshold = float(config.get("fallback_threshold", 0.0))
+        if not 0.0 <= self.fallback_threshold <= 1.0:
+            raise ValueError("fallback_threshold must be in [0, 1]")
 
         self.iwg_context_size = int(config.get("iwg_context_size", 6))
         if self.iwg_context_size < 1:
@@ -91,7 +101,7 @@ class AgentGuardRuntime:
         self._feature_builder_initialised = True
 
     def is_mature_track(self, track) -> bool:
-        """Return whether a track has the current six-event context."""
+        """Return whether a track has the configured event context."""
         return (
             track.state in (1, 2)
             and len(track.history) >= self.iwg_context_size
@@ -122,7 +132,7 @@ class AgentGuardRuntime:
         frame_id: int,
         has_detection: bool,
     ) -> Dict[str, np.ndarray]:
-        """Run one six-event RG-CMA request through the batch path."""
+        """Run one RG-CMA request through the batch path."""
         return self.run_iwg_rg_cma_batch_inference(
             [track_id],
             [events_sequence],
@@ -157,7 +167,8 @@ class AgentGuardRuntime:
             raise RuntimeError("iwg-rg-cma feature builder is not initialized")
         if any(len(sequence) != self.iwg_context_size for sequence in event_sequences):
             raise ValueError(
-                "iwg-rg-cma online inference requires six-event context sequences"
+                "iwg-rg-cma online inference requires context sequences of length "
+                f"{self.iwg_context_size}"
             )
 
         sequences = list(event_sequences)
@@ -208,7 +219,23 @@ class AgentGuardRuntime:
             final = np.clip(base + correction, 0.0, 1.0)
         policy = outputs["policy_probs"].float().cpu().numpy()
         cue = outputs["cue"].float().cpu().numpy()
-        applied = base if self.rg_cma_output == "base" else final
+        applied = (
+            base.copy() if self.rg_cma_output == "base" else final.copy()
+        )
+        # Channel ablations affect only the gate consumed by TrackTrack. Keep
+        # model diagnostics (base/final/correction) unchanged for comparison.
+        if self.disable_kf_gate:
+            applied[:, 0] = 1.0
+        if self.disable_ema_gate:
+            applied[:, 1] = 1.0
+
+        policy_confidence = np.max(policy, axis=1)
+        fallback_mask = (
+            (self.fallback_threshold > 0.0)
+            & (policy_confidence < self.fallback_threshold)
+            & np.asarray(has_detection, dtype=bool)
+        )
+        applied[fallback_mask] = 1.0
 
         results: List[Dict[str, np.ndarray]] = []
         correction_bound = getattr(self.rg_cma_model, "correction_bound", None)
@@ -234,6 +261,8 @@ class AgentGuardRuntime:
                 result["gate_correction"],
                 matched=bool(has_detection[index]),
                 correction_bound=correction_bound,
+                policy_confidence=float(policy_confidence[index]),
+                fallback_applied=bool(fallback_mask[index]),
             )
             results.append(result)
         return results

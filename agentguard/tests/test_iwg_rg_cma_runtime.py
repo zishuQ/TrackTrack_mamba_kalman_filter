@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import copy
+import sys
+from types import SimpleNamespace
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "../3. Tracker"))
 
 import numpy as np
 import torch
@@ -35,6 +40,9 @@ def _runtime(
     model: IWGRGCMA,
     output: str = "final",
     alpha: float = 1.0,
+    *,
+    disable_kf_gate: bool = False,
+    disable_ema_gate: bool = False,
 ) -> AgentGuardRuntime:
     runtime = AgentGuardRuntime(
         {
@@ -42,6 +50,8 @@ def _runtime(
             "rg_cma_output": output,
             "rg_cma_alpha": alpha,
             "rg_cma_max_gap": 30,
+            "disable_kf_gate": disable_kf_gate,
+            "disable_ema_gate": disable_ema_gate,
         },
         device="cpu",
         rg_cma_model=model,
@@ -132,6 +142,33 @@ def test_runtime_alpha_scales_only_the_cma_correction():
     )
 
 
+def test_gate_channel_ablations_force_only_the_disabled_channel_to_full_write():
+    torch.manual_seed(32)
+    model = IWGRGCMA(16).eval()
+    with torch.no_grad():
+        for head in (model.motion_correction_head, model.appearance_correction_head):
+            torch.nn.init.normal_(head[-1].weight, std=0.05)
+            torch.nn.init.normal_(head[-1].bias, std=0.05)
+
+    event = _event(5, 10)
+    standard = _runtime(copy.deepcopy(model)).run_iwg_rg_cma_inference(
+        5, _sequence(event), frame_id=10, has_detection=True
+    )
+    without_ema = _runtime(
+        copy.deepcopy(model), disable_ema_gate=True
+    ).run_iwg_rg_cma_inference(5, _sequence(event), frame_id=10, has_detection=True)
+    without_kf = _runtime(
+        copy.deepcopy(model), disable_kf_gate=True
+    ).run_iwg_rg_cma_inference(5, _sequence(event), frame_id=10, has_detection=True)
+
+    np.testing.assert_allclose(without_ema["gate"][0], standard["gate"][0])
+    np.testing.assert_allclose(without_kf["gate"][1], standard["gate"][1])
+    np.testing.assert_equal(without_ema["gate"][1], 1.0)
+    np.testing.assert_equal(without_kf["gate"][0], 1.0)
+    np.testing.assert_allclose(without_ema["final_gate"], standard["final_gate"])
+    np.testing.assert_allclose(without_kf["final_gate"], standard["final_gate"])
+
+
 def test_offline_six_event_outputs_match_online_streaming_and_gap_reset():
     torch.set_num_threads(1)
     torch.manual_seed(31)
@@ -185,3 +222,33 @@ def test_offline_six_event_outputs_match_online_streaming_and_gap_reset():
         has_detection=True,
     )
     assert runtime.event_buffers[9].events == []
+
+
+def test_adapter_context_size_one_does_not_reuse_history_as_current_window():
+    from integrations.agentguard.adapter import AgentGuardTrackerAdapter
+
+    torch.manual_seed(33)
+    runtime = AgentGuardRuntime(
+        {
+            "mode": "iwg-rg-cma",
+            "iwg_context_size": 1,
+            "rg_cma_max_gap": 30,
+        },
+        rg_cma_model=IWGRGCMA(16, context_size=1).eval(),
+        device="cpu",
+    )
+    runtime.init_feature_builder(reid_dim=16)
+    adapter = AgentGuardTrackerAdapter(
+        SimpleNamespace(dataset="test", agentguard_mode="iwg-rg-cma"),
+        "seq",
+        agentguard_runtime=runtime,
+    )
+
+    first = _event(12, 1)
+    second = _event(12, 2)
+    adapter.get_iwg_decisions_batch([(12, first)])
+    runtime.get_or_create_event_buffer(12).push(first)
+
+    decisions = adapter.get_iwg_decisions_batch([(12, second)])
+
+    assert len(decisions) == 1

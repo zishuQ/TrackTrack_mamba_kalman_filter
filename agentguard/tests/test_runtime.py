@@ -76,14 +76,28 @@ def test_rg_cma_config_uses_current_keys():
             "rg_cma_output": "base",
             "rg_cma_alpha": 0.5,
             "rg_cma_max_gap": 12,
+            "fallback_threshold": 0.6,
         }
     )
     assert runtime.rg_cma_output == "base"
     assert runtime.rg_cma_alpha == 0.5
     assert runtime.rg_cma_max_gap == 12
+    assert runtime.fallback_threshold == 0.6
 
     with pytest.raises(ValueError, match="rg_cma_alpha"):
         AgentGuardRuntime({"mode": "capture", "rg_cma_alpha": -0.1})
+
+    with pytest.raises(ValueError, match="at most one"):
+        AgentGuardRuntime(
+            {
+                "mode": "capture",
+                "disable_kf_gate": True,
+                "disable_ema_gate": True,
+            }
+        )
+
+    with pytest.raises(ValueError, match="fallback_threshold"):
+        AgentGuardRuntime({"mode": "capture", "fallback_threshold": 1.1})
 
 
 def test_statistics_record_rg_cma_matched_and_unmatched():
@@ -96,6 +110,8 @@ def test_statistics_record_rg_cma_matched_and_unmatched():
         np.array([-0.05, 0.05]),
         matched=True,
         correction_bound=0.05,
+        policy_confidence=0.8,
+        fallback_applied=True,
     )
     stats.record_rg_cma(
         np.zeros(2),
@@ -104,6 +120,7 @@ def test_statistics_record_rg_cma_matched_and_unmatched():
         np.zeros(2),
         matched=False,
         correction_bound=0.05,
+        policy_confidence=0.2,
     )
 
     summary = stats.summary()
@@ -114,3 +131,7 @@ def test_statistics_record_rg_cma_matched_and_unmatched():
     assert np.isclose(summary["avg_rg_cma_base_motion_gate"], 0.2)
     assert np.isclose(summary["avg_rg_cma_correction_abs_appearance"], 0.025)
     assert summary["rg_cma_correction_saturation_rate_appearance"] == 0.5
+    assert np.isclose(summary["avg_policy_confidence"], 0.5)
+    assert summary["fallback_count"] == 1
+    assert summary["fallback_rate"] == 0.5
+    assert summary["fallback_rate_matched"] == 1.0
