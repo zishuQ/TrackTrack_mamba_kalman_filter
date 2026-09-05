@@ -2,19 +2,14 @@
 
 AgentGuard is the current IWG-RG-CMA guard for online multi-object tracking.
 The maintained path uses a six-event context, a Safe-Direct IWG gate, and a
-bounded RG-CMA correction. Historical experiments under
+bounded RG-CMA correction. MOT17 training uses the self-contained packed
+dataset under `outputs/agentguard/train_data/MOT17`; historical experiments under
 `outputs/agentguard/experiments/` are retained as reproducibility records.
 
 ## Pipeline
 
 ```text
-detection cache
-      |
-      v
-compact event cache
-      |
-      v
-rollout labels -> streaming IWG-RG-CMA dataset -> training checkpoint
+source caches + rollout labels -> packed train_data -> training checkpoint
                                                         |
                                                         v
                                               raw / post evaluation
@@ -37,6 +32,10 @@ bash scripts/agentguard/run_iwg_rg_cma_100e.sh
 bash scripts/agentguard/run_iwg_rg_cma_mot20_100e.sh
 bash scripts/agentguard/run_iwg_rg_cma_sportsmot_trainval_200e.sh
 ```
+
+The MOT17 script consumes the packed dataset directly and does not regenerate
+the old compact dataset or write SHA256 provenance files. MOT20 and SportsMOT
+still use the source-cache builder until their packed datasets are migrated.
 
 For an existing dataset, use the CLI directly:
 
@@ -113,6 +112,7 @@ bounded RG-CMA correction.
 | `outputs/agentguard/event_cache_v3_iwg_v2/` | Compact event cache |
 | `outputs/agentguard/labels/iwg_rg_cma/` | Current rollout labels |
 | `outputs/agentguard/datasets/iwg_rg_cma/` | Streaming training datasets |
+| `outputs/agentguard/train_data/` | Self-contained packed training datasets |
 | `outputs/agentguard/experiments/` | Checkpoints, logs, evaluation, and provenance |
 | `agentguard/configs/official_baselines.json` | Official baseline manifest |
 

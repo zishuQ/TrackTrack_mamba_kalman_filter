@@ -3,16 +3,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PY="${PYTHON_BIN:-${ROOT}/.venv/bin/python}"
-RUN_NAME="${RUN_NAME:-iwg_rg_cma_v1_trainall_seed42}"
+RUN_NAME="${RUN_NAME:-iwg_rg_cma_mot17_packed_seed42}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-1024}"
 RUN_ROOT="${ROOT}/outputs/agentguard/experiments/${RUN_NAME}"
-DATASET_DIR="${DATASET_DIR:-${ROOT}/outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_compact}"
+DATASET_DIR="${DATASET_DIR:-${ROOT}/outputs/agentguard/train_data/MOT17}"
 CHECKPOINT_DIR="${RUN_ROOT}/checkpoints"
 LOG_DIR="${RUN_ROOT}/logs"
 PROVENANCE_DIR="${RUN_ROOT}/provenance"
-EVENT_CACHE_ROOT="${ROOT}/outputs/agentguard/event_cache_v3_iwg_v2"
 DETECTION_CACHE_ROOT="${ROOT}/outputs/agentguard/detection_cache"
-LABEL_DIR="${ROOT}/outputs/agentguard/labels/iwg_rg_cma/MOT17/nsa_candidate_a_compact"
 TRACKER_ROOT="${ROOT}/outputs/3. track"
 CHECKPOINT="${CHECKPOINT_DIR}/iwg_rg_cma_last.pt"
 SEQUENCES=(
@@ -56,34 +54,20 @@ trap finish EXIT
 
 git -C "${ROOT}" rev-parse HEAD > "${PROVENANCE_DIR}/git_commit.txt"
 git -C "${ROOT}" status --porcelain > "${PROVENANCE_DIR}/git_status_porcelain.txt"
-sha256sum \
-  "${ROOT}/agentguard/src/agentguard/models/event_encoder.py" \
-  "${ROOT}/agentguard/src/agentguard/models/iwg.py" \
-  "${ROOT}/agentguard/src/agentguard/models/iwg_rg_cma.py" \
-  "${ROOT}/agentguard/src/agentguard/datasets/iwg_rg_cma_dataset.py" \
-  "${ROOT}/agentguard/src/agentguard/training/loss_iwg_rg_cma.py" \
-  "${ROOT}/agentguard/src/agentguard/training/train_iwg_rg_cma.py" \
-  > "${PROVENANCE_DIR}/training_sources.sha256"
 "${PY}" -c "import sys,torch; print(sys.version); print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available())" \
   > "${PROVENANCE_DIR}/environment.txt"
-find "${LABEL_DIR}" -type f -print0 | sort -z | xargs -0 sha256sum > "${PROVENANCE_DIR}/label_files.sha256"
 
 if [[ ! -f "${DATASET_DIR}/metadata.json" ]]; then
-  "${PY}" -m agentguard.cli build_iwg_rg_cma_data \
-    --dataset MOT17 --mode all \
-    --event-cache-root "${EVENT_CACHE_ROOT}" \
-    --detection-cache-root "${DETECTION_CACHE_ROOT}" \
-    --label-dir "${LABEL_DIR}" --output-dir "${DATASET_DIR}" \
-    --max-frame-gap 30 2>&1 | tee "${LOG_DIR}/build.log"
-else
-  "${PY}" -c "from agentguard.datasets.iwg_rg_cma_dataset import StreamingIWGRGCMADataset; d=StreamingIWGRGCMADataset('${DATASET_DIR}', max_samples=1); print(d.metadata['dataset_sha256']); d.close()" \
-    2>&1 | tee "${LOG_DIR}/build.log"
+  echo "Packed MOT17 dataset not found: ${DATASET_DIR}" >&2
+  echo "Build it before running this training script." >&2
+  exit 2
 fi
+"${PY}" -c "import json; x=json.load(open('${DATASET_DIR}/metadata.json')); assert x.get('format') == 'agentguard_train_data_v1', x.get('format'); print('packed dataset:', x['num_train_samples'], 'samples')" \
+  2>&1 | tee "${LOG_DIR}/dataset_check.log"
 
 TRAIN_COMMAND=(
   "${PY}" -m agentguard.cli train_iwg_rg_cma
   --dataset-dir "${DATASET_DIR}" --checkpoint-dir "${CHECKPOINT_DIR}"
-  --checkpoint-every 5
   --device cuda --epochs 100 --batch-size "${TRAIN_BATCH_SIZE}" --num-workers 4
   --lr 0.0001 --weight-decay 0.0001 --warmup-epochs 1
   --grad-clip 1.0 --seed 42
@@ -98,8 +82,6 @@ printf '\n' >> "${PROVENANCE_DIR}/train.command.txt"
   --checkpoint "${CHECKPOINT}" --dataset-dir "${DATASET_DIR}" \
   --device cuda --max-batches 8 --output "${RUN_ROOT}/checkpoint_validation.json" \
   2>&1 | tee "${LOG_DIR}/checkpoint_validation.log"
-sha256sum "${DATASET_DIR}/metadata.json" "${CHECKPOINT}" \
-  > "${PROVENANCE_DIR}/formal_artifacts.sha256"
 
 run_case() {
   local output="$1"

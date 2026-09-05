@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import gc
 import json
-import hashlib
 import math
 import os
 import random
@@ -18,24 +17,16 @@ import torch
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, Sampler, Subset
 
 from agentguard.contracts.enums import POLICY_PROTOTYPE_MATRIX
-from agentguard.data.cache_schema import COMPACT_CACHE_SCHEMA_VERSION, FEATURE_SCHEMA_SHA256
-from agentguard.data.label_schema import ROLLOUT_LABEL_SCHEMA_SHA256
 from agentguard.datasets.iwg_rg_cma_dataset import (
-    COMPACT_INDEX_FORMAT,
-    accepted_iwg_rg_cma_dataset_schema_sha256,
-    SUPPORTED_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+    PACKED_TRAIN_DATA_FORMAT,
     StreamingIWGRGCMADataset,
 )
 from agentguard.models.iwg_rg_cma import (
     ARCHITECTURE_LEGACY,
     IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA,
-    IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA_SHA256,
     IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA,
-    IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA_SHA256,
     IWG_RG_CMA_LEGACY_MODEL_SCHEMA,
-    IWG_RG_CMA_LEGACY_MODEL_SCHEMA_SHA256,
     IWG_RG_CMA_MODEL_SCHEMA,
-    IWG_RG_CMA_MODEL_SCHEMA_SHA256,
     IWGRGCMA,
     MODEL_CONTRACT_SPECS,
     RELIABILITY_MODE_FULL,
@@ -108,34 +99,6 @@ def _git_value(args: list[str], default: str) -> str:
         return subprocess.check_output(args, text=True).strip()
     except (OSError, subprocess.CalledProcessError):
         return default
-
-
-def _training_source_hashes() -> dict[str, str]:
-    package_root = Path(__file__).resolve().parents[1]
-    relative_paths = [
-        "data/cache_reader.py",
-        "data/compact_iwg_labels.py",
-        "models/event_encoder.py",
-        "models/iwg.py",
-        "models/iwg_rg_cma.py",
-        "datasets/iwg_rg_cma_dataset.py",
-        "data/rollout_label_builder.py",
-        "rollout_labels.py",
-        "training/loss_iwg_rg_cma.py",
-        "training/train_iwg_rg_cma.py",
-    ]
-    return {
-        relative: hashlib.sha256((package_root / relative).read_bytes()).hexdigest()
-        for relative in relative_paths
-    }
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _loader(
@@ -350,7 +313,7 @@ def build_memory_shard_schedule(
         for sequence in sequences
     }
     counts = dict(source_counts)
-    if shards == 1 and sum(counts.values()) != len(dataset):
+    if sum(counts.values()) != len(dataset):
         remaining = len(dataset)
         for sequence in sequences:
             counts[sequence] = min(counts[sequence], remaining)
@@ -359,11 +322,6 @@ def build_memory_shard_schedule(
             raise ValueError("truncated dataset exceeds metadata sample counts")
     if sum(counts.values()) != len(dataset):
         raise ValueError("memory shard counts do not cover the training dataset")
-    if shards > 1 and str(dataset.metadata.get("index_format")) != "compact_memmap_v1":
-        raise ValueError(
-            "low-memory sequence fractions require the compact memmap index"
-        )
-
     sequence_offsets: dict[str, int] = {}
     offset = 0
     for sequence in sequences:
@@ -519,23 +477,24 @@ def _validate_residual_target_dataset(
     dataset: StreamingIWGRGCMADataset,
     mode: str,
 ) -> None:
+    if dataset.metadata.get("format") != PACKED_TRAIN_DATA_FORMAT:
+        raise ValueError("training requires packed AgentGuard train_data")
     mode = str(mode).strip().lower()
-    if mode in {"oracle-confidence", "safe-selective"}:
-        required = {"oracle_gate_target", "gate_confidence"}
-        available = set(
-            dataset.metadata.get("compact_index_array_files", {})
+    if mode not in SUPPORTED_RESIDUAL_TARGET_MODES:
+        raise ValueError(
+            "unsupported residual_target_mode: "
+            f"{mode!r}; expected {sorted(SUPPORTED_RESIDUAL_TARGET_MODES)}"
         )
-        # v2 compact datasets store the fields explicitly. Existing v3
-        # compact datasets encode the same values in risk_target/cue_target;
-        # StreamingIWGRGCMADataset derives them per sample without rewriting
-        # the label or index files.
-        derived = {"risk_target", "cue_target"}
-        if dataset.index_format == COMPACT_INDEX_FORMAT and not (
-            required.issubset(available) or derived.issubset(available)
-        ):
+    if mode in {"oracle-confidence", "safe-selective"}:
+        missing = [
+            item["name"]
+            for item in getattr(dataset, "_packed_sequences", [])
+            if not {"oracle_gate_target", "gate_confidence"}.issubset(item["arrays"])
+        ]
+        if missing:
             raise ValueError(
-                "oracle-confidence dataset is missing explicit residual targets "
-                "and cannot derive them from risk_target/cue_target"
+                "oracle residual targets are missing from packed sequences: "
+                f"{missing}"
             )
 
 
@@ -705,18 +664,12 @@ def _checkpoint_payload(
         "reliability_mode": str(model.reliability_mode),
         "architecture_variant": str(model.architecture_variant),
         "policy_prototypes": np.asarray(POLICY_PROTOTYPE_MATRIX).tolist(),
-        "dataset_schema_sha256": str(metadata["dataset_schema_sha256"]),
-        "dataset_sha256": str(metadata["dataset_sha256"]),
-        "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
-        "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
-        "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
         "normalization_mean": np.asarray(norm_mean, dtype=np.float64),
         "normalization_std": np.asarray(norm_std, dtype=np.float64),
         "training_commit": _git_value(["git", "rev-parse", "HEAD"], "unknown"),
         "training_git_status": _git_value(
             ["git", "status", "--porcelain"], "unavailable"
         ),
-        "training_source_sha256": _training_source_hashes(),
         "training_seed": int(config["seed"]),
         "tracker_seed": 10000,
         "training_config": dict(config),
@@ -736,18 +689,20 @@ def _checkpoint_payload(
 
 def validate_iwg_rg_cma_checkpoint_contract(
     checkpoint: dict[str, Any],
-    *,
-    expected_dataset_sha256: str | None = None,
 ) -> None:
-    model_contract_key = (
-        str(checkpoint.get("model_schema", "")),
-        str(checkpoint.get("model_schema_sha256", "")),
+    model_schema = str(checkpoint.get("model_schema", ""))
+    expected_contract = next(
+        (
+            spec
+            for (schema, _schema_fingerprint), spec in MODEL_CONTRACT_SPECS.items()
+            if schema == model_schema
+        ),
+        None,
     )
-    expected_contract = MODEL_CONTRACT_SPECS.get(model_contract_key)
     if expected_contract is None:
         raise ValueError(
             "IWG RG-CMA checkpoint contract mismatch: unsupported model contract "
-            f"{model_contract_key!r}"
+            f"{model_schema!r}"
         )
     expected_bound = float(expected_contract["correction_bound"])
     expected_context_size = int(expected_contract["context_size"])
@@ -755,9 +710,6 @@ def validate_iwg_rg_cma_checkpoint_contract(
         expected_contract["architecture_variant"]
     )
     required = {
-        "label_schema_sha256": ROLLOUT_LABEL_SCHEMA_SHA256,
-        "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
-        "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
         "correction_bound": expected_bound,
         "context_size": expected_context_size,
     }
@@ -795,25 +747,8 @@ def validate_iwg_rg_cma_checkpoint_contract(
             "IWG RG-CMA checkpoint has unsupported reliability_mode: "
             f"{reliability_mode!r}"
         )
-    checkpoint_dataset = str(checkpoint.get("dataset", ""))
-    checkpoint_split = str(checkpoint.get("split", ""))
-    checkpoint_context_size = int(checkpoint.get("context_size", 0))
-    if checkpoint_dataset and checkpoint_split:
-        accepted_dataset_schema_sha256 = accepted_iwg_rg_cma_dataset_schema_sha256(
-            checkpoint_dataset,
-            checkpoint_split,
-            checkpoint_context_size,
-        )
-    else:
-        accepted_dataset_schema_sha256 = SUPPORTED_IWG_RG_CMA_DATASET_SCHEMA_SHA256
-    if checkpoint.get("dataset_schema_sha256") not in accepted_dataset_schema_sha256:
-        raise ValueError(
-            "IWG RG-CMA checkpoint contract mismatch: unsupported "
-            f"dataset_schema_sha256={checkpoint.get('dataset_schema_sha256')!r}"
-        )
     for key in (
         "model_state_dict",
-        "dataset_sha256",
         "normalization_mean",
         "normalization_std",
         "training_commit",
@@ -822,10 +757,6 @@ def validate_iwg_rg_cma_checkpoint_contract(
     ):
         if key not in checkpoint:
             raise ValueError(f"IWG RG-CMA checkpoint is missing {key}")
-    if expected_dataset_sha256 is not None and (
-        checkpoint["dataset_sha256"] != expected_dataset_sha256
-    ):
-        raise ValueError("checkpoint dataset hash does not match the requested dataset")
     if np.asarray(checkpoint["normalization_mean"]).shape != (63,):
         raise ValueError("checkpoint normalization_mean must have shape (63,)")
     if np.asarray(checkpoint["normalization_std"]).shape != (63,):
@@ -922,16 +853,15 @@ def initialize_iwg_rg_cma_model(
     if mismatches:
         raise ValueError(f"initial checkpoint dimension mismatch: {mismatches}")
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
-    return {
+    provenance = {
         "mode": "warm_start",
         "checkpoint": str(path),
-        "checkpoint_sha256": _sha256_file(path),
         "source_dataset": str(checkpoint.get("dataset", "unknown")),
-        "source_dataset_sha256": str(checkpoint["dataset_sha256"]),
         "source_epoch": int(checkpoint.get("epoch", -1)),
         "optimizer_restored": False,
         "scheduler_restored": False,
     }
+    return provenance
 
 
 def _run_training_attempt(
@@ -1033,6 +963,7 @@ def _run_training_attempt(
             + json.dumps(training_schedule, indent=2, sort_keys=True),
         )
         global_step = 0
+        last_metrics: dict[str, Any] = {}
         try:
             for epoch, (phase, phase_epoch) in enumerate(epoch_plan, start=1):
                 if int(phase["phase"]) != active_phase:
@@ -1320,6 +1251,7 @@ def _run_training_attempt(
                     metrics["motion_to_appearance_6x6_attention"] = (
                         motion_to_appearance_6x6_matrix / max(samples, 1)
                     ).tolist()
+                last_metrics = metrics
                 metrics_file.write(json.dumps(metrics, sort_keys=True) + "\n")
                 metrics_file.flush()
                 print(json.dumps(metrics, sort_keys=True), flush=True)
@@ -1406,6 +1338,7 @@ def _run_training_attempt(
         "checkpoint": str(checkpoint_dir / "iwg_rg_cma_last.pt"),
         "elapsed_s": time.time() - start_time,
         "validation": "disabled",
+        "metrics": last_metrics,
         "selected_epoch": int(config["epochs"]),
         "initialization": initialization,
     }
@@ -1526,13 +1459,9 @@ def validate_iwg_rg_cma_checkpoint(
     model, checkpoint = load_iwg_rg_cma_checkpoint(
         checkpoint_path, map_location=device
     )
-    validate_iwg_rg_cma_checkpoint_contract(
-        checkpoint, expected_dataset_sha256=dataset.metadata["dataset_sha256"]
-    )
+    validate_iwg_rg_cma_checkpoint_contract(checkpoint)
     if int(checkpoint["context_size"]) != int(dataset.metadata["context_size"]):
         raise ValueError("checkpoint context_size does not match dataset metadata")
-    if checkpoint["dataset_schema_sha256"] != dataset.metadata["dataset_schema_sha256"]:
-        raise ValueError("checkpoint dataset schema does not match the requested dataset")
     _validate_residual_target_dataset(
         dataset,
         str(
@@ -1581,7 +1510,7 @@ def validate_iwg_rg_cma_checkpoint(
                 )
         if count == 0:
             raise RuntimeError("checkpoint validation processed no samples")
-        return {
+        result = {
             "status": "valid",
             "checkpoint": str(Path(checkpoint_path).resolve()),
             "epoch": int(checkpoint["epoch"]),
@@ -1589,11 +1518,11 @@ def validate_iwg_rg_cma_checkpoint(
             "max_abs_correction": max_correction,
             "correction_bound": float(checkpoint["correction_bound"]),
             "metrics": {key: value / count for key, value in totals.items()},
-            "dataset_sha256": checkpoint["dataset_sha256"],
             "model_schema": checkpoint["model_schema"],
             "architecture_variant": checkpoint.get(
                 "architecture_variant", ARCHITECTURE_LEGACY
             ),
         }
+        return result
     finally:
         dataset.close()

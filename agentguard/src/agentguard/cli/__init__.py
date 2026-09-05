@@ -973,9 +973,19 @@ def _add_build_iwg_rg_cma_data_parser(
         help="Training source split; trainval is supported for SportsMOT only.",
     )
     parser.add_argument("--event-cache-root", required=True)
-    parser.add_argument("--detection-cache-root", required=True)
+    parser.add_argument(
+        "--detection-cache-root",
+        required=True,
+        help="Canonical detection/ReID cache used to build the separate ReID file.",
+    )
     parser.add_argument("--label-dir", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--sequences",
+        nargs="+",
+        default=None,
+        help="Optional sequence subset, e.g. MOT17-09-FRCNN for a low-disk smoke build.",
+    )
     parser.add_argument("--max-frame-gap", type=int, default=30)
     parser.add_argument(
         "--context-size",
@@ -996,6 +1006,7 @@ def _cmd_build_iwg_rg_cma_data(args: argparse.Namespace) -> None:
         detection_cache_root=args.detection_cache_root,
         label_dir=args.label_dir,
         output_dir=args.output_dir,
+        sequence_subset=args.sequences,
         max_frame_gap=args.max_frame_gap,
         context_size=args.context_size,
     )

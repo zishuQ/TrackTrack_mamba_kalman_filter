@@ -1198,7 +1198,7 @@ def model_contract(
     correction_bound = float(correction_bound)
     context_size = int(context_size)
     architecture_variant = str(architecture_variant).strip().lower()
-    for (schema, schema_sha256), spec in MODEL_CONTRACT_SPECS.items():
+    for (schema, _schema_fingerprint), spec in MODEL_CONTRACT_SPECS.items():
         if (
             int(spec["context_size"]) == context_size
             and str(spec["architecture_variant"]) == architecture_variant
@@ -1211,7 +1211,6 @@ def model_contract(
         ):
             return {
                 "model_schema": schema,
-                "model_schema_sha256": schema_sha256,
                 "model_schema_descriptor": spec["descriptor"],
             }
     if architecture_variant not in SUPPORTED_ARCHITECTURE_VARIANTS:

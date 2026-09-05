@@ -105,7 +105,7 @@ run.py test（CPU、final、post、无 TrackEval）
 
 | 训练数据 | dataset 目录 |
 | --- | --- |
-| MOT17 FRCNN train/all | `outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_compact` |
+| MOT17 FRCNN train/all | `outputs/agentguard/train_data/MOT17` |
 | MOT20 train/all，NSA 事件 | `outputs/agentguard/datasets/iwg_rg_cma/MOT20/nsa_all_v3_compact` |
 | SportsMOT train | `outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_train_v3_compact` |
 | SportsMOT train+val | `outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_trainval_v3_compact` |
@@ -254,9 +254,10 @@ mkdir -p outputs/agentguard/experiments/替换为新的实验名/checkpoints \
 
 每次只需要检查数据目录、实验名、总 epoch，以及三个分片参数。
 
-### 7.1 MOT17 从头训练 100e
+### 7.1 MOT17 packed data 从头训练 100e
 
-MOT17 数据量可直接使用完整 dataset，不需要低内存分片：
+MOT17 已经整理为自包含的 packed dataset，不需要重新生成 cache、标签或旧
+compact index：
 
 ```bash
 set -euo pipefail
@@ -264,9 +265,8 @@ mkdir -p outputs/agentguard/experiments/iwg_rg_cma_mot17_new_seed42_bs1024_100e/
          outputs/agentguard/experiments/iwg_rg_cma_mot17_new_seed42_bs1024_100e/logs
 
 ./.venv/bin/python -u -m agentguard.cli train_iwg_rg_cma \
-  --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_compact \
+  --dataset-dir outputs/agentguard/train_data/MOT17 \
   --checkpoint-dir outputs/agentguard/experiments/iwg_rg_cma_mot17_new_seed42_bs1024_100e/checkpoints \
-  --checkpoint-every 5 \
   --device cuda --epochs 100 --batch-size 1024 --num-workers 4 \
   --lr 0.0001 --weight-decay 0.0001 --warmup-epochs 1 \
   --grad-clip 1.0 --seed 42 \
@@ -275,8 +275,8 @@ mkdir -p outputs/agentguard/experiments/iwg_rg_cma_mot17_new_seed42_bs1024_100e/
   2>&1 | tee outputs/agentguard/experiments/iwg_rg_cma_mot17_new_seed42_bs1024_100e/logs/train.log
 ```
 
-这里 100 个 epoch 都是完整数据 epoch；`--checkpoint-every 5` 会保存
-`epoch005`、`epoch010` 一直到 `epoch100`。
+这里 100 个 epoch 都是完整数据 epoch；训练器按固定正式节点保存
+`epoch025`、`epoch050`、`epoch075` 和 `epoch100`。
 
 ### 7.2 MOT20 新分片方式训练 100e
 
@@ -347,7 +347,7 @@ mkdir -p outputs/agentguard/experiments/iwg_rg_cma_mot20e050_to_mot17_new_finetu
          outputs/agentguard/experiments/iwg_rg_cma_mot20e050_to_mot17_new_finetune25_seed42_bs1024/logs
 
 ./.venv/bin/python -u -m agentguard.cli train_iwg_rg_cma \
-  --dataset-dir outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_compact \
+  --dataset-dir outputs/agentguard/train_data/MOT17 \
   --checkpoint-dir outputs/agentguard/experiments/iwg_rg_cma_mot20e050_to_mot17_new_finetune25_seed42_bs1024/checkpoints \
   --device cuda --epochs 25 --batch-size 1024 --num-workers 4 \
   --lr 0.00001 --weight-decay 0.0001 --warmup-epochs 1 \

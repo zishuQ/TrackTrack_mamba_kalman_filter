@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 import torch
 
 from agentguard.data.cache_reader import CompactEventCacheReader
@@ -17,6 +18,7 @@ from agentguard.datasets.iwg_rg_cma_dataset import (
     IWG_RG_CMA_DATASET_SCHEMA_SHA256,
     LEGACY_DATASET_SCHEMA_SHA256_BY_DATASET_CONTEXT,
     MOT20_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
+    PACKED_TRAIN_DATA_FORMAT,
     SPORTSMOT_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
     SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
     SPORTSMOT_TRAINVAL_SEQUENCES,
@@ -106,50 +108,60 @@ def test_compact_reader_bounds_lru_shard_cache(tmp_path):
         reader.close()
 
 
-def test_compact_index_getitem_does_not_open_event_shard_reader():
-    class DetectionReaderStub:
-        def get_detection(self, index):
-            assert index == 7
-            return {"feature": np.asarray([0.25, 0.75], dtype=np.float32)}
-
-    class NormStatsStub:
-        @staticmethod
-        def transform(value):
-            return value
-
-    dataset = object.__new__(StreamingIWGRGCMADataset)
-    dataset.index_format = COMPACT_INDEX_FORMAT
-    dataset._length = 1
-    dataset._compact_boundaries = [1]
-    dataset.metadata = {"train_sequences": ["seq"], "reid_dim": 2}
-    dataset.norm_stats = NormStatsStub()
-    dataset._compact_indexes = {
-        "seq": {
-            "event_indices": np.asarray([[-1, -1, -1, -1, -1, 0]]),
-            "event_shard_ids": np.asarray([[-1, -1, -1, -1, -1, 0]]),
-            "event_offsets": np.asarray([[-1, -1, -1, -1, -1, 0]]),
-            "safe_gate_target": np.asarray([[1.0, 0.0]], dtype=np.float32),
-            "policy_safe_soft_target": np.asarray([[0.5, 0.5]], dtype=np.float32),
-            "cue_target": np.asarray([[0.0, 1.0]], dtype=np.float32),
-            "risk_target": np.asarray([[0.0, 0.0]], dtype=np.float32),
-            "oracle_gate_target": np.asarray([[0.25, 0.75]], dtype=np.float32),
-            "gate_confidence": np.asarray([[0.8, 0.9]], dtype=np.float32),
-            "valid_channels": np.asarray([[True, True]]),
-            "sample_weight": np.asarray([1.0], dtype=np.float32),
-            "track_ids": np.asarray([3]),
-            "segment_ids": np.asarray([4]),
-            "timeline_track_feats": np.asarray([[0.1, 0.2]], dtype=np.float32),
-            "timeline_scalar_feats": np.zeros((1, 63), dtype=np.float64),
-            "timeline_has_detection": np.asarray([True]),
-            "timeline_detection_indices": np.asarray([7]),
-        }
+def test_packed_dataset_loads_event_aligned_reid_features(tmp_path):
+    sequence = "MOT17-09-FRCNN"
+    sequence_dir = tmp_path / sequence
+    sequence_dir.mkdir()
+    arrays = {
+        "event_indices": torch.tensor([[-1, 0], [0, 1]], dtype=torch.int32),
+        "track_ids": torch.tensor([3, 3], dtype=torch.int64),
+        "segment_ids": torch.tensor([4, 4], dtype=torch.int64),
+        "safe_gate_target": torch.zeros((2, 2)),
+        "policy_safe_soft_target": torch.full((2, 5), 0.2),
+        "cue_target": torch.zeros((2, 3)),
+        "risk_target": torch.zeros((2, 3)),
+        "valid_channels": torch.ones((2, 2), dtype=torch.bool),
+        "sample_weight": torch.ones(2),
+        "timeline_scalar_feats": torch.zeros((2, 63)),
+        "timeline_has_detection": torch.tensor([True, False]),
     }
-    dataset._reader = lambda sequence: (_ for _ in ()).throw(
-        AssertionError("compact index must not open an event-shard reader")
+    torch.save({"metadata": {}, "arrays": arrays}, sequence_dir / "data.pt")
+    reid = np.asarray(
+        [
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            [[7.0, 8.0, 9.0], [0.0, 0.0, 0.0]],
+        ],
+        dtype=np.float32,
     )
-    dataset._detection_reader = lambda sequence: DetectionReaderStub()
+    np.save(sequence_dir / "reid_features.npy", reid, allow_pickle=False)
+    (tmp_path / "metadata.json").write_text(
+        json.dumps(
+            {
+                "format": PACKED_TRAIN_DATA_FORMAT,
+                "index_format": PACKED_TRAIN_DATA_FORMAT,
+                "context_size": 2,
+                "reid_dim": 3,
+                "scalar_dim": 63,
+                "event_dim": 128,
+                "train_sequences": [sequence],
+            }
+        )
+    )
 
-    sample = dataset[0]
+    dataset = StreamingIWGRGCMADataset(tmp_path)
+    try:
+        sample = dataset[1]
+        assert torch.equal(sample["track_feats"][-2], torch.tensor([1.0, 2.0, 3.0]))
+        assert torch.equal(sample["det_feats"][-2], torch.tensor([4.0, 5.0, 6.0]))
+        assert sample["has_detection_mask"][-2].item() is True
+        assert sample["valid_appearance"].item() is True
+    finally:
+        dataset.close()
 
-    assert sample["label_key"] == "seq|0|0"
-    assert torch.equal(sample["det_feats"][-1], torch.tensor([0.25, 0.75]))
+
+def test_legacy_compact_dataset_is_not_a_training_input(tmp_path):
+    (tmp_path / "metadata.json").write_text(
+        json.dumps({"format": COMPACT_INDEX_FORMAT})
+    )
+    with pytest.raises(ValueError, match="only packed AgentGuard train_data"):
+        StreamingIWGRGCMADataset(tmp_path)
