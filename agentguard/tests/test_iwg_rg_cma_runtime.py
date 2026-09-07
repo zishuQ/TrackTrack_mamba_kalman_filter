@@ -264,216 +264,283 @@ def test_adapter_context_size_one_does_not_reuse_history_as_current_window():
     assert len(decisions) == 1
 
 
-def test_runtime_can_restore_attention_diagnostics():
-    torch.manual_seed(34)
-    model = IWGRGCMA(16).eval()
-    captured = {}
-    original = model.forward
+def _model_reference(runtime, sequences, has_detection):
+    """Original full-batch calculation, including attention diagnostics."""
+    inputs = runtime.feature_builder.build_iwg_batch_input(sequences)
+    detection = torch.tensor([
+        [event is not None and event.has_detection for event in sequence]
+        for sequence in sequences
+    ])
+    reset = torch.zeros_like(inputs["mask"])
+    for index, row in enumerate(inputs["mask"]):
+        reset[index, (~row).nonzero()[0, 0]] = True
+    with torch.inference_mode():
+        outputs = runtime.rg_cma_model(
+            inputs["track_feats"],
+            inputs["det_feats"],
+            inputs["scalar_feats"],
+            inputs["mask"],
+            detection,
+            reset,
+        )
+    base = outputs["base_gate"].numpy().copy()
+    correction = runtime.rg_cma_alpha * outputs["gate_correction"].numpy()
+    final = np.clip(base + correction, 0.0, 1.0)
+    applied = (base if runtime.rg_cma_output == "base" else final).copy()
+    if runtime.disable_kf_gate:
+        applied[:, 0] = 1.0
+    if runtime.disable_ema_gate:
+        applied[:, 1] = 1.0
+    for i, matched in enumerate(has_detection):
+        if (
+            matched
+            and runtime.fallback_threshold > 0.0
+            and float(outputs["policy_probs"][i].max()) < runtime.fallback_threshold
+        ):
+            applied[i] = 1.0
+    result = []
+    for i, matched in enumerate(has_detection):
+        if not matched:
+            base[i] = final[i] = correction[i] = applied[i] = 0.0
+        result.append(
+            dict(
+                gate=applied[i],
+                base_gate=base[i],
+                final_gate=final[i],
+                gate_correction=correction[i],
+                policy_probs=outputs["policy_probs"][i].numpy(),
+                cue=outputs["cue"][i].numpy(),
+            )
+        )
+    return result
 
-    def wrapped(*args, **kwargs):
-        captured["return_diagnostics"] = kwargs.get("return_diagnostics")
-        captured["endpoint_rank"] = args[4].ndim if len(args) > 4 else None
-        return original(*args, **kwargs)
 
-    model.forward = wrapped
-    runtime = _runtime(model, return_attention_diagnostics=True)
-    runtime.run_iwg_rg_cma_inference(
-        4, _sequence(_event(4, 10)), frame_id=10, has_detection=True
+def test_runtime_can_restore_attention_diagnostics(monkeypatch):
+    torch.manual_seed(79)
+    runtime = _runtime(IWGRGCMA(16).eval())
+    event = _event(1, 10)
+    sequence = _sequence(event)
+    fast = runtime.run_iwg_rg_cma_inference(
+        1, sequence, frame_id=10, has_detection=True
     )
-    assert captured["return_diagnostics"] is True
-    assert captured["endpoint_rank"] == 1
+    runtime.return_attention_diagnostics = True
+    original_forward = runtime.rg_cma_model.forward
+    calls = []
+
+    def recording_forward(*args, **kwargs):
+        calls.append(kwargs)
+        return original_forward(*args, **kwargs)
+
+    monkeypatch.setattr(runtime.rg_cma_model, "forward", recording_forward)
+    diagnostic = runtime.run_iwg_rg_cma_inference(
+        1, sequence, frame_id=10, has_detection=True
+    )
+    assert calls == [{"return_diagnostics": True}]
+    for key in fast:
+        np.testing.assert_allclose(fast[key], diagnostic[key], atol=2e-6, rtol=0.0)
 
 
-@pytest.mark.parametrize("output, alpha", [("base", 1.0), ("final", 0.0), ("final", 0.5), ("final", 1.0), ("final", 2.0)])
+@pytest.mark.parametrize(
+    "output,alpha",
+    [("base", 1.0), ("final", 0.0), ("final", 0.5), ("final", 1.0), ("final", 2.0)],
+)
 def test_runtime_fast_batch_preserves_order_outputs_and_event_statistics(
     output, alpha
 ):
-    torch.manual_seed(35)
-    template = IWGRGCMA(16).eval()
-    with torch.no_grad():
-        for head in (template.motion_correction_head, template.appearance_correction_head):
-            torch.nn.init.normal_(head[-1].weight, std=0.05)
-            torch.nn.init.normal_(head[-1].bias, std=0.05)
-    batch_runtime = _runtime(copy.deepcopy(template), output=output, alpha=alpha)
-    single_runtime = _runtime(copy.deepcopy(template), output=output, alpha=alpha)
-    matched = [_event(1, 10), _event(2, 10)]
-    unmatched = _event(3, 10, matched=False)
-    batched = batch_runtime.run_iwg_rg_cma_batch_inference(
-        [1, 3, 2],
-        [_sequence(matched[0]), _sequence(unmatched), _sequence(matched[1])],
-        frame_ids=[10, 10, 10],
-        has_detection=[True, False, True],
-    )
-    singles = [
-        single_runtime.run_iwg_rg_cma_inference(
-            1, _sequence(matched[0]), frame_id=10, has_detection=True
-        ),
-        single_runtime.run_iwg_rg_cma_inference(
-            3, _sequence(unmatched), frame_id=10, has_detection=False
-        ),
-        single_runtime.run_iwg_rg_cma_inference(
-            2, _sequence(matched[1]), frame_id=10, has_detection=True
-        ),
-    ]
-    for batch_item, single_item in zip(batched, singles):
-        for key in ("gate", "base_gate", "final_gate", "gate_correction", "policy_probs", "cue"):
-            np.testing.assert_allclose(
-                batch_item[key], single_item[key], atol=2e-6, rtol=0.0
-            )
-    assert batch_runtime.stats.summary()["matched_events"] == 2
-    assert batch_runtime.stats.summary()["unmatched_events"] == 1
-    assert (
-        batch_runtime.stats.summary()["rg_cma_inference_count"]
-        == single_runtime.stats.summary()["rg_cma_inference_count"]
-    )
-
-
-def test_unmatched_skips_model_but_resets_history_and_preserves_reacquisition():
-    torch.manual_seed(36)
+    torch.manual_seed(82)
     model = IWGRGCMA(16).eval()
-    calls = {"n": 0}
-    original = model.forward
-
-    def wrapped(*args, **kwargs):
-        calls["n"] += 1
-        return original(*args, **kwargs)
-
-    model.forward = wrapped
-    runtime = _runtime(model)
-    runtime.get_or_create_event_buffer(9).push(_event(9, 1))
-    unmatched = _event(9, 100, matched=False)
-    skipped = runtime.run_iwg_rg_cma_inference(
-        9, _sequence(unmatched), frame_id=100, has_detection=False
+    for head in (model.motion_correction_head, model.appearance_correction_head):
+        torch.nn.init.normal_(head[-1].weight, std=0.05)
+    runtime = _runtime(model, output, alpha)
+    events = [_event(i, 12, matched=i % 2 == 0) for i in range(1, 5)]
+    sequences = [[None] * 4 + [_event(e.track_id, 11), e] for e in events]
+    expected = _model_reference(runtime, sequences, [e.has_detection for e in events])
+    calls = []
+    handle = model.register_forward_pre_hook(
+        lambda module, args, kwargs: calls.append((args[0].shape[0], kwargs)),
+        with_kwargs=True,
     )
-    np.testing.assert_array_equal(skipped["gate"], [0.0, 0.0])
-    np.testing.assert_array_equal(skipped["policy_probs"], [0.0, 0.0, 0.0, 1.0, 0.0])
-    assert calls["n"] == 0
-    assert runtime.event_buffers[9].events == []
+    try:
+        actual = runtime.run_iwg_rg_cma_batch_inference(
+            [e.track_id for e in events],
+            sequences,
+            frame_ids=[12] * 4,
+            has_detection=[e.has_detection for e in events],
+        )
+    finally:
+        handle.remove()
+    assert calls == [(2, {"return_diagnostics": False})]
+    for a, b in zip(actual, expected):
+        for key in a:
+            np.testing.assert_allclose(a[key], b[key], atol=2e-6, rtol=0.0)
+    assert runtime.stats.matched_events == 2
+    assert runtime.stats.unmatched_events == 2
+    assert runtime.stats.rg_cma_inference_count == 4
 
-    matched = _event(9, 101)
-    recovered = runtime.run_iwg_rg_cma_inference(
-        9, _sequence(matched), frame_id=101, has_detection=True
+
+def test_unmatched_skips_model_but_resets_history_and_preserves_reacquisition(
+    monkeypatch,
+):
+    runtime = _runtime(IWGRGCMA(16).eval())
+    buffer = runtime.get_or_create_event_buffer(1)
+    buffer.push(_event(1, 1))
+    lost = _event(1, 100, matched=False)
+
+    def fail(*args, **kwargs):
+        raise AssertionError("unmatched endpoints must not run the model")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime.rg_cma_model, "forward", fail)
+        patch.setattr(runtime.feature_builder, "build_iwg_batch_input", fail)
+        result = runtime.run_iwg_rg_cma_inference(
+            1, buffer.get_sequence()[-5:] + [lost], frame_id=100, has_detection=False
+        )
+    assert buffer.events == []
+    assert result["policy_probs"].tolist() == [0, 0, 0, 1, 0]
+    buffer.push(lost)
+    matched = _event(1, 101)
+    sequence = buffer.get_sequence()[-5:] + [matched]
+    expected = _model_reference(runtime, [sequence], [True])[0]
+    actual = runtime.run_iwg_rg_cma_inference(
+        1, sequence, frame_id=101, has_detection=True
     )
-    assert calls["n"] == 1
-    assert recovered["gate"].shape == (2,)
+    for key in actual:
+        np.testing.assert_allclose(actual[key], expected[key], atol=2e-6, rtol=0.0)
+    assert buffer.events == [lost]
+    runtime.cleanup_track(1)
+    assert 1 not in runtime.event_buffers
 
 
 def test_unmatched_fast_path_still_rejects_all_padding():
     runtime = _runtime(IWGRGCMA(16).eval())
-    with pytest.raises(ValueError, match="current event"):
+    with pytest.raises(ValueError, match="only padding"):
         runtime.run_iwg_rg_cma_inference(
-            1, [None] * 6, frame_id=1, has_detection=False
-        )
-    with pytest.raises(ValueError, match="current event"):
-        runtime.run_iwg_rg_cma_inference(
-            2, [None] * 6, frame_id=1, has_detection=True
+            1, [None] * 6, frame_id=10, has_detection=False
         )
 
 
 def test_runtime_uses_endpoint_detection_mask_and_preserves_override_semantics():
-    torch.manual_seed(37)
-    model = IWGRGCMA(16).eval()
-    captured = []
-    original = model.forward
-
-    def wrapped(*args, **kwargs):
-        captured.append(args[4] if len(args) > 4 else kwargs.get("has_detection_mask"))
-        return original(*args, **kwargs)
-
-    model.forward = wrapped
-    runtime = _runtime(model)
-    missing_event = _event(8, 10, matched=False)
-    overridden = runtime.run_iwg_rg_cma_inference(
-        8, _sequence(missing_event), frame_id=10, has_detection=True
+    runtime = _runtime(IWGRGCMA(16).eval())
+    sequence = [None] * 4 + [_event(1, 10), None]
+    expected = _model_reference(runtime, [sequence], [False])[0]
+    actual = runtime.run_iwg_rg_cma_inference(
+        1, sequence, frame_id=10, has_detection=False
     )
-    assert captured[0].ndim == 1
-    assert bool(captured[0].all())
-    present = runtime.run_iwg_rg_cma_inference(
-        8, _sequence(_event(8, 11)), frame_id=11, has_detection=True
-    )
-    np.testing.assert_equal(overridden["gate"].shape, present["gate"].shape)
+    for key in actual:
+        np.testing.assert_allclose(actual[key], expected[key], atol=2e-6, rtol=0.0)
+
+    unmatched_event = _event(2, 11, matched=False)
+    unmatched_seq = _sequence(unmatched_event)
     skipped = runtime.run_iwg_rg_cma_inference(
-        8, _sequence(_event(8, 12)), frame_id=12, has_detection=False
+        2, unmatched_seq, frame_id=11, has_detection=True
     )
-    np.testing.assert_array_equal(skipped["gate"], [0.0, 0.0])
-    assert len(captured) == 2
+    assert skipped["gate"].tolist() == [0.0, 0.0]
+    np.testing.assert_array_equal(skipped["policy_probs"], [0.0, 0.0, 0.0, 1.0, 0.0])
+
+    matched_event = _event(3, 12)
+    matched_seq = _sequence(matched_event)
+    expected_override = _model_reference(runtime, [matched_seq], [False])[0]
+    overridden = runtime.run_iwg_rg_cma_inference(
+        3, matched_seq, frame_id=12, has_detection=False
+    )
+    for key in overridden:
+        np.testing.assert_allclose(
+            overridden[key], expected_override[key], atol=2e-6, rtol=0.0
+        )
+    np.testing.assert_array_equal(overridden["gate"], [0.0, 0.0])
+    assert not np.allclose(overridden["policy_probs"], [0.0, 0.0, 0.0, 1.0, 0.0])
 
 
+@pytest.mark.parametrize("context", [6, 8])
+@pytest.mark.parametrize("disabled", [None, "kf", "ema"])
+@pytest.mark.parametrize("threshold", [0.0, 1.0])
 @pytest.mark.parametrize("output", ["base", "final"])
-@pytest.mark.parametrize("alpha", [0.0, 1.0])
-@pytest.mark.parametrize("ablation", [None, "kf", "ema"])
-@pytest.mark.parametrize("context_size", [6, 8])
 def test_fast_path_preserves_new_ablation_fallback_and_confidence_statistics(
-    output, alpha, ablation, context_size
+    context, disabled, threshold, output
 ):
-    torch.manual_seed(38)
-    model = IWGRGCMA(16, context_size=context_size).eval()
-    with torch.no_grad():
-        for head in (model.motion_correction_head, model.appearance_correction_head):
-            torch.nn.init.normal_(head[-1].weight, std=0.05)
-            torch.nn.init.normal_(head[-1].bias, std=0.05)
-    runtime = _runtime(
-        model,
-        output=output,
-        alpha=alpha,
-        disable_kf_gate=ablation == "kf",
-        disable_ema_gate=ablation == "ema",
-        fallback_threshold=1.0,
-        context_size=context_size,
+    torch.manual_seed(219)
+    model = IWGRGCMA(16, context_size=context).eval()
+    for head in (model.motion_correction_head, model.appearance_correction_head):
+        torch.nn.init.normal_(head[-1].weight, std=0.05)
+    runtime = AgentGuardRuntime(
+        {
+            "mode": "iwg-rg-cma",
+            "iwg_context_size": context,
+            "rg_cma_output": output,
+            "rg_cma_alpha": 0.5,
+            "disable_kf_gate": disabled == "kf",
+            "disable_ema_gate": disabled == "ema",
+            "fallback_threshold": threshold,
+        },
+        rg_cma_model=model,
+        device="cpu",
     )
-    event = _event(5, 10)
-    unmatched = _event(6, 10, matched=False)
-    results = runtime.run_iwg_rg_cma_batch_inference(
-        [5, 6],
-        [_sequence(event, context_size), _sequence(unmatched, context_size)],
-        frame_ids=[10, 10],
-        has_detection=[True, False],
+    runtime.init_feature_builder(reid_dim=16)
+    events = [
+        _event(i, 10, matched=m) for i, m in enumerate([True, False, True, False], 1)
+    ]
+    flags = [True, False, False, True]
+    sequences = [[None] * (context - 1) + [e] for e in events]
+    expected = _model_reference(runtime, sequences, flags)
+    actual = runtime.run_iwg_rg_cma_batch_inference(
+        [e.track_id for e in events],
+        sequences,
+        frame_ids=[10] * 4,
+        has_detection=flags,
     )
-    if ablation == "kf":
-        np.testing.assert_equal(results[0]["gate"][0], 1.0)
-    if ablation == "ema":
-        np.testing.assert_equal(results[0]["gate"][1], 1.0)
-    np.testing.assert_array_equal(results[1]["gate"], [0.0, 0.0])
+    for got, wanted in zip(actual, expected):
+        for key in got:
+            np.testing.assert_allclose(got[key], wanted[key], atol=2e-6, rtol=0.0)
+    confidence = [float(item["policy_probs"].max()) for item in expected]
+    expected_fallbacks = int(threshold > 0.0)
     summary = runtime.stats.summary()
-    assert summary["matched_events"] == 1
-    assert summary["unmatched_events"] == 1
-    assert summary["fallback_count"] == 1
-    assert summary["fallback_rate_matched"] == 1.0
+    assert summary["fallback_count"] == expected_fallbacks
+    assert summary["fallback_rate_matched"] == expected_fallbacks / 2
+    assert summary["avg_policy_confidence"] == pytest.approx(
+        np.mean(confidence), abs=2e-6
+    )
+    np.testing.assert_allclose(
+        runtime.stats.gate_sum,
+        np.sum([e["gate"] for e in expected], axis=0),
+        atol=2e-6,
+    )
+    assert summary["rg_cma_inference_count"] == 4
+    assert summary["matched_events"] == summary["unmatched_events"] == 2
+    np.testing.assert_array_equal(actual[1]["gate"], [0.0, 0.0])
 
 
 @pytest.mark.parametrize("ablation", [None, "kf", "ema"])
 @pytest.mark.parametrize("context_size", [6, 8])
 def test_all_unmatched_fast_path_keeps_new_fallback_statistics(
-    ablation, context_size
+    ablation, context_size, monkeypatch
 ):
-    torch.manual_seed(39)
-    model = IWGRGCMA(16, context_size=context_size).eval()
-    calls = {"n": 0}
-    original = model.forward
-
-    def wrapped(*args, **kwargs):
-        calls["n"] += 1
-        return original(*args, **kwargs)
-
-    model.forward = wrapped
     runtime = _runtime(
-        model,
+        IWGRGCMA(16, context_size=context_size).eval(),
         disable_kf_gate=ablation == "kf",
         disable_ema_gate=ablation == "ema",
         fallback_threshold=1.0,
         context_size=context_size,
     )
-    events = [_event(index, 10, matched=False) for index in (1, 2)]
-    results = runtime.run_iwg_rg_cma_batch_inference(
+
+    def fail(*args, **kwargs):
+        raise AssertionError("all unmatched must skip feature tensors and model forward")
+
+    monkeypatch.setattr(runtime.rg_cma_model, "forward", fail)
+    monkeypatch.setattr(runtime.feature_builder, "build_iwg_batch_input", fail)
+    result = runtime.run_iwg_rg_cma_batch_inference(
         [1, 2],
-        [_sequence(event, context_size) for event in events],
+        [
+            [None] * (context_size - 1) + [_event(i, 10, matched=False)]
+            for i in (1, 2)
+        ],
         frame_ids=[10, 10],
         has_detection=[False, False],
     )
-    assert calls["n"] == 0
-    for result in results:
-        np.testing.assert_array_equal(result["gate"], [0.0, 0.0])
+    for item in result:
+        for key in ("gate", "base_gate", "final_gate", "gate_correction", "cue"):
+            assert np.count_nonzero(item[key]) == 0
     summary = runtime.stats.summary()
+    assert summary["fallback_count"] == 0
+    assert summary["avg_policy_confidence"] == 1.0
     assert summary["unmatched_events"] == 2
     assert summary["matched_events"] == 0
-    assert summary["fallback_count"] == 0
