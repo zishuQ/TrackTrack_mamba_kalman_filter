@@ -438,6 +438,32 @@ def _gather_position(value: torch.Tensor, indices: torch.LongTensor) -> torch.Te
     return value[batch, indices]
 
 
+def _current_detection_mask(
+    padding_mask: torch.BoolTensor,
+    has_detection_mask: torch.BoolTensor | None,
+    indices: torch.LongTensor,
+) -> torch.BoolTensor:
+    """Resolve the current-event detection flag.
+
+    Online inference may pass a per-sample endpoint mask of shape ``(B,)``
+    instead of a full ``(B, T)`` sequence. Padding positions cannot be
+    marked as detections.
+    """
+    batch = torch.arange(padding_mask.shape[0], device=padding_mask.device)
+    valid_endpoint = ~padding_mask[batch, indices]
+    if has_detection_mask is None:
+        return valid_endpoint
+    mask = has_detection_mask.bool()
+    if mask.shape == padding_mask.shape:
+        return mask[batch, indices] & valid_endpoint
+    if mask.ndim == 1 and mask.shape == (padding_mask.shape[0],):
+        return mask & valid_endpoint
+    raise ValueError(
+        "has_detection_mask must match padding_mask or be a per-sample "
+        "endpoint mask"
+    )
+
+
 class SafeDirectIWG(IWG):
     """IWG with the verified linear gate heads and isolated auxiliary heads."""
 
@@ -605,13 +631,17 @@ class RecordingTransformerEncoderLayer(nn.Module):
             batch_first=True,
         )
 
-    def forward(self, value: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        value: torch.Tensor,
+        return_diagnostics: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         layer = self.layer
         attended, weights = layer.self_attn(
             value,
             value,
             value,
-            need_weights=True,
+            need_weights=return_diagnostics,
             average_attn_weights=False,
         )
         value = layer.norm1(value + layer.dropout1(attended))
@@ -857,6 +887,7 @@ class IWGRGCMA(nn.Module):
         scalar_current: torch.Tensor,
         base_outputs: dict[str, torch.Tensor],
         has_detection: torch.BoolTensor,
+        return_diagnostics: bool = True,
     ) -> dict[str, torch.Tensor]:
         # Base-IWG producers are detached. The clean motion encoder belongs to
         # RG-CMA and must retain gradients in the structural ablations.
@@ -888,7 +919,7 @@ class IWGRGCMA(nn.Module):
                     appearance_values,
                     appearance_values,
                     key_padding_mask=safe_mask,
-                    need_weights=True,
+                    need_weights=return_diagnostics,
                     average_attn_weights=False,
                 )
             )
@@ -898,7 +929,7 @@ class IWGRGCMA(nn.Module):
                     motion_values,
                     motion_values,
                     key_padding_mask=safe_mask,
-                    need_weights=True,
+                    need_weights=return_diagnostics,
                     average_attn_weights=False,
                 )
             )
@@ -916,7 +947,7 @@ class IWGRGCMA(nn.Module):
             motion_values,
             motion_values,
             key_padding_mask=safe_mask,
-            need_weights=True,
+            need_weights=return_diagnostics,
             average_attn_weights=False,
         )
         appearance_summary, appearance_weights = self.appearance_temporal_attention(
@@ -924,7 +955,7 @@ class IWGRGCMA(nn.Module):
             appearance_values,
             appearance_values,
             key_padding_mask=safe_mask,
-            need_weights=True,
+            need_weights=return_diagnostics,
             average_attn_weights=False,
         )
         if self.uses_bidirectional_history_cma:
@@ -934,7 +965,7 @@ class IWGRGCMA(nn.Module):
                     appearance_values,
                     appearance_values,
                     key_padding_mask=safe_mask,
-                    need_weights=True,
+                    need_weights=return_diagnostics,
                     average_attn_weights=False,
                 )
             )
@@ -944,7 +975,7 @@ class IWGRGCMA(nn.Module):
                     motion_values,
                     motion_values,
                     key_padding_mask=safe_mask,
-                    need_weights=True,
+                    need_weights=return_diagnostics,
                     average_attn_weights=False,
                 )
             )
@@ -977,7 +1008,9 @@ class IWGRGCMA(nn.Module):
                     [motion_summary, appearance_summary, reliability], dim=1
                 )
             cross_tokens = cross_tokens + self.cross_modality_embedding.unsqueeze(0)
-            attended, cross_weights = self.cross_modal_attention(cross_tokens)
+            attended, cross_weights = self.cross_modal_attention(
+                cross_tokens, return_diagnostics=return_diagnostics
+            )
             motion_head_input = attended[:, 0]
             appearance_head_input = attended[:, 1]
         if self.uses_base_conditioned_correction:
@@ -1014,29 +1047,32 @@ class IWGRGCMA(nn.Module):
             "temporal_gate_correction": correction,
             "refined_gate": refined,
             "final_gate": refined,
-            "motion_attention_weights": motion_weights.squeeze(2),
-            "appearance_attention_weights": appearance_weights.squeeze(2),
-            "motion_attention_entropy": self._attention_entropy(motion_weights),
-            "appearance_attention_entropy": self._attention_entropy(
-                appearance_weights
-            ),
         }
-        if appearance_to_motion_weights is not None:
-            result["appearance_to_motion_attention_weights"] = (
-                appearance_to_motion_weights.squeeze(2)
+        if return_diagnostics:
+            result["motion_attention_weights"] = motion_weights.squeeze(2)
+            result["appearance_attention_weights"] = appearance_weights.squeeze(2)
+            result["motion_attention_entropy"] = self._attention_entropy(
+                motion_weights
             )
-            result["motion_to_appearance_attention_weights"] = (
-                motion_to_appearance_weights.squeeze(2)
+            result["appearance_attention_entropy"] = self._attention_entropy(
+                appearance_weights
             )
-        if appearance_to_motion_6x6_weights is not None:
-            result["appearance_to_motion_6x6_attention_weights"] = (
-                appearance_to_motion_6x6_weights
-            )
-            result["motion_to_appearance_6x6_attention_weights"] = (
-                motion_to_appearance_6x6_weights
-            )
-        if cross_weights is not None:
-            result["cross_modal_attention_weights"] = cross_weights
+            if appearance_to_motion_weights is not None:
+                result["appearance_to_motion_attention_weights"] = (
+                    appearance_to_motion_weights.squeeze(2)
+                )
+                result["motion_to_appearance_attention_weights"] = (
+                    motion_to_appearance_weights.squeeze(2)
+                )
+            if appearance_to_motion_6x6_weights is not None:
+                result["appearance_to_motion_6x6_attention_weights"] = (
+                    appearance_to_motion_6x6_weights
+                )
+                result["motion_to_appearance_6x6_attention_weights"] = (
+                    motion_to_appearance_6x6_weights
+                )
+            if cross_weights is not None:
+                result["cross_modal_attention_weights"] = cross_weights
         return result
 
     def _build_reliability_input(
@@ -1092,6 +1128,7 @@ class IWGRGCMA(nn.Module):
         padding_mask: torch.BoolTensor | None = None,
         has_detection_mask: torch.BoolTensor | None = None,
         reset_mask: torch.BoolTensor | None = None,
+        return_diagnostics: bool = True,
     ) -> dict[str, torch.Tensor]:
         base = self.iwg(
             track_feats, det_feats, scalar_feats, padding_mask, reset_mask
@@ -1102,13 +1139,9 @@ class IWGRGCMA(nn.Module):
         if self.uses_clean_modalities:
             motion_history = self._encode_clean_motion(scalar_feats)
         indices = _last_valid_indices(history_padding)
-        if has_detection_mask is None:
-            detection_sequence = ~history_padding
-        else:
-            if has_detection_mask.shape != history_padding.shape:
-                raise ValueError("has_detection_mask must match padding_mask")
-            detection_sequence = has_detection_mask.bool() & ~history_padding
-        has_current = _gather_position(detection_sequence, indices)
+        has_current = _current_detection_mask(
+            history_padding, has_detection_mask, indices
+        )
         base = self._apply_unmatched_sentinel(base, has_current)
         if self.uses_clean_modalities:
             base["motion_token"] = _gather_position(motion_history, indices)
@@ -1127,6 +1160,7 @@ class IWGRGCMA(nn.Module):
             scalar_current=_gather_position(scalar_feats, indices),
             base_outputs=base,
             has_detection=has_current,
+            return_diagnostics=return_diagnostics,
         )
         base.update(refine)
         base["gate"] = refine["refined_gate"]
@@ -1140,6 +1174,7 @@ class IWGRGCMA(nn.Module):
         padding_mask: torch.BoolTensor | None = None,
         has_detection_mask: torch.BoolTensor | None = None,
         reset_mask: torch.BoolTensor | None = None,
+        return_diagnostics: bool = True,
     ) -> dict[str, torch.Tensor]:
         base = self.iwg.forward_sequence(
             track_feats, det_feats, scalar_feats, padding_mask, reset_mask
@@ -1180,6 +1215,7 @@ class IWGRGCMA(nn.Module):
             scalar_current=scalar_feats.reshape(batch_size * seq_len, -1),
             base_outputs=flat_base,
             has_detection=detection.reshape(-1),
+            return_diagnostics=return_diagnostics,
         )
         outputs = dict(base)
         for key, value in refine.items():

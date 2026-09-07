@@ -15,6 +15,7 @@ import torch
 from agentguard.data.cache_reader import CompactEventCacheReader
 from agentguard.data.cache_schema import COMPACT_CACHE_SCHEMA_VERSION, FEATURE_SCHEMA_SHA256
 from agentguard.data.compact_iwg_labels import load_compact_label_arrays
+from agentguard.data.detection_cache import SequenceDetectionCache
 from agentguard.data.label_schema import ROLLOUT_LABEL_SCHEMA_SHA256
 from agentguard.datasets.timeline_utils import IWG_CONTEXT_SIZE, _fit_train_normalization
 from agentguard.features.normalization import NormalizationStats
@@ -960,6 +961,162 @@ def build_iwg_rg_cma_dataset(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n"
     )
     return metadata
+
+
+def migrate_compact_iwg_rg_cma_sequence(
+    *,
+    source_dataset_dir: str | Path,
+    output_dir: str | Path,
+    detection_cache_dir: str | Path,
+    sequence: str,
+    normalization_file: str | Path | None = None,
+) -> dict[str, Any]:
+    """Convert one legacy compact sequence into the packed train_data layout."""
+    source_root = Path(source_dataset_dir).resolve()
+    source_metadata = json.loads((source_root / "metadata.json").read_text())
+    sequence = str(sequence)
+    if sequence not in source_metadata.get("train_sequences", []):
+        raise ValueError(f"sequence is absent from legacy dataset metadata: {sequence}")
+    source_dir = source_root / str(source_metadata.get("train_index_dir", "compact_index")) / sequence
+    target_root = Path(output_dir).resolve()
+    target_dir = target_root / sequence
+    if target_dir.exists():
+        raise FileExistsError(f"refusing to overwrite packed sequence: {target_dir}")
+    target_root.mkdir(parents=True, exist_ok=True)
+
+    array_files = {
+        **COMPACT_SAMPLE_ARRAY_FILES_V1,
+        **COMPACT_TIMELINE_ARRAY_FILES,
+    }
+    arrays = {
+        name: np.load(source_dir / filename, mmap_mode="r", allow_pickle=False)
+        for name, filename in array_files.items()
+    }
+    count = int(arrays["track_ids"].shape[0])
+    timeline_count = int(arrays["timeline_scalar_feats"].shape[0])
+    for name in COMPACT_SAMPLE_ARRAY_FILES_V1:
+        if int(arrays[name].shape[0]) != count:
+            raise ValueError(f"legacy sample length mismatch for {name}: {source_dir}")
+    for name in COMPACT_TIMELINE_ARRAY_FILES:
+        if int(arrays[name].shape[0]) != timeline_count:
+            raise ValueError(f"legacy timeline length mismatch for {name}: {source_dir}")
+    context_size = int(source_metadata.get("context_size", IWG_CONTEXT_SIZE))
+    if arrays["event_indices"].shape[1] != context_size:
+        raise ValueError(f"legacy context mismatch: {source_dir}")
+    reid_dim = int(source_metadata["reid_dim"])
+    norm_path = Path(normalization_file).resolve() if normalization_file else source_root / "norm_stats.npz"
+    norm_stats = NormalizationStats.load(norm_path)
+    normalized_scalar = norm_stats.transform(
+        np.asarray(arrays["timeline_scalar_feats"], dtype=np.float64)
+    ).astype(np.float32)
+
+    target_dir.mkdir(parents=True, exist_ok=False)
+    reid_path = target_dir / "reid_features.npy"
+    reid_features = np.lib.format.open_memmap(
+        reid_path, mode="w+", dtype=np.float32, shape=(timeline_count, 2, reid_dim)
+    )
+    detection_cache = SequenceDetectionCache(Path(detection_cache_dir).resolve())
+    try:
+        detection_indices = np.asarray(arrays["timeline_detection_indices"], dtype=np.int64)
+        matched = np.asarray(arrays["timeline_has_detection"], dtype=bool)
+        for start in range(0, timeline_count, 65536):
+            end = min(start + 65536, timeline_count)
+            reid_features[start:end, 0, :] = np.asarray(
+                arrays["timeline_track_feats"][start:end], dtype=np.float32
+            )
+            valid = matched[start:end] & (detection_indices[start:end] >= 0)
+            if valid.any():
+                indices = detection_indices[start:end][valid]
+                if int(indices.max()) >= detection_cache.num_detections:
+                    raise ValueError(f"legacy detection index outside cache: {source_dir}")
+                detection_block = reid_features[start:end, 1, :]
+                detection_block[valid] = np.asarray(
+                    detection_cache.features[indices], dtype=np.float32
+                )
+        reid_features.flush()
+    finally:
+        detection_cache.close()
+        del reid_features
+
+    packed_arrays: dict[str, torch.Tensor] = {
+        name: torch.from_numpy(np.array(arrays[name], copy=True))
+        for name in COMPACT_SAMPLE_ARRAY_FILES_V1
+    }
+    packed_arrays["timeline_scalar_feats"] = torch.from_numpy(normalized_scalar)
+    packed_arrays["timeline_has_detection"] = torch.from_numpy(
+        np.array(arrays["timeline_has_detection"], copy=True)
+    )
+    for optional in COMPACT_RESIDUAL_TARGET_ARRAY_FILES:
+        path = source_dir / COMPACT_RESIDUAL_TARGET_ARRAY_FILES[optional]
+        if path.is_file():
+            packed_arrays[optional] = torch.from_numpy(
+                np.array(np.load(path, mmap_mode="r", allow_pickle=False), copy=True)
+            )
+    counts = dict(source_metadata.get("timeline_counts", {}).get(sequence, {}))
+    counts.setdefault("events", timeline_count)
+    counts.setdefault("labeled_endpoints", count)
+    sequence_metadata = {
+        "format": PACKED_TRAIN_DATA_FORMAT,
+        "index_format": PACKED_TRAIN_DATA_FORMAT,
+        "dataset": str(source_metadata.get("dataset", "MOT20")),
+        "split": str(source_metadata.get("split", "all")),
+        "sequence": sequence,
+        "train_sequences": [sequence],
+        "context_size": context_size,
+        "max_frame_gap": int(source_metadata.get("max_frame_gap", 30)),
+        "reid_dim": reid_dim,
+        "scalar_dim": 63,
+        "event_dim": int(source_metadata.get("event_dim", 128)),
+        "num_train_samples": count,
+        "timeline_counts": counts,
+        "normalization_mean": norm_stats.mean.tolist(),
+        "normalization_std": norm_stats.std.tolist(),
+        "reid_feature_file": "reid_features.npy",
+        "reid_feature_fields": ["track_feature_before", "detection_feature"],
+        "track_feature_after_available": False,
+    }
+    torch.save({"metadata": sequence_metadata, "arrays": packed_arrays}, target_dir / "data.pt")
+
+    existing = target_root / "metadata.json"
+    if existing.is_file():
+        output_metadata = json.loads(existing.read_text())
+        migrated = list(output_metadata.get("train_sequences", []))
+    else:
+        # A per-sequence migration must advertise only data that already exists.
+        migrated = []
+    if sequence not in migrated:
+        migrated.append(sequence)
+    source_counts = source_metadata.get("timeline_counts", {})
+    timeline_counts = {
+        item: source_counts[item]
+        for item in migrated
+        if item in source_counts
+    }
+    output_metadata = {
+        "format": PACKED_TRAIN_DATA_FORMAT,
+        "index_format": PACKED_TRAIN_DATA_FORMAT,
+        "dataset": str(source_metadata.get("dataset", "MOT20")),
+        "split": str(source_metadata.get("split", "all")),
+        "train_sequences": migrated,
+        "context_size": context_size,
+        "max_frame_gap": int(source_metadata.get("max_frame_gap", 30)),
+        "reid_dim": reid_dim,
+        "scalar_dim": 63,
+        "event_dim": int(source_metadata.get("event_dim", 128)),
+        "num_train_samples": sum(
+            int(item.get("labeled_endpoints", 0)) for item in timeline_counts.values()
+        ),
+        "timeline_counts": timeline_counts,
+        "normalization_mean": norm_stats.mean.tolist(),
+        "normalization_std": norm_stats.std.tolist(),
+        "reid_feature_file": "reid_features.npy",
+        "reid_feature_fields": ["track_feature_before", "detection_feature"],
+        "track_feature_after_available": False,
+    }
+    (target_root / "metadata.json").write_text(
+        json.dumps(output_metadata, indent=2, sort_keys=True) + "\n"
+    )
+    return sequence_metadata
 
 
 class StreamingIWGRGCMADataset(torch.utils.data.Dataset):

@@ -152,6 +152,14 @@ def make_parser():
         ),
     )
     parser.add_argument(
+        "--agentguard-attention-diagnostics",
+        action="store_true",
+        help=(
+            "Compute attention weights/entropy during IWG+RG-CMA inference. "
+            "Off by default because the gates do not use these tensors."
+        ),
+    )
+    parser.add_argument(
         "--agentguard-normalization-stats",
         type=str,
         default="",

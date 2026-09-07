@@ -10,6 +10,10 @@ from agentguard.contracts.events import TrackEvent
 from agentguard.runtime.buffers import EventBuffer
 from agentguard.runtime.statistics import RuntimeStatistics
 
+_UNMATCHED_POLICY = np.array([0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float64)
+_UNMATCHED_GATE = np.zeros(2, dtype=np.float64)
+_UNMATCHED_CUE = np.zeros(3, dtype=np.float64)
+
 
 class AgentGuardRuntime:
     """Coordinate capture and the current IWG + RG-CMA online path.
@@ -70,6 +74,9 @@ class AgentGuardRuntime:
         self.fallback_threshold = float(config.get("fallback_threshold", 0.0))
         if not 0.0 <= self.fallback_threshold <= 1.0:
             raise ValueError("fallback_threshold must be in [0, 1]")
+        self.return_attention_diagnostics = bool(
+            config.get("return_attention_diagnostics", False)
+        )
 
         self.iwg_context_size = int(config.get("iwg_context_size", 6))
         if self.iwg_context_size < 1:
@@ -140,6 +147,28 @@ class AgentGuardRuntime:
             has_detection=[has_detection],
         )[0]
 
+    def _unmatched_inference_result(self) -> Dict[str, np.ndarray]:
+        return {
+            "gate": _UNMATCHED_GATE.copy(),
+            "base_gate": _UNMATCHED_GATE.copy(),
+            "final_gate": _UNMATCHED_GATE.copy(),
+            "gate_correction": _UNMATCHED_GATE.copy(),
+            "policy_probs": _UNMATCHED_POLICY.copy(),
+            "cue": _UNMATCHED_CUE.copy(),
+        }
+
+    def _record_unmatched_result(self, result: Dict[str, np.ndarray]) -> None:
+        self.stats.record_rg_cma(
+            result["gate"],
+            result["base_gate"],
+            result["final_gate"],
+            result["gate_correction"],
+            matched=False,
+            correction_bound=getattr(self.rg_cma_model, "correction_bound", None),
+            policy_confidence=float(np.max(result["policy_probs"])),
+            fallback_applied=False,
+        )
+
     def run_iwg_rg_cma_batch_inference(
         self,
         track_ids: List[int],
@@ -180,23 +209,41 @@ class AgentGuardRuntime:
                         "iwg-rg-cma sequence must end with the current event"
                     )
                 sequences[index] = [None] * (len(sequence) - 1) + [sequence[-1]]
-
-        inputs = self.feature_builder.build_iwg_batch_input(sequences)
-        device = next(self.rg_cma_model.parameters()).device
-        padding = inputs["mask"].to(device, non_blocking=True)
-        detection = torch.zeros_like(padding)
-        for batch_index, sequence in enumerate(sequences):
-            for position, event in enumerate(sequence):
-                detection[batch_index, position] = bool(
-                    event is not None and event.has_detection
+        for sequence in sequences:
+            if not sequence or sequence[-1] is None:
+                raise ValueError(
+                    "iwg-rg-cma sequence must end with the current event"
                 )
 
+        matched_indices = [
+            index for index, matched in enumerate(has_detection) if matched
+        ]
+        results: List[Optional[Dict[str, np.ndarray]]] = [None] * size
+        for index, matched in enumerate(has_detection):
+            if matched:
+                continue
+            unmatched = self._unmatched_inference_result()
+            self._record_unmatched_result(unmatched)
+            results[index] = unmatched
+        if not matched_indices:
+            return [item for item in results if item is not None]
+
+        matched_sequences = [sequences[index] for index in matched_indices]
+        inputs = self.feature_builder.build_iwg_batch_input(matched_sequences)
+        device = next(self.rg_cma_model.parameters()).device
+        padding = inputs["mask"].to(device, non_blocking=True)
+        if bool(padding.all(dim=-1).any()):
+            raise ValueError("iwg-rg-cma sequence cannot contain only padding")
+        valid = ~padding
+        first_valid = valid.to(torch.int64).argmax(dim=-1)
         reset = torch.zeros_like(padding)
-        for batch_index in range(size):
-            valid_positions = (~padding[batch_index]).nonzero(as_tuple=False)
-            if valid_positions.numel() == 0:
-                raise ValueError("iwg-rg-cma sequence cannot contain only padding")
-            reset[batch_index, int(valid_positions[0, 0])] = True
+        reset[
+            torch.arange(padding.shape[0], device=padding.device),
+            first_valid,
+        ] = True
+        endpoint_detection = torch.ones(
+            padding.shape[0], dtype=torch.bool, device=device
+        )
 
         with torch.inference_mode():
             outputs = self.rg_cma_model(
@@ -204,8 +251,9 @@ class AgentGuardRuntime:
                 inputs["det_feats"].to(device, non_blocking=True),
                 inputs["scalar_feats"].to(device, non_blocking=True),
                 padding,
-                detection,
+                endpoint_detection,
                 reset,
+                return_diagnostics=self.return_attention_diagnostics,
             )
 
         base = outputs["base_gate"].float().cpu().numpy()
@@ -230,42 +278,33 @@ class AgentGuardRuntime:
             applied[:, 1] = 1.0
 
         policy_confidence = np.max(policy, axis=1)
-        fallback_mask = (
-            (self.fallback_threshold > 0.0)
-            & (policy_confidence < self.fallback_threshold)
-            & np.asarray(has_detection, dtype=bool)
+        fallback_mask = (self.fallback_threshold > 0.0) & (
+            policy_confidence < self.fallback_threshold
         )
         applied[fallback_mask] = 1.0
 
-        results: List[Dict[str, np.ndarray]] = []
         correction_bound = getattr(self.rg_cma_model, "correction_bound", None)
-        for index in range(size):
-            if not has_detection[index]:
-                # Keep the unmatched protocol explicit at the Runtime boundary.
-                base[index] = 0.0
-                final[index] = 0.0
-                applied[index] = 0.0
-                correction[index] = 0.0
+        for local_index, source_index in enumerate(matched_indices):
             result = {
-                "gate": applied[index],
-                "base_gate": base[index],
-                "final_gate": final[index],
-                "gate_correction": correction[index],
-                "policy_probs": policy[index],
-                "cue": cue[index],
+                "gate": applied[local_index],
+                "base_gate": base[local_index],
+                "final_gate": final[local_index],
+                "gate_correction": correction[local_index],
+                "policy_probs": policy[local_index],
+                "cue": cue[local_index],
             }
             self.stats.record_rg_cma(
                 result["gate"],
                 result["base_gate"],
                 result["final_gate"],
                 result["gate_correction"],
-                matched=bool(has_detection[index]),
+                matched=True,
                 correction_bound=correction_bound,
-                policy_confidence=float(policy_confidence[index]),
-                fallback_applied=bool(fallback_mask[index]),
+                policy_confidence=float(policy_confidence[local_index]),
+                fallback_applied=bool(fallback_mask[local_index]),
             )
-            results.append(result)
-        return results
+            results[source_index] = result
+        return [item for item in results if item is not None]
 
     def cleanup_track(self, track_id: int) -> None:
         """Remove all Runtime state associated with a track."""

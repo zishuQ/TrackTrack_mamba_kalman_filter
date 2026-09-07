@@ -92,7 +92,12 @@ class AgentGuardTrackerAdapter:
         if boxes.shape[0] > 0:
             np.fill_diagonal(self._frame_detection_overlap, 0.0)
 
-        # Serialize detection pool with stable indices
+        self._pending_frame_events = []
+        if self.event_sink is None:
+            self._pending_frame_record = None
+            return
+
+        # Serialize detection pool with stable indices only when capturing.
         detections_serialized = []
         for idx, det in enumerate(self._frame_detections):
             source = (
@@ -109,7 +114,6 @@ class AgentGuardTrackerAdapter:
                 "class_id": int(getattr(det, "class_id", 0)),
             })
 
-        # Accumulate frame record for EventSink
         self._pending_frame_record = {
             "frame_id": frame_id,
             "image_width": img_width,
@@ -118,7 +122,6 @@ class AgentGuardTrackerAdapter:
             "detections": detections_serialized,
             "association": None,
         }
-        self._pending_frame_events = []
 
     def set_frame_warp(self, warp_matrix: np.ndarray) -> None:
         """Attach the effective per-frame warp to the pending frame record."""
@@ -141,7 +144,7 @@ class AgentGuardTrackerAdapter:
         Detection features are deliberately not stored here.  Detections are
         represented by their sequence-global detection-cache indices.
         """
-        if self._pending_frame_record is None or association_meta is None:
+        if self.event_sink is None or self._pending_frame_record is None or association_meta is None:
             return
 
         detection_indices = np.asarray(

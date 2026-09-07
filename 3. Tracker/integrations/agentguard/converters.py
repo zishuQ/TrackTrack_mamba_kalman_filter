@@ -149,15 +149,14 @@ def build_association_context(
     """Build an ``AssociationContext`` from raw association matrices.
 
     Matrices must be *copied before iterative matching mutates them* —
-    the caller must supply pre-mutation copies of ``final_cost`` and
-    ``cosine_distance`` matrices.
+    the caller must supply a pre-mutation copy of ``final_cost``.
+    Cosine and raw-cost matrices are unused here; pair-level cosine/raw
+    values come from ``export_association_pair``.
 
     Parameters
     ----------
     meta : dict
-        Must contain keys ``final_cost`` (copied pre-mutation), ``cosine_distance``
-        (copied pre-mutation or zeros if no reid), and optionally
-        ``detection_source`` or ``iou_similarity``.
+        Must contain ``final_cost`` (copied pre-mutation).
     track_index : int
         Index of the accepted track in the matrix.
     detection_index : int
@@ -192,16 +191,7 @@ def build_association_context(
         )
     track_cost_row = final_cost_matrix[track_index, :].copy()
     detection_cost_col = final_cost_matrix[:, detection_index].copy()
-
-    if no_reid:
-        cos_matrix = np.zeros_like(final_cost_matrix, dtype=np.float64)
-        reid_available = False
-    else:
-        cos_matrix = np.asarray(meta.get("cosine_distance", meta.get("cosine_distance_matrix",
-            np.zeros_like(final_cost_matrix))), dtype=np.float64)
-        reid_available = True
-
-    raw_cost_row = np.asarray(meta.get("raw_cost", final_cost_matrix), dtype=np.float64)[track_index, :].copy()
+    reid_available = not bool(no_reid)
 
     if detection_overlap_row is None:
         overlap_row = np.zeros(num_detections, dtype=np.float64)

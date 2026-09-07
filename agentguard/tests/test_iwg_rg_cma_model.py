@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -7,6 +8,7 @@ from agentguard.models.event_encoder import EventEncoder
 from agentguard.models.iwg_rg_cma import (
     ARCHITECTURE_CLEAN_CROSS_MODAL,
     ARCHITECTURE_DIRECT_BASE,
+    ARCHITECTURE_LEGACY,
     ARCHITECTURE_LEGACY_CLEAN_6X6_CMA,
     ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA,
     ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
@@ -671,3 +673,89 @@ def test_clean_and_selective_variants_share_identical_common_initialization():
     assert set(clean_state).issubset(selective_state)
     for key, value in clean_state.items():
         torch.testing.assert_close(value, selective_state[key])
+
+
+_PREDICTION_KEYS = (
+    "base_gate",
+    "refined_gate",
+    "final_gate",
+    "gate_correction",
+    "policy_probs",
+    "cue",
+)
+_INFERENCE_VARIANTS = (
+    (False, ARCHITECTURE_CLEAN_CROSS_MODAL, 6),
+    (False, ARCHITECTURE_DIRECT_BASE, 6),
+    (False, ARCHITECTURE_LEGACY, 6),
+    (False, ARCHITECTURE_LEGACY_CLEAN_6X6_CMA, 6),
+    (False, ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA, 6),
+    (False, ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL, 6),
+    (False, ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED, 6),
+    (False, ARCHITECTURE_SELECTIVE_CORRECTION, 6),
+    (False, ARCHITECTURE_LEGACY, 8),
+    (True, ARCHITECTURE_CLEAN_CROSS_MODAL, 6),
+    (True, ARCHITECTURE_DIRECT_BASE, 6),
+    (True, ARCHITECTURE_LEGACY, 6),
+    (True, ARCHITECTURE_LEGACY_CLEAN_6X6_CMA, 6),
+    (True, ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA, 6),
+    (True, ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL, 6),
+    (True, ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED, 6),
+    (True, ARCHITECTURE_SELECTIVE_CORRECTION, 6),
+    (True, ARCHITECTURE_LEGACY, 8),
+)
+
+
+def _variant_model(variant: str, context_size: int) -> IWGRGCMA:
+    kwargs = {"context_size": context_size, "architecture_variant": variant}
+    if variant != ARCHITECTURE_LEGACY:
+        kwargs["correction_bound"] = 0.05
+    return IWGRGCMA(16, **kwargs).eval()
+
+
+@pytest.mark.parametrize(
+    "return_diagnostics, variant, context_size",
+    _INFERENCE_VARIANTS,
+)
+def test_inference_without_diagnostics_preserves_predictions(
+    return_diagnostics, variant, context_size
+):
+    torch.manual_seed(41)
+    model = _variant_model(variant, context_size)
+    batch = _batch(length=context_size)
+    with torch.no_grad():
+        with_diag = model(
+            batch["track_feats"],
+            batch["det_feats"],
+            batch["scalar_feats"],
+            batch["padding_mask"],
+            batch["has_detection_mask"],
+            batch["reset_mask"],
+            return_diagnostics=True,
+        )
+        without_diag = model(
+            batch["track_feats"],
+            batch["det_feats"],
+            batch["scalar_feats"],
+            batch["padding_mask"],
+            batch["has_detection_mask"],
+            batch["reset_mask"],
+            return_diagnostics=False,
+        )
+        selected = model(
+            batch["track_feats"],
+            batch["det_feats"],
+            batch["scalar_feats"],
+            batch["padding_mask"],
+            batch["has_detection_mask"],
+            batch["reset_mask"],
+            return_diagnostics=return_diagnostics,
+        )
+    for key in _PREDICTION_KEYS:
+        torch.testing.assert_close(with_diag[key], without_diag[key], atol=1e-6, rtol=0.0)
+        torch.testing.assert_close(selected[key], with_diag[key], atol=1e-6, rtol=0.0)
+    assert "motion_attention_weights" in with_diag
+    assert "motion_attention_weights" not in without_diag
+    if return_diagnostics:
+        assert "motion_attention_weights" in selected
+    else:
+        assert "motion_attention_weights" not in selected
