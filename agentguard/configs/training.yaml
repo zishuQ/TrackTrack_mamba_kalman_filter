@@ -14,3 +14,5 @@ iwg_rg_cma:
   memory_shards: 4
   epochs_per_shard: 1
   shard_cycles: 25
+  diagnostic_interval: 0
+  log_interval: 0

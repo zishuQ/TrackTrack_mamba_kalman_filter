@@ -223,7 +223,7 @@ def test_iwg_rg_cma_optimizer_group_diagnostics_and_lr_fallback():
         group["params"][0].grad = torch.ones_like(group["params"][0])
     norms = _optimizer_group_grad_norms(optimizer)
     assert set(norms) == {"base_iwg", "rg_cma"}
-    assert all(value > 0.0 for value in norms.values())
+    assert all(float(value) > 0.0 for value in norms.values())
     assert _resolved_optimizer_lrs({"lr": 1e-4}) == {
         "base_lr": 1e-4,
         "cma_lr": 1e-4,

@@ -35,19 +35,32 @@ def _render_epoch(handle, metrics: dict, total_epochs: int, timestamp: float) ->
         ),
         timestamp=timestamp,
     )
-    motion = metrics["motion_history_attention"]
-    appearance = metrics["appearance_history_attention"]
-    _info(
-        handle,
-        (
+    motion = metrics.get("motion_history_attention")
+    appearance = metrics.get("appearance_history_attention")
+    motion_entropy = metrics.get("motion_attention_entropy")
+    appearance_entropy = metrics.get("appearance_attention_entropy")
+    if (
+        motion is None
+        or appearance is None
+        or motion_entropy is None
+        or appearance_entropy is None
+        or not metrics.get("diagnostics_available", True)
+    ):
+        interval = metrics.get("diagnostic_interval", "n/a")
+        sampled = metrics.get("diagnostic_batches", 0)
+        attention_line = (
+            "Attention  motion_H=n/a  appearance_H=n/a  "
+            f"diagnostics=unsampled interval={interval} batches={sampled}"
+        )
+    else:
+        attention_line = (
             "Attention  "
-            f"motion_H={metrics['motion_attention_entropy']:.4f}  "
-            f"appearance_H={metrics['appearance_attention_entropy']:.4f}  "
+            f"motion_H={motion_entropy:.4f}  "
+            f"appearance_H={appearance_entropy:.4f}  "
             f"motion_pos=[{', '.join(f'{value:.3f}' for value in motion)}]  "
             f"appearance_pos=[{', '.join(f'{value:.3f}' for value in appearance)}]"
-        ),
-        timestamp=timestamp,
-    )
+        )
+    _info(handle, attention_line, timestamp=timestamp)
 
 
 def _read_complete_lines(path: Path) -> list[dict]:

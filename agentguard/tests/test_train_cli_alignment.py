@@ -286,6 +286,35 @@ def test_checkpoint_every_cli_and_selected_epoch_65(tmp_path):
         )
 
 
+def test_diagnostic_and_log_interval_cli(tmp_path):
+    dataset_dir = tmp_path / "data"
+    checkpoint_dir = tmp_path / "ckpts"
+    dataset_dir.mkdir()
+    checkpoint_dir.mkdir()
+    default = parse_train_iwg_rg_cma_command(
+        _minimal_train_command(dataset_dir, checkpoint_dir)
+    )
+    assert default["diagnostic_interval"] == 0
+    assert default["log_interval"] == 0
+    restored = parse_train_iwg_rg_cma_command(
+        _minimal_train_command(
+            dataset_dir,
+            checkpoint_dir,
+            ["--diagnostic-interval", "1", "--log-interval", "20"],
+        )
+    )
+    assert restored["diagnostic_interval"] == 1
+    assert restored["log_interval"] == 20
+    with pytest.raises(ValueError, match="non-negative"):
+        parse_train_iwg_rg_cma_command(
+            _minimal_train_command(
+                dataset_dir,
+                checkpoint_dir,
+                ["--diagnostic-interval", "-1"],
+            )
+        )
+
+
 def test_smoke_train_writes_extra_numbered_checkpoints_once(tmp_path, monkeypatch):
     dataset_dir = _write_packed_v1(tmp_path / "data")
     checkpoint_dir = tmp_path / "ckpts"

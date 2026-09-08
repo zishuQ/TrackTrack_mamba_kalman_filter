@@ -1027,6 +1027,18 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"invalid integer: {value!r}") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(
+            f"must be a non-negative integer, got {parsed}"
+        )
+    return parsed
+
+
 class _RaisingArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise ValueError(message)
@@ -1066,6 +1078,28 @@ def _add_train_iwg_rg_cma_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--warmup-epochs", type=int, default=1)
     parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument(
+        "--diagnostic-interval",
+        type=_non_negative_int,
+        default=0,
+        metavar="N",
+        help=(
+            "Compute expensive diagnostics every N batches. "
+            "0 disables them (default). 1 restores per-batch diagnostics. "
+            "Does not change the training loss, clipping, or optimizer."
+        ),
+    )
+    parser.add_argument(
+        "--log-interval",
+        type=_non_negative_int,
+        default=0,
+        metavar="N",
+        help=(
+            "Write intra-epoch progress every N batches. "
+            "0 keeps the previous auto cadence of about five logs per epoch. "
+            "Independent of --diagnostic-interval."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--correction-bound",
@@ -1209,6 +1243,8 @@ def train_iwg_rg_cma_config_from_args(args: argparse.Namespace) -> dict[str, Any
         "weight_decay": float(args.weight_decay),
         "warmup_epochs": int(args.warmup_epochs),
         "grad_clip": float(args.grad_clip),
+        "diagnostic_interval": int(args.diagnostic_interval),
+        "log_interval": int(args.log_interval),
         "seed": int(args.seed),
         "correction_bound": float(args.correction_bound),
         "context_size": int(args.context_size),
