@@ -10,6 +10,15 @@ from agentguard.contracts.events import TrackEvent
 from agentguard.runtime.buffers import EventBuffer
 from agentguard.runtime.statistics import RuntimeStatistics
 
+# Packed CPU transfer of the public heads: base, refined, correction, policy, cue.
+_RUNTIME_HEAD_SLICES = (
+    ("base_gate", 0, 2),
+    ("refined_gate", 2, 4),
+    ("gate_correction", 4, 6),
+    ("policy_probs", 6, 11),
+    ("cue", 11, 14),
+)
+
 
 class AgentGuardRuntime:
     """Coordinate capture and the current IWG + RG-CMA online path.
@@ -208,21 +217,9 @@ class AgentGuardRuntime:
             )
             inputs = self.feature_builder.build_iwg_batch_input(active_sequences)
             device = next(self.rg_cma_model.parameters()).device
-            padding = inputs["mask"].to(device, non_blocking=True)
-            detection = torch.zeros_like(padding)
-            for batch_index, sequence in enumerate(active_sequences):
-                for position, event in enumerate(sequence):
-                    detection[batch_index, position] = bool(
-                        event is not None and event.has_detection
-                    )
-
-            valid = ~padding
-            first_valid = valid.to(torch.int64).argmax(dim=-1)
-            reset = torch.zeros_like(padding)
-            reset[
-                torch.arange(padding.shape[0], device=padding.device),
-                first_valid,
-            ] = True
+            padding, detection, reset = self._move_sequence_masks(
+                inputs["mask"], inputs["has_detection"], device
+            )
 
             with torch.inference_mode():
                 outputs = self.rg_cma_model(
@@ -235,11 +232,9 @@ class AgentGuardRuntime:
                     return_diagnostics=self.return_attention_diagnostics,
                 )
 
-            base = outputs["base_gate"].float().cpu().numpy()
-            model_final = outputs["refined_gate"].float().cpu().numpy()
-            model_correction = outputs["gate_correction"].float().cpu().numpy()
-            policy = outputs["policy_probs"].float().cpu().numpy()
-            cue = outputs["cue"].float().cpu().numpy()
+            base, model_final, model_correction, policy, cue = (
+                self._numpy_runtime_heads(outputs)
+            )
 
         if len(inference_indices) != size:
             # Scatter only mixed batches. The common all-matched path keeps
@@ -315,6 +310,46 @@ class AgentGuardRuntime:
             )
             results.append(result)
         return results
+
+    @staticmethod
+    def _move_sequence_masks(
+        padding_cpu: torch.Tensor,
+        detection_cpu: torch.Tensor,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build reset on CPU and move padding/detection/reset in one copy.
+
+        Left padding is preserved: reset is True only at the first valid event.
+        Padding slots stay False in the detection mask.
+        """
+        valid = ~padding_cpu
+        first_valid = valid.to(torch.int64).argmax(dim=-1)
+        reset_cpu = torch.zeros_like(padding_cpu)
+        reset_cpu[torch.arange(padding_cpu.shape[0]), first_valid] = True
+        packed_masks = torch.stack(
+            (padding_cpu, detection_cpu.bool(), reset_cpu), dim=0
+        ).to(device, non_blocking=True)
+        return packed_masks.unbind(dim=0)
+
+    @staticmethod
+    def _numpy_runtime_heads(
+        outputs: Dict[str, torch.Tensor],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Bring the five public heads back to CPU with one concatenated copy."""
+        packed = torch.cat(
+            (
+                outputs["base_gate"],
+                outputs["refined_gate"],
+                outputs["gate_correction"],
+                outputs["policy_probs"],
+                outputs["cue"],
+            ),
+            dim=-1,
+        ).float()
+        packed_np = packed.cpu().numpy()
+        return tuple(
+            packed_np[:, start:end] for _, start, end in _RUNTIME_HEAD_SLICES
+        )
 
     def cleanup_track(self, track_id: int) -> None:
         """Remove all Runtime state associated with a track."""

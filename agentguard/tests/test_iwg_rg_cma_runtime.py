@@ -544,3 +544,193 @@ def test_all_unmatched_fast_path_keeps_new_fallback_statistics(
     assert summary["avg_policy_confidence"] == 1.0
     assert summary["unmatched_events"] == 2
     assert summary["matched_events"] == 0
+
+
+def test_builder_has_detection_is_cpu_bool_and_false_on_padding():
+    runtime = _runtime(IWGRGCMA(16).eval())
+    matched = _event(1, 12)
+    unmatched = _event(2, 12, matched=False)
+    sequences = [
+        [None, None, None, None, _event(1, 11), matched],
+        [None] * 5 + [unmatched],
+    ]
+    inputs = runtime.feature_builder.build_iwg_batch_input(sequences)
+    expected = np.array(
+        [
+            [event is not None and event.has_detection for event in sequence]
+            for sequence in sequences
+        ]
+    )
+    has_detection = inputs["has_detection"]
+    assert has_detection.device.type == "cpu"
+    assert has_detection.dtype == torch.bool
+    np.testing.assert_array_equal(has_detection.numpy(), expected)
+    padding = np.array(
+        [[event is None for event in sequence] for sequence in sequences]
+    )
+    np.testing.assert_array_equal(inputs["mask"].numpy(), padding)
+    assert not bool(has_detection[0, 0])
+    assert bool(has_detection[0, 5])
+    assert not bool(has_detection[1, 5])
+
+
+def test_runtime_moves_complete_detection_mask_not_elementwise_gpu_writes(monkeypatch):
+    runtime = _runtime(IWGRGCMA(16).eval())
+    sequences = [[None] * 4 + [_event(1, 11), _event(1, 12)]]
+    captured = {}
+    original_move = AgentGuardRuntime._move_sequence_masks
+
+    def recording_move(padding_cpu, detection_cpu, device):
+        captured["padding_device"] = padding_cpu.device.type
+        captured["detection_device"] = detection_cpu.device.type
+        captured["detection"] = detection_cpu.detach().cpu().clone()
+        captured["device"] = str(device)
+        return original_move(padding_cpu, detection_cpu, device)
+
+    monkeypatch.setattr(AgentGuardRuntime, "_move_sequence_masks", staticmethod(recording_move))
+    runtime.run_iwg_rg_cma_batch_inference(
+        [1], sequences, frame_ids=[12], has_detection=[True]
+    )
+    assert captured["padding_device"] == "cpu"
+    assert captured["detection_device"] == "cpu"
+    np.testing.assert_array_equal(
+        captured["detection"].numpy(),
+        [[event is not None and event.has_detection for event in sequences[0]]],
+    )
+
+
+def test_packed_runtime_heads_are_nonoverlapping_views():
+    runtime = _runtime(IWGRGCMA(16).eval())
+    outputs = {
+        "base_gate": torch.tensor([[0.1, 0.2], [0.3, 0.4]], dtype=torch.float32),
+        "refined_gate": torch.tensor([[0.5, 0.6], [0.7, 0.8]], dtype=torch.float32),
+        "gate_correction": torch.tensor([[0.01, -0.02], [0.03, -0.04]], dtype=torch.float32),
+        "policy_probs": torch.tensor(
+            [[0.1, 0.2, 0.3, 0.25, 0.15], [0.05, 0.15, 0.2, 0.4, 0.2]],
+            dtype=torch.float32,
+        ),
+        "cue": torch.tensor([[0.9, 0.8, 0.7], [0.6, 0.5, 0.4]], dtype=torch.float32),
+    }
+    base, refined, correction, policy, cue = AgentGuardRuntime._numpy_runtime_heads(outputs)
+    assert base.shape == (2, 2)
+    assert refined.shape == (2, 2)
+    assert correction.shape == (2, 2)
+    assert policy.shape == (2, 5)
+    assert cue.shape == (2, 3)
+    np.testing.assert_allclose(base, outputs["base_gate"].numpy())
+    np.testing.assert_allclose(policy, outputs["policy_probs"].numpy())
+    marker = base[0, 0]
+    base[0, 0] = 9.0
+    assert policy[0, 0] != 9.0
+    assert cue[0, 0] != 9.0
+    assert refined[0, 0] != 9.0
+    assert correction[0, 0] != 9.0
+    assert marker != 9.0
+
+
+def test_left_padding_reset_is_first_valid_event_on_cpu():
+    padding = torch.tensor(
+        [[True, True, False, False], [False, False, False, True]],
+        dtype=torch.bool,
+    )
+    detection = torch.tensor(
+        [[False, False, True, False], [True, False, True, False]],
+        dtype=torch.bool,
+    )
+    moved = AgentGuardRuntime._move_sequence_masks(padding, detection, torch.device("cpu"))
+    padding_out, detection_out, reset = moved
+    np.testing.assert_array_equal(padding_out.numpy(), padding.numpy())
+    np.testing.assert_array_equal(detection_out.numpy(), detection.numpy())
+    np.testing.assert_array_equal(
+        reset.numpy(),
+        np.array([[False, False, True, False], [True, False, False, False]]),
+    )
+
+
+@pytest.mark.parametrize("context_size", [6, 8])
+@pytest.mark.parametrize(
+    "architecture_variant,correction_bound",
+    [
+        ("legacy", 0.10),
+        ("direct-base", 0.05),
+        ("clean-cross-modal", 0.05),
+        ("selective-correction", 0.05),
+        ("legacy-clean-6x6-cma", 0.05),
+    ],
+)
+def test_packed_transfer_matches_reference_across_supported_models(
+    context_size, architecture_variant, correction_bound
+):
+    if architecture_variant != "legacy" and context_size != 6:
+        pytest.skip("structural variants require context_size=6")
+    torch.manual_seed(401)
+    model = IWGRGCMA(
+        16,
+        context_size=context_size,
+        correction_bound=correction_bound,
+        architecture_variant=architecture_variant,
+    ).eval()
+    runtime = AgentGuardRuntime(
+        {
+            "mode": "iwg-rg-cma",
+            "iwg_context_size": context_size,
+            "rg_cma_output": "final",
+            "rg_cma_alpha": 0.5,
+            "fallback_threshold": 0.0,
+        },
+        rg_cma_model=model,
+        device="cpu",
+    )
+    runtime.init_feature_builder(reid_dim=16)
+    events = [_event(i, 10, matched=i != 2) for i in range(1, 5)]
+    sequences = [[None] * (context_size - 2) + [_event(e.track_id, 9), e] for e in events]
+    flags = [True, True, False, False]
+    expected = _model_reference(runtime, sequences, flags)
+    actual = runtime.run_iwg_rg_cma_batch_inference(
+        [e.track_id for e in events],
+        sequences,
+        frame_ids=[10] * 4,
+        has_detection=flags,
+    )
+    for got, wanted in zip(actual, expected):
+        for key in got:
+            np.testing.assert_allclose(got[key], wanted[key], atol=2e-6, rtol=0.0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+def test_cuda_runtime_matches_cpu_public_outputs():
+    torch.manual_seed(77)
+    template = IWGRGCMA(16).eval()
+    cpu_runtime = _runtime(copy.deepcopy(template))
+    cuda_model = copy.deepcopy(template).to("cuda")
+    cuda_runtime = AgentGuardRuntime(
+        {
+            "mode": "iwg-rg-cma",
+            "rg_cma_output": "final",
+            "rg_cma_alpha": 1.0,
+            "rg_cma_max_gap": 30,
+        },
+        rg_cma_model=cuda_model,
+        device="cuda",
+    )
+    cuda_runtime.init_feature_builder(reid_dim=16)
+    events = [_event(i, 14, matched=i != 3) for i in range(1, 5)]
+    sequences = [[None] * 4 + [_event(e.track_id, 13), e] for e in events]
+    flags = [True, False, True, True]
+    cpu = cpu_runtime.run_iwg_rg_cma_batch_inference(
+        [e.track_id for e in events],
+        sequences,
+        frame_ids=[14] * 4,
+        has_detection=flags,
+    )
+    cuda = cuda_runtime.run_iwg_rg_cma_batch_inference(
+        [e.track_id for e in events],
+        sequences,
+        frame_ids=[14] * 4,
+        has_detection=flags,
+    )
+    for cpu_item, cuda_item in zip(cpu, cuda):
+        for key in cpu_item:
+            np.testing.assert_allclose(
+                cpu_item[key], cuda_item[key], atol=1e-4, rtol=0.0
+            )

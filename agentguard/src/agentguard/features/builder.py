@@ -102,14 +102,16 @@ class EventFeatureBuilder:
         Returns
         -------
         dict with keys ``track_feats``, ``det_feats``, ``scalar_feats``,
-        ``mask`` — each is a ``(1, seq_len, D)`` or ``(1, seq_len)``
-        float / bool tensor on CPU.
+        ``mask``, ``has_detection`` — each is a ``(1, seq_len, D)`` or
+        ``(1, seq_len)`` float / bool tensor on CPU. Padding slots leave
+        ``has_detection`` false.
         """
         seq_len = len(events_sequence)
         track_feats = np.zeros((seq_len, self.reid_dim), dtype=np.float64)
         det_feats = np.zeros((seq_len, self.reid_dim), dtype=np.float64)
         scalar_feats = np.zeros((seq_len, self._scalar_dim), dtype=np.float64)
         mask = np.zeros(seq_len, dtype=np.bool_)
+        has_detection = np.zeros(seq_len, dtype=np.bool_)
 
         for i, evt in enumerate(events_sequence):
             if evt is None:
@@ -117,6 +119,7 @@ class EventFeatureBuilder:
                 continue
 
             track_feats[i] = self._fit_reid(evt.track_feature)
+            has_detection[i] = bool(evt.has_detection)
 
             if evt.has_detection and evt.detection_feature.size > 0:
                 det_feats[i] = self._fit_reid(evt.detection_feature)
@@ -132,6 +135,7 @@ class EventFeatureBuilder:
             "det_feats": torch.from_numpy(det_feats).unsqueeze(0).float(),
             "scalar_feats": torch.from_numpy(scalar_feats).unsqueeze(0).float(),
             "mask": torch.from_numpy(mask).unsqueeze(0),
+            "has_detection": torch.from_numpy(has_detection).unsqueeze(0),
         }
 
     def build_iwg_batch_input(
@@ -150,6 +154,7 @@ class EventFeatureBuilder:
                 "det_feats": torch.empty((0, 0, self.reid_dim), dtype=torch.float32),
                 "scalar_feats": torch.empty((0, 0, self._scalar_dim), dtype=torch.float32),
                 "mask": torch.empty((0, 0), dtype=torch.bool),
+                "has_detection": torch.empty((0, 0), dtype=torch.bool),
             }
 
         batch_size = len(event_sequences)
@@ -158,6 +163,7 @@ class EventFeatureBuilder:
         det_feats = np.zeros((batch_size, seq_len, self.reid_dim), dtype=np.float32)
         scalar_feats = np.zeros((batch_size, seq_len, self._scalar_dim), dtype=np.float32)
         mask = np.zeros((batch_size, seq_len), dtype=np.bool_)
+        has_detection = np.zeros((batch_size, seq_len), dtype=np.bool_)
 
         for b, events_sequence in enumerate(event_sequences):
             if len(events_sequence) != seq_len:
@@ -168,6 +174,7 @@ class EventFeatureBuilder:
                     continue
 
                 track_feats[b, i] = self._fit_reid(evt.track_feature)
+                has_detection[b, i] = bool(evt.has_detection)
 
                 if evt.has_detection and evt.detection_feature.size > 0:
                     det_feats[b, i] = self._fit_reid(evt.detection_feature)
@@ -181,6 +188,7 @@ class EventFeatureBuilder:
             "det_feats": torch.from_numpy(det_feats),
             "scalar_feats": torch.from_numpy(scalar_feats),
             "mask": torch.from_numpy(mask),
+            "has_detection": torch.from_numpy(has_detection),
         }
 
     # ------------------------------------------------------------------
