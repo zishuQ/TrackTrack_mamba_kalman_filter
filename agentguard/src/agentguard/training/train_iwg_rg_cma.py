@@ -40,6 +40,14 @@ from agentguard.training.loss_iwg_rg_cma import (
     compute_iwg_rg_cma_loss,
     validate_iwg_rg_cma_loss_config,
 )
+from agentguard.training.train_stats import (
+    TrainingEpochStats,
+    logged_scalar_values,
+    resolve_diagnostic_interval,
+    resolve_epoch_log_interval,
+    resolve_log_interval_setting,
+    should_sample_diagnostics,
+)
 
 
 FORMAL_CHECKPOINT_EPOCHS = {
@@ -669,9 +677,9 @@ def _optimizer_learning_rates(optimizer: torch.optim.Optimizer) -> dict[str, flo
 
 def _optimizer_group_grad_norms(
     optimizer: torch.optim.Optimizer,
-) -> dict[str, float]:
+) -> dict[str, torch.Tensor]:
     """Return pre-clipping L2 norms for each optimizer parameter group."""
-    norms: dict[str, float] = {}
+    norms: dict[str, torch.Tensor] = {}
     for index, group in enumerate(optimizer.param_groups):
         group_norms = [
             parameter.grad.detach().float().norm(2)
@@ -679,11 +687,19 @@ def _optimizer_group_grad_norms(
             if parameter.grad is not None
         ]
         name = str(group.get("name", f"group_{index}"))
-        norms[name] = (
-            0.0
-            if not group_norms
-            else float(torch.linalg.vector_norm(torch.stack(group_norms), ord=2))
-        )
+        if group_norms:
+            norms[name] = torch.linalg.vector_norm(
+                torch.stack(group_norms), ord=2
+            )
+        else:
+            fallback_device = (
+                group["params"][0].device
+                if group["params"]
+                else torch.device("cpu")
+            )
+            norms[name] = torch.zeros(
+                (), device=fallback_device, dtype=torch.float32
+            )
     return norms
 
 
@@ -934,6 +950,10 @@ def _run_training_attempt(
     seed = int(config["seed"])
     _seed_everything(seed)
     device = torch.device(config["device"])
+    diagnostic_interval = resolve_diagnostic_interval(config)
+    log_interval_setting = resolve_log_interval_setting(config)
+    config["diagnostic_interval"] = diagnostic_interval
+    config["log_interval"] = log_interval_setting
     loss_settings = _resolved_loss_settings(config)
     residual_target_mode = _resolve_residual_target_mode(config)
     _validate_residual_target_dataset(dataset, residual_target_mode)
@@ -1093,32 +1113,18 @@ def _run_training_attempt(
                     phase_sampler.set_epoch(epoch)
 
                 model.train()
-                totals: dict[str, float] = {}
-                samples = 0
-                channel_abs_error = [0.0, 0.0]
-                channel_correct = [0.0, 0.0]
-                channel_weight = [0.0, 0.0]
                 context_size = int(config.get("context_size", model.context_size))
-                motion_positions = torch.zeros(context_size, dtype=torch.float64)
-                appearance_positions = torch.zeros(context_size, dtype=torch.float64)
-                appearance_to_motion_positions = torch.zeros(
-                    context_size, dtype=torch.float64
+                epoch_stats = TrainingEpochStats(
+                    device=device,
+                    context_size=context_size,
+                    cross_modal_token_count=model.cross_modal_token_count,
+                    uses_full_history_cma=model.uses_full_history_cma,
+                    uses_bidirectional_history_cma=model.uses_bidirectional_history_cma,
+                    diagnostic_interval=diagnostic_interval,
                 )
-                motion_to_appearance_positions = torch.zeros(
-                    context_size, dtype=torch.float64
+                epoch_log_interval = resolve_epoch_log_interval(
+                    log_interval_setting, len(loader)
                 )
-                appearance_to_motion_6x6_matrix = torch.zeros(
-                    (context_size, context_size), dtype=torch.float64
-                )
-                motion_to_appearance_6x6_matrix = torch.zeros(
-                    (context_size, context_size), dtype=torch.float64
-                )
-                cross_matrix = torch.zeros(
-                    (model.cross_modal_token_count, model.cross_modal_token_count),
-                    dtype=torch.float64,
-                )
-                motion_entropy = 0.0
-                appearance_entropy = 0.0
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                 epoch_start = time.time()
@@ -1134,15 +1140,23 @@ def _run_training_attempt(
                     batch = _move_batch(raw_batch, device)
                     optimizer.zero_grad(set_to_none=True)
                     outputs = _forward(model, batch)
+                    sample_diagnostics = should_sample_diagnostics(
+                        batch_index, diagnostic_interval
+                    )
                     loss, components = compute_iwg_rg_cma_loss(
                         outputs,
                         batch,
                         correction_bound=model.correction_bound,
                         residual_target_mode=residual_target_mode,
+                        compute_expensive_diagnostics=sample_diagnostics,
                         **loss_settings,
                     )
                     loss.backward()
-                    group_grad_norms = _optimizer_group_grad_norms(optimizer)
+                    group_grad_norms = (
+                        _optimizer_group_grad_norms(optimizer)
+                        if sample_diagnostics
+                        else {}
+                    )
                     grad_norm = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), float(config["grad_clip"])
                     )
@@ -1150,114 +1164,30 @@ def _run_training_attempt(
                     scheduler.step()
                     global_step += 1
                     count = int(batch["track_feats"].shape[0])
-                    samples += count
-                    for key, value in components.items():
-                        totals[key] = totals.get(key, 0.0) + float(value.detach()) * count
-                    totals["grad_norm"] = totals.get("grad_norm", 0.0) + float(
-                        grad_norm
-                    ) * count
-                    for group_name, group_grad_norm in group_grad_norms.items():
-                        key = f"{group_name}_grad_norm"
-                        totals[key] = totals.get(key, 0.0) + group_grad_norm * count
-                    motion_positions += (
-                        outputs["motion_attention_weights"]
-                        .detach()
-                        .double()
-                        .mean(dim=1)
-                        .sum(dim=0)
-                        .cpu()
+                    epoch_stats.update(
+                        components=components,
+                        outputs=outputs,
+                        batch=batch,
+                        count=count,
+                        grad_norm=grad_norm,
+                        group_grad_norms=group_grad_norms,
+                        include_expensive=sample_diagnostics,
                     )
-                    appearance_positions += (
-                        outputs["appearance_attention_weights"]
-                        .detach()
-                        .double()
-                        .mean(dim=1)
-                        .sum(dim=0)
-                        .cpu()
-                    )
-                    if "appearance_to_motion_attention_weights" in outputs:
-                        appearance_to_motion_positions += (
-                            outputs["appearance_to_motion_attention_weights"]
-                            .detach()
-                            .double()
-                            .mean(dim=1)
-                            .sum(dim=0)
-                            .cpu()
+                    if batch_index % epoch_log_interval == 0:
+                        loss_v, base_v, final_v, corr_v = logged_scalar_values(
+                            components["loss"],
+                            components["base_loss"],
+                            components["final_loss"],
+                            components["correction_abs_mean"],
                         )
-                        motion_to_appearance_positions += (
-                            outputs["motion_to_appearance_attention_weights"]
-                            .detach()
-                            .double()
-                            .mean(dim=1)
-                            .sum(dim=0)
-                            .cpu()
-                        )
-                    if "appearance_to_motion_6x6_attention_weights" in outputs:
-                        appearance_to_motion_6x6_matrix += (
-                            outputs["appearance_to_motion_6x6_attention_weights"]
-                            .detach()
-                            .double()
-                            .mean(dim=1)
-                            .sum(dim=0)
-                            .cpu()
-                        )
-                        motion_to_appearance_6x6_matrix += (
-                            outputs["motion_to_appearance_6x6_attention_weights"]
-                            .detach()
-                            .double()
-                            .mean(dim=1)
-                            .sum(dim=0)
-                            .cpu()
-                        )
-                    if "cross_modal_attention_weights" in outputs:
-                        cross_matrix += (
-                            outputs["cross_modal_attention_weights"]
-                            .detach()
-                            .double()
-                            .mean(dim=1)
-                            .sum(dim=0)
-                            .cpu()
-                        )
-                    motion_entropy += float(
-                        outputs["motion_attention_entropy"].detach().mean()
-                    ) * count
-                    appearance_entropy += float(
-                        outputs["appearance_attention_entropy"].detach().mean()
-                    ) * count
-                    valid_channels = torch.stack(
-                        [batch["valid_motion"], batch["valid_appearance"]], dim=-1
-                    )
-                    gate_weights = (
-                        valid_channels.float()
-                        * batch["sample_weight"].float().unsqueeze(-1)
-                    )
-                    gate_error = (
-                        outputs["refined_gate"].detach()
-                        - batch["safe_gate_target"]
-                    ).abs()
-                    gate_correct = (
-                        (outputs["refined_gate"].detach() >= 0.5)
-                        == (batch["safe_gate_target"] >= 0.5)
-                    ).float()
-                    for channel in range(2):
-                        channel_abs_error[channel] += float(
-                            (gate_error[:, channel] * gate_weights[:, channel]).sum()
-                        )
-                        channel_correct[channel] += float(
-                            (gate_correct[:, channel] * gate_weights[:, channel]).sum()
-                        )
-                        channel_weight[channel] += float(
-                            gate_weights[:, channel].sum()
-                        )
-                    if batch_index % max(1, len(loader) // 5) == 0:
                         _write_training_log(
                             training_log,
                             (
                                 f"Epoch {epoch:3d}  step {global_step:6d} | "
-                                f"loss={float(components['loss'].detach()):.6f} | "
-                                f"base_loss={float(components['base_loss'].detach()):.6f} | "
-                                f"final_loss={float(components['final_loss'].detach()):.6f} | "
-                                f"corr_abs={float(components['correction_abs_mean'].detach()):.6f} | "
+                                f"loss={loss_v:.6f} | "
+                                f"base_loss={base_v:.6f} | "
+                                f"final_loss={final_v:.6f} | "
+                                f"corr_abs={corr_v:.6f} | "
                                 f"base_lr={optimizer.param_groups[0]['lr']:.2e} | "
                                 f"cma_lr={optimizer.param_groups[1]['lr']:.2e}"
                             ),
@@ -1268,8 +1198,8 @@ def _run_training_attempt(
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                 epoch_time = time.time() - epoch_start
+                samples = epoch_stats.samples
                 total_samples_seen += samples
-                total_channel_weight = sum(channel_weight)
                 current_lrs = _optimizer_learning_rates(optimizer)
                 metrics = {
                     "epoch": epoch,
@@ -1279,51 +1209,17 @@ def _run_training_attempt(
                     "memory_shard": int(phase["shard"]),
                     "fraction_start": float(phase["fraction_start"]),
                     "fraction_end": float(phase["fraction_end"]),
-                    "samples": samples,
-                    "n_batches": len(loader),
                     "optimizer_steps": global_step,
                     "effective_full_epochs_completed": total_samples_seen / len(dataset),
-                    **{key: value / max(samples, 1) for key, value in totals.items()},
+                    **epoch_stats.as_metrics(),
                     # Keep learning_rate as a backward-compatible Base-IWG alias.
                     "learning_rate": current_lrs["base_iwg"],
                     "base_learning_rate": current_lrs["base_iwg"],
                     "cma_learning_rate": current_lrs["rg_cma"],
                     "optimizer_learning_rates": current_lrs,
                     "epoch_time_s": epoch_time,
-                    "gate_accuracy": sum(channel_correct)
-                    / max(total_channel_weight, 1.0),
-                    "motion_mae": channel_abs_error[0]
-                    / max(channel_weight[0], 1.0),
-                    "appearance_mae": channel_abs_error[1]
-                    / max(channel_weight[1], 1.0),
-                    "motion_attention_entropy": motion_entropy / max(samples, 1),
-                    "appearance_attention_entropy": appearance_entropy
-                    / max(samples, 1),
-                    "motion_history_attention": (
-                        motion_positions / max(samples, 1)
-                    ).tolist(),
-                    "appearance_history_attention": (
-                        appearance_positions / max(samples, 1)
-                    ).tolist(),
+                    "log_interval": epoch_log_interval,
                 }
-                if not model.uses_full_history_cma:
-                    metrics["cross_modal_attention"] = (
-                        cross_matrix / max(samples, 1)
-                    ).tolist()
-                if model.uses_bidirectional_history_cma:
-                    metrics["appearance_to_motion_history_attention"] = (
-                        appearance_to_motion_positions / max(samples, 1)
-                    ).tolist()
-                    metrics["motion_to_appearance_history_attention"] = (
-                        motion_to_appearance_positions / max(samples, 1)
-                    ).tolist()
-                if model.uses_full_history_cma:
-                    metrics["appearance_to_motion_6x6_attention"] = (
-                        appearance_to_motion_6x6_matrix / max(samples, 1)
-                    ).tolist()
-                    metrics["motion_to_appearance_6x6_attention"] = (
-                        motion_to_appearance_6x6_matrix / max(samples, 1)
-                    ).tolist()
                 last_metrics = metrics
                 metrics_file.write(json.dumps(metrics, sort_keys=True) + "\n")
                 metrics_file.flush()
@@ -1345,13 +1241,22 @@ def _run_training_attempt(
                         f"time={epoch_time:.1f}s  train_only=true"
                     ),
                 )
-                _write_training_log(
-                    training_log,
-                    (
-                        f"Attention - motion_H={metrics['motion_attention_entropy']:.4f}  "
-                        f"appearance_H={metrics['appearance_attention_entropy']:.4f}"
-                    ),
-                )
+                motion_entropy = metrics["motion_attention_entropy"]
+                appearance_entropy = metrics["appearance_attention_entropy"]
+                if motion_entropy is None or appearance_entropy is None:
+                    attention_message = (
+                        "Attention - motion_H=n/a  appearance_H=n/a  "
+                        f"diagnostic_interval={metrics['diagnostic_interval']}  "
+                        f"diagnostic_batches={metrics['diagnostic_batches']}"
+                    )
+                else:
+                    attention_message = (
+                        f"Attention - motion_H={motion_entropy:.4f}  "
+                        f"appearance_H={appearance_entropy:.4f}  "
+                        f"diagnostic_interval={metrics['diagnostic_interval']}  "
+                        f"diagnostic_batches={metrics['diagnostic_batches']}"
+                    )
+                _write_training_log(training_log, attention_message)
                 progress = {
                     "epoch": epoch,
                     "global_step": global_step,
@@ -1459,6 +1364,8 @@ def _validate_formal_config(config: dict[str, Any]) -> int:
             )
     record_checkpoint_plan(config)
     _resolved_schedule_settings(config)
+    config["diagnostic_interval"] = resolve_diagnostic_interval(config)
+    config["log_interval"] = resolve_log_interval_setting(config)
     return batch_size
 
 

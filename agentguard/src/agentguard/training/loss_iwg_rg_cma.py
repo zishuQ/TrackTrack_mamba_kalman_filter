@@ -74,6 +74,86 @@ def _masked_quantile(
     return torch.quantile(selected, quantile)
 
 
+@torch.no_grad()
+def _correction_diagnostics(
+    *,
+    outputs: dict[str, torch.Tensor],
+    gate_weights: torch.Tensor,
+    correction_target: torch.Tensor,
+    confidence: torch.Tensor,
+    unlock: torch.Tensor,
+    correction_bound: float,
+    compute_expensive: bool = True,
+) -> dict[str, torch.Tensor]:
+    """Logging-only correction stats. Never attached to the training graph."""
+    correction_abs = outputs["gate_correction"].float().abs()
+    correction_target_abs = correction_target.float().abs()
+    correction_error = (
+        outputs["gate_correction"].float() - correction_target.float()
+    ).abs()
+    correction_improvement = correction_target_abs - correction_error
+    correction_help = (correction_improvement > 1e-6).float()
+    correction_harm = (correction_improvement < -1e-6).float()
+    correction_scale = outputs.get(
+        "correction_scale", torch.ones_like(outputs["gate_correction"])
+    ).float()
+    valid_correction_mask = gate_weights > 0
+    sign_mask = valid_correction_mask & (correction_target_abs > 1e-6)
+    correction_nonzero = (correction_abs > 1e-6).float()
+    correction_active = (correction_abs >= 0.10 * correction_bound).float()
+    correction_target_nonzero = (correction_target_abs > 1e-6).float()
+    correction_saturated = (correction_abs >= 0.95 * correction_bound).float()
+    diagnostics = {
+        "correction_improvement_mean": _weighted_mean(
+            correction_improvement, gate_weights
+        ),
+        "correction_help_rate": _weighted_mean(correction_help, gate_weights),
+        "correction_harm_rate": _weighted_mean(correction_harm, gate_weights),
+        "correction_scale_mean": _weighted_mean(correction_scale, gate_weights),
+        "correction_target_confidence_mean": _weighted_mean(
+            confidence, gate_weights
+        ),
+        "correction_unlock_mean": _weighted_mean(unlock, gate_weights),
+        "correction_unlock_rate": _weighted_mean(
+            (unlock >= 0.5).float(), gate_weights
+        ),
+        "motion_correction_scale_mean": _weighted_mean(
+            correction_scale[:, 0], gate_weights[:, 0]
+        ),
+        "appearance_correction_scale_mean": _weighted_mean(
+            correction_scale[:, 1], gate_weights[:, 1]
+        ),
+        "correction_abs_mean": _weighted_mean(correction_abs, gate_weights),
+        "correction_target_abs_mean": _weighted_mean(
+            correction_target_abs, gate_weights
+        ),
+        "correction_nonzero_rate": _weighted_mean(
+            correction_nonzero, gate_weights
+        ),
+        "correction_active_rate": _weighted_mean(
+            correction_active, gate_weights
+        ),
+        "correction_target_nonzero_rate": _weighted_mean(
+            correction_target_nonzero, gate_weights
+        ),
+        "correction_saturation_rate": _weighted_mean(
+            correction_saturated, gate_weights
+        ),
+        "correction_sign_agreement": _weighted_mean(
+            ((outputs["gate_correction"].float() * correction_target) > 0).float(),
+            gate_weights * sign_mask.float(),
+        ),
+    }
+    if compute_expensive:
+        diagnostics["correction_abs_p50"] = _masked_quantile(
+            correction_abs, valid_correction_mask, 0.50
+        )
+        diagnostics["correction_abs_p95"] = _masked_quantile(
+            correction_abs, valid_correction_mask, 0.95
+        )
+    return diagnostics
+
+
 def validate_iwg_rg_cma_loss_config(
     *,
     residual_beta: float = 1.0,
@@ -121,6 +201,8 @@ def _probability_gate_loss(
 def compute_iwg_without_cma_loss(
     outputs: dict[str, torch.Tensor],
     batch: dict[str, torch.Tensor],
+    *,
+    compute_expensive_diagnostics: bool = True,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Train the base IWG while removing every CMA objective.
 
@@ -186,11 +268,13 @@ def compute_iwg_without_cma_loss(
     total = base_loss + 0.1 * policy_loss + 0.2 * cue_loss + 0.1 * risk_loss
     correction = torch.zeros_like(outputs["base_gate"])
     correction_target = torch.zeros_like(correction)
-    correction_scale = torch.ones_like(correction)
-    valid_correction_mask = gate_weights > 0
-    correction_improvement = torch.zeros_like(correction)
     zero = total * 0.0
-    return total, {
+    diagnostic_outputs = {
+        **outputs,
+        "gate_correction": correction,
+        "correction_scale": torch.ones_like(correction),
+    }
+    components = {
         "loss": total,
         "base_loss": base_loss,
         "base_bce": base_bce,
@@ -204,36 +288,20 @@ def compute_iwg_without_cma_loss(
         "residual_loss": zero,
         "revision_loss": zero,
         "no_harm_loss": zero,
-        "correction_improvement_mean": zero,
-        "correction_help_rate": zero,
-        "correction_harm_rate": zero,
-        "correction_scale_mean": _weighted_mean(correction_scale, gate_weights),
-        "correction_target_confidence_mean": zero,
-        "correction_unlock_mean": zero,
-        "correction_unlock_rate": zero,
         "correction_abstain_loss": zero,
-        "motion_correction_scale_mean": _weighted_mean(
-            correction_scale[:, 0], gate_weights[:, 0]
-        ),
-        "appearance_correction_scale_mean": _weighted_mean(
-            correction_scale[:, 1], gate_weights[:, 1]
-        ),
-        "correction_abs_mean": _weighted_mean(correction, gate_weights),
-        "correction_abs_p50": _masked_quantile(
-            correction, valid_correction_mask, 0.50
-        ),
-        "correction_abs_p95": _masked_quantile(
-            correction, valid_correction_mask, 0.95
-        ),
-        "correction_target_abs_mean": _weighted_mean(
-            correction_target, gate_weights
-        ),
-        "correction_nonzero_rate": zero,
-        "correction_active_rate": zero,
-        "correction_target_nonzero_rate": zero,
-        "correction_saturation_rate": zero,
-        "correction_sign_agreement": zero,
     }
+    components.update(
+        _correction_diagnostics(
+            outputs=diagnostic_outputs,
+            gate_weights=gate_weights,
+            correction_target=correction_target,
+            confidence=torch.zeros_like(gate_weights),
+            unlock=torch.zeros_like(gate_weights),
+            correction_bound=RG_CMA_CORRECTION_BOUND,
+            compute_expensive=compute_expensive_diagnostics,
+        )
+    )
+    return total, components
 
 
 def compute_iwg_rg_cma_loss(
@@ -247,6 +315,7 @@ def compute_iwg_rg_cma_loss(
     hard_example_gain: float = 0.0,
     no_harm_weight: float = 0.0,
     residual_target_mode: str = "safe",
+    compute_expensive_diagnostics: bool = True,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     validate_iwg_rg_cma_loss_config(
         residual_beta=residual_beta,
@@ -418,26 +487,6 @@ def compute_iwg_rg_cma_loss(
     no_harm_loss = _weighted_mean(
         F.relu(correction_error - abstain_error), diagnostic_weights
     )
-    correction_improvement = abstain_error - correction_error
-    correction_help = (correction_improvement > 1e-6).float()
-    correction_harm = (correction_improvement < -1e-6).float()
-    correction_scale = outputs.get(
-        "correction_scale", torch.ones_like(outputs["gate_correction"])
-    ).float()
-    valid_correction_mask = gate_weights > 0
-    sign_mask = valid_correction_mask & (correction_target_abs > 1e-6)
-    correction_nonzero = (correction_abs > 1e-6).float()
-    correction_active = (
-        correction_abs >= 0.10 * correction_bound
-    ).float()
-    correction_target_nonzero = (correction_target_abs > 1e-6).float()
-    correction_saturated = (
-        correction_abs >= 0.95 * correction_bound
-    ).float()
-    sign_agreement = _weighted_mean(
-        ((outputs["gate_correction"].float() * correction_target) > 0).float(),
-        gate_weights * sign_mask.float(),
-    )
     total = (
         base_loss
         + 0.1 * policy_loss
@@ -448,7 +497,7 @@ def compute_iwg_rg_cma_loss(
         + float(revision_weight) * revision_loss
         + float(no_harm_weight) * no_harm_loss
     )
-    return total, {
+    components = {
         "loss": total,
         "base_loss": base_loss,
         "base_bce": base_bce,
@@ -462,47 +511,17 @@ def compute_iwg_rg_cma_loss(
         "residual_loss": residual_loss,
         "revision_loss": revision_loss,
         "no_harm_loss": no_harm_loss,
-        "correction_improvement_mean": _weighted_mean(
-            correction_improvement, gate_weights
-        ),
-        "correction_help_rate": _weighted_mean(correction_help, gate_weights),
-        "correction_harm_rate": _weighted_mean(correction_harm, gate_weights),
-        "correction_scale_mean": _weighted_mean(correction_scale, gate_weights),
-        "correction_target_confidence_mean": _weighted_mean(
-            confidence, gate_weights
-        ),
-        "correction_unlock_mean": _weighted_mean(unlock, gate_weights),
-        "correction_unlock_rate": _weighted_mean(
-            (unlock >= 0.5).float(), gate_weights
-        ),
         "correction_abstain_loss": revision_loss,
-        "motion_correction_scale_mean": _weighted_mean(
-            correction_scale[:, 0], gate_weights[:, 0]
-        ),
-        "appearance_correction_scale_mean": _weighted_mean(
-            correction_scale[:, 1], gate_weights[:, 1]
-        ),
-        "correction_abs_mean": _weighted_mean(correction_abs, gate_weights),
-        "correction_abs_p50": _masked_quantile(
-            correction_abs, valid_correction_mask, 0.50
-        ),
-        "correction_abs_p95": _masked_quantile(
-            correction_abs, valid_correction_mask, 0.95
-        ),
-        "correction_target_abs_mean": _weighted_mean(
-            correction_target_abs, gate_weights
-        ),
-        "correction_nonzero_rate": _weighted_mean(
-            correction_nonzero, gate_weights
-        ),
-        "correction_active_rate": _weighted_mean(
-            correction_active, gate_weights
-        ),
-        "correction_target_nonzero_rate": _weighted_mean(
-            correction_target_nonzero, gate_weights
-        ),
-        "correction_saturation_rate": _weighted_mean(
-            correction_saturated, gate_weights
-        ),
-        "correction_sign_agreement": sign_agreement,
     }
+    components.update(
+        _correction_diagnostics(
+            outputs=outputs,
+            gate_weights=gate_weights,
+            correction_target=correction_target,
+            confidence=confidence,
+            unlock=unlock,
+            correction_bound=correction_bound,
+            compute_expensive=compute_expensive_diagnostics,
+        )
+    )
+    return total, components
