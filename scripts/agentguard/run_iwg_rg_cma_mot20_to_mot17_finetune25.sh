@@ -28,7 +28,7 @@ if [[ -e "${RUN_ROOT}/running" || -e "${LAST_CHECKPOINT}" ]]; then
 fi
 
 "${PY}" -c \
-  "from agentguard.datasets.iwg_rg_cma_dataset import StreamingIWGRGCMADataset; d=StreamingIWGRGCMADataset(r'${DATASET_DIR}', max_samples=1); assert d.index_format == 'compact_memmap_v1', d.index_format; print('MOT17 compact dataset preflight passed'); d.close()"
+  "from agentguard.datasets.iwg_rg_cma_dataset import inspect_packed_train_data; import json; print(json.dumps(inspect_packed_train_data(r'${DATASET_DIR}'), indent=2, sort_keys=True))"
 
 mkdir -p "${CHECKPOINT_DIR}" "${LOG_DIR}" "${PROVENANCE_DIR}"
 touch "${RUN_ROOT}/running"

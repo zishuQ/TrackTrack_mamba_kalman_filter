@@ -15,6 +15,7 @@ first checkpoint is written, the same run directory can be resumed.
 
 from __future__ import annotations
 
+import argparse
 import csv
 import hashlib
 import json
@@ -30,8 +31,19 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "agentguard" / "src"))
+from agentguard.cli import validate_train_iwg_rg_cma_command
+from agentguard.datasets.iwg_rg_cma_dataset import inspect_packed_train_data
+
 PYTHON = ROOT / ".venv" / "bin" / "python"
-DATASET_DIR = ROOT / "outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_compact"
+DEFAULT_DATASET_DIR = (
+    ROOT / "outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_compact"
+)
+DATASET_DIR = Path(
+    os.environ.get("AGENTGUARD_DATASET_DIR")
+    or os.environ.get("MOT17_DATASET_DIR")
+    or str(DEFAULT_DATASET_DIR)
+)
 DETECTION_CACHE_ROOT = ROOT / "outputs/agentguard/detection_cache"
 TRACKER_ROOT = ROOT / "outputs/3. track"
 DATA_ROOT = Path("/home/shang/datasets")
@@ -274,14 +286,62 @@ def _write_summary_csv(rows: list[dict[str, Any]], path: Path) -> None:
         writer.writerows(merged)
 
 
-def _protocol() -> dict[str, Any]:
+def _training_command(dataset_dir: Path, checkpoint_dir: Path) -> list[str]:
+    return [
+        str(PYTHON),
+        "-u",
+        "-m",
+        "agentguard.cli",
+        "train_iwg_rg_cma",
+        "--dataset-dir",
+        str(dataset_dir),
+        "--checkpoint-dir",
+        str(checkpoint_dir),
+        "--checkpoint-every",
+        "5",
+        "--device",
+        "cuda",
+        "--epochs",
+        "100",
+        "--batch-size",
+        "1024",
+        "--num-workers",
+        "4",
+        "--lr",
+        "0.0001",
+        "--weight-decay",
+        "0.0001",
+        "--warmup-epochs",
+        "1",
+        "--grad-clip",
+        "1.0",
+        "--seed",
+        "42",
+        "--correction-bound",
+        "0.05",
+        "--context-size",
+        "6",
+        "--architecture-variant",
+        "without-cma",
+        "--memory-shards",
+        "1",
+        "--epochs-per-shard",
+        "100",
+        "--shard-cycles",
+        "1",
+        "--sequence-sampling",
+        "sample-proportional",
+    ]
+
+
+def _protocol(dataset_dir: Path) -> dict[str, Any]:
     return {
         "experiment_id": RUN_ID,
         "dataset": "MOT17",
         "split": "all",
         "sequence_set": list(SEQUENCES),
         "training": {
-            "dataset_dir": str(DATASET_DIR.resolve()),
+            "dataset_dir": str(dataset_dir.resolve()),
             "architecture_variant": "without-cma",
             "epochs": 100,
             "selected_epoch": 65,
@@ -319,10 +379,27 @@ def _protocol() -> dict[str, Any]:
     }
 
 
-def main() -> None:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run the MOT17 without-CMA ablation."
+    )
+    parser.add_argument(
+        "--dataset-dir",
+        type=Path,
+        default=DATASET_DIR,
+        help="Packed train_data or train_data_v2 directory. "
+        "Also honors AGENTGUARD_DATASET_DIR / MOT17_DATASET_DIR.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = _parse_args(argv)
+    dataset_dir = Path(args.dataset_dir).resolve()
     if not PYTHON.is_file():
         raise FileNotFoundError(PYTHON)
-    for path in (DATASET_DIR / "metadata.json", BASELINE_CHECKPOINT):
+    inspect_packed_train_data(dataset_dir)
+    for path in (BASELINE_CHECKPOINT,):
         if not path.is_file():
             raise FileNotFoundError(path)
     for folder in (TRACKTRACK_TRACKER_FOLDER, BASELINE_TRACKER_FOLDER):
@@ -387,14 +464,14 @@ def main() -> None:
     RUN_ROOT.mkdir(parents=True, exist_ok=True)
     (RUN_ROOT / "logs").mkdir(exist_ok=True)
     (RUN_ROOT / "provenance").mkdir(exist_ok=True)
-    _write_json(RUN_ROOT / "protocol.json", _protocol())
+    _write_json(RUN_ROOT / "protocol.json", _protocol(dataset_dir))
     git_commit = _git_value(["git", "rev-parse", "HEAD"])
     (RUN_ROOT / "provenance" / "git_commit.txt").write_text(git_commit + "\n")
     (RUN_ROOT / "provenance" / "git_status_porcelain.txt").write_text(
         _git_value(["git", "status", "--porcelain"], "unavailable") + "\n"
     )
     (RUN_ROOT / "provenance" / "dataset_sha256.txt").write_text(
-        _sha256(DATASET_DIR / "metadata.json") + "  metadata.json\n"
+        _sha256(dataset_dir / "metadata.json") + "  metadata.json\n"
     )
     (RUN_ROOT / "provenance" / "baseline_checkpoint_sha256.txt").write_text(
         _sha256(BASELINE_CHECKPOINT)
@@ -412,54 +489,29 @@ def main() -> None:
         log_path=RUN_ROOT / "logs" / "baseline_eval.log",
     )
 
-    train_command = [
-        str(PYTHON),
-        "-u",
-        "-m",
-        "agentguard.cli",
-        "train_iwg_rg_cma",
-        "--dataset-dir",
-        str(DATASET_DIR),
-        "--checkpoint-dir",
-        str(CHECKPOINT_DIR),
-        "--checkpoint-every",
-        "5",
-        "--device",
-        "cuda",
-        "--epochs",
-        "100",
-        "--batch-size",
-        "1024",
-        "--num-workers",
-        "4",
-        "--lr",
-        "0.0001",
-        "--weight-decay",
-        "0.0001",
-        "--warmup-epochs",
-        "1",
-        "--grad-clip",
-        "1.0",
-        "--seed",
-        "42",
-        "--correction-bound",
-        "0.05",
-        "--context-size",
-        "6",
-        "--architecture-variant",
-        "without-cma",
-        "--memory-shards",
-        "1",
-        "--epochs-per-shard",
-        "100",
-        "--shard-cycles",
-        "1",
-        "--sequence-sampling",
-        "sample-proportional",
-    ]
+    train_command = _training_command(dataset_dir, CHECKPOINT_DIR)
     (RUN_ROOT / "provenance" / "train.command.txt").write_text(
         shlex.join(train_command) + "\n"
     )
+    if not SELECTED_CHECKPOINT.is_file():
+        try:
+            train_config = validate_train_iwg_rg_cma_command(
+                train_command, selected_epoch=65
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "MOT17 without-CMA ablation command is incompatible with the "
+                "current train_iwg_rg_cma CLI/contract. architecture_variant="
+                "'without-cma' is retained because remapping it would change "
+                "the ablation meaning; current supported variants are legacy "
+                "and the structural RG-CMA options. "
+                f"Parser/config error: {exc}"
+            ) from exc
+        protocol = _protocol(dataset_dir)
+        protocol["training"]["checkpoint_epochs"] = list(
+            train_config["checkpoint_epochs"]
+        )
+        _write_json(RUN_ROOT / "protocol.json", protocol)
     if SELECTED_CHECKPOINT.is_file():
         print(
             f"Using existing epoch 65 checkpoint; skipping training: "
@@ -484,7 +536,7 @@ def main() -> None:
         "--checkpoint",
         str(SELECTED_CHECKPOINT),
         "--dataset-dir",
-        str(DATASET_DIR),
+        str(dataset_dir),
         "--device",
         "cpu",
         "--max-batches",

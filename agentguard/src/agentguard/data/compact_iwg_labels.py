@@ -119,11 +119,21 @@ def build_current_rollout_compact_labels_for_sequence(
     output_root: str | Path,
     future_frames: int = 5,
     max_events: int = 0,
+    motion_normalization: str = "pred",
+    prototype_mode: str = "standard",
 ) -> dict[str, Any]:
     from agentguard.data.rollout_label_builder import (
         build_compact_rollout_labels_for_sequence,
     )
 
+    if motion_normalization not in {"pred", "gt"}:
+        raise ValueError(f"unknown motion normalization: {motion_normalization}")
+    if prototype_mode not in {"standard", "leave_one_out"}:
+        raise ValueError(f"unknown prototype mode: {prototype_mode}")
+    generation_rules = {
+        "motion_normalization": motion_normalization,
+        "prototype_mode": prototype_mode,
+    }
     event_cache_dir = Path(event_cache_dir).resolve()
     detection_cache_dir = Path(detection_cache_dir).resolve()
     gt_root = Path(gt_root).resolve()
@@ -159,6 +169,9 @@ def build_current_rollout_compact_labels_for_sequence(
             and existing.get("motion_label_mode", "nsa_rollout")
             == motion_label_mode
             and int(existing.get("max_events", 0)) == int(max_events)
+            and existing.get("generation_rules", {
+                "motion_normalization": "pred", "prototype_mode": "standard",
+            }) == generation_rules
         ):
             return existing
         raise FileExistsError(f"refusing to overwrite stale compact labels: {final_dir}")
@@ -171,6 +184,8 @@ def build_current_rollout_compact_labels_for_sequence(
         gt_root,
         future_frames=int(future_frames),
         max_events=int(max_events),
+        motion_normalization=motion_normalization,
+        prototype_mode=prototype_mode,
     )
     for index, label in enumerate(labels):
         try:
@@ -251,6 +266,7 @@ def build_current_rollout_compact_labels_for_sequence(
     )
     manifest = {
         "complete": True,
+        "generation_rules": generation_rules,
         "dataset": dataset,
         "sequence": sequence,
         "event_cache_dir": str(event_cache_dir),

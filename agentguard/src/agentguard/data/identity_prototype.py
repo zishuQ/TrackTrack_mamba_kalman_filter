@@ -22,6 +22,20 @@ class IdentityPrototypeBuilder:
     _TOP_KEEP_RATIO: float = 0.7
 
     @staticmethod
+    def build_leave_one_out(
+        features_by_detection: dict[int, np.ndarray],
+        excluded_detection_index: int,
+    ) -> np.ndarray | None:
+        """Exclude a unique detection before recomputing mean and top-70% trim."""
+        features = [
+            feature for index, feature in features_by_detection.items()
+            if index != excluded_detection_index
+        ]
+        if len(features) < 3:
+            return None
+        return IdentityPrototypeBuilder.build_prototype(features)
+
+    @staticmethod
     def build_prototype(features: List[np.ndarray]) -> np.ndarray:
         """Build a single prototype from a list of ReID feature vectors.
 

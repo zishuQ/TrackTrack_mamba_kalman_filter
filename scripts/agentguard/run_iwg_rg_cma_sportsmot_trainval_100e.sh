@@ -99,7 +99,7 @@ if [[ ! -f "${DATASET_DIR}/metadata.json" ]]; then
     --max-frame-gap 30 \
     2>&1 | tee "${LOG_DIR}/build_dataset.log"
 else
-  "${PY}" -c "from agentguard.datasets.iwg_rg_cma_dataset import StreamingIWGRGCMADataset; d=StreamingIWGRGCMADataset('${DATASET_DIR}', max_samples=1); print(d.metadata['dataset_sha256'], d.metadata['num_train_samples']); d.close()" \
+  "${PY}" -c "from agentguard.datasets.iwg_rg_cma_dataset import inspect_packed_train_data; import json; print(json.dumps(inspect_packed_train_data('${DATASET_DIR}'), indent=2, sort_keys=True))" \
     2>&1 | tee "${LOG_DIR}/build_dataset.log"
 fi
 

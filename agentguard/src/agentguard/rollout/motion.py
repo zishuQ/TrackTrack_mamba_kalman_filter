@@ -11,11 +11,20 @@ from agentguard.rollout.context import RolloutContext
 from agentguard.rollout.losses import motion_frame_loss
 
 
+def _motion_loss(pred_box, gt_box, normalization: str) -> float:
+    if normalization == "gt":
+        return motion_frame_loss(pred_box, gt_box)
+    if normalization == "pred":
+        return motion_frame_loss(gt_box, pred_box)
+    raise ValueError(f"unknown motion normalization: {normalization}")
+
+
 def compute_motion_benefit(
     ctx: RolloutContext,
     motion_model: NSAKalmanFilter,
     future_frames: int = 5,
     include_current: bool = False,
+    normalization: str = "pred",
 ) -> Tuple[float, List[float], List[float], np.ndarray]:
     """Compute motion benefit with proper GT/oracle separation.
 
@@ -58,6 +67,8 @@ def compute_motion_benefit(
     valid_mask : ndarray of bool, shape (future_frames,)
         Whether each future frame had a GT box available for loss computation.
     """
+    if normalization not in {"pred", "gt"}:
+        raise ValueError(f"unknown motion normalization: {normalization}")
     pre_state = ctx.pre_update_state
     if pre_state is None:
         raise ValueError("Context has no pre_update_state — cannot compute motion benefit.")
@@ -98,8 +109,8 @@ def compute_motion_benefit(
         if current_valid and write_mean is not None and skip_mean is not None:
             write_box = motion_model.mean_to_bbox(write_mean)
             skip_box = motion_model.mean_to_bbox(skip_mean)
-            write_losses.append(motion_frame_loss(ctx.current_gt_box, write_box))
-            skip_losses.append(motion_frame_loss(ctx.current_gt_box, skip_box))
+            write_losses.append(_motion_loss(write_box, ctx.current_gt_box, normalization))
+            skip_losses.append(_motion_loss(skip_box, ctx.current_gt_box, normalization))
         else:
             write_losses.append(0.0)
             skip_losses.append(0.0)
@@ -111,14 +122,14 @@ def compute_motion_benefit(
 
         # --- Write branch step ---
         w_loss, w_mean, w_cov = _rollout_step(
-            write_mean, write_cov, warp, gt_box, oracle_det, motion_model
+            write_mean, write_cov, warp, gt_box, oracle_det, motion_model, normalization
         )
         write_mean, write_cov = w_mean, w_cov
         write_losses.append(w_loss)
 
         # --- Skip branch step ---
         s_loss, s_mean, s_cov = _rollout_step(
-            skip_mean, skip_cov, warp, gt_box, oracle_det, motion_model
+            skip_mean, skip_cov, warp, gt_box, oracle_det, motion_model, normalization
         )
         skip_mean, skip_cov = s_mean, s_cov
         skip_losses.append(s_loss)
@@ -209,6 +220,7 @@ def _rollout_step(
     gt_box: Optional[np.ndarray],
     oracle_det: Optional[DetectionObservation],
     motion_model: NSAKalmanFilter,
+    normalization: str = "pred",
 ) -> Tuple[float, Optional[np.ndarray], Optional[np.ndarray]]:
     """Run a single rollout step (warp -> predict -> [optional update]).
 
@@ -243,7 +255,7 @@ def _rollout_step(
 
     # 3. Compute loss against GT box (not oracle)
     if gt_box is not None:
-        loss = motion_frame_loss(gt_box, pred_box)
+        loss = _motion_loss(pred_box, gt_box, normalization)
     else:
         loss = 0.0
 

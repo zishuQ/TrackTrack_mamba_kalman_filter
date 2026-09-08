@@ -12,6 +12,11 @@ from __future__ import annotations
 import json
 import shlex
 from pathlib import Path
+import sys
+
+ROOT_FOR_IMPORT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT_FOR_IMPORT / "agentguard" / "src"))
+from agentguard.datasets.iwg_rg_cma_dataset import inspect_packed_train_data
 
 from run_mot17_without_cma_ablation import (
     BASELINE_CHECKPOINT,
@@ -106,8 +111,7 @@ def _protocol(experiment: dict[str, str]) -> dict:
 
 
 def main() -> None:
-    if not (DATASET_DIR / "metadata.json").is_file():
-        raise FileNotFoundError(DATASET_DIR / "metadata.json")
+    inspect_packed_train_data(DATASET_DIR)
     if not BASELINE_CHECKPOINT.is_file():
         raise FileNotFoundError(BASELINE_CHECKPOINT)
     for folder in (TRACKTRACK_TRACKER_FOLDER, BASELINE_TRACKER_FOLDER):

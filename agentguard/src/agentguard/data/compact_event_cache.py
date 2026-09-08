@@ -352,6 +352,7 @@ class CompactEventCacheSink:
             "feature_schema_sha256": self.feature_schema_sha256,
             "detection_cache_manifest_sha256": self.detection_cache_manifest_sha256,
             "tracker_config_sha256": self.tracker_config_sha256,
+            "tracker_config": self.tracker_config,
             "processed_frames": self._num_frames,
             "total_sequence_frames": self.total_sequence_frames or self._num_frames,
             "image_width": self.image_width,

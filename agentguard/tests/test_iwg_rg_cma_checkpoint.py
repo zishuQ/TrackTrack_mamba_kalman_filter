@@ -236,8 +236,21 @@ def test_iwg_rg_cma_optimizer_group_diagnostics_and_lr_fallback():
 
 
 def test_extended_training_has_fixed_checkpoint_cadence():
+    from agentguard.training.train_iwg_rg_cma import numbered_checkpoint_epochs
+
     assert FORMAL_CHECKPOINT_EPOCHS[100] == {25, 50, 75, 100}
     assert FORMAL_CHECKPOINT_EPOCHS[200] == {50, 100, 150, 200}
+    assert numbered_checkpoint_epochs(100) == (25, 50, 75, 100)
+    assert numbered_checkpoint_epochs(200) == (50, 100, 150, 200)
+    assert 65 in numbered_checkpoint_epochs(100, checkpoint_every=5)
+    assert numbered_checkpoint_epochs(100, checkpoint_every=5) == tuple(
+        range(5, 101, 5)
+    )
+    assert numbered_checkpoint_epochs(100, checkpoint_every=25) == (25, 50, 75, 100)
+    assert numbered_checkpoint_epochs(25, warm_start=True) == (5, 10, 25)
+    assert numbered_checkpoint_epochs(
+        25, checkpoint_every=5, warm_start=True
+    ) == (5, 10, 15, 20, 25)
 
 
 def test_iwg_rg_cma_warm_start_has_fixed_finetune_config():

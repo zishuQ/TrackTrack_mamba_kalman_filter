@@ -22,10 +22,12 @@ _BENEFIT_EPS: float = 1e-3
 _BENEFIT_CLIP_MAX: float = 0.1
 
 
-def compute_dataset_stats(all_benefits: Dict[str, List[float]]) -> Dict[str, float]:
+def compute_dataset_stats(all_benefits: Dict[str, List[float]], *, persist: bool = True) -> Dict[str, float]:
     tau_m = _compute_tau(all_benefits.get("motion_benefits", []))
     tau_a = _compute_tau(all_benefits.get("appearance_benefits", []))
     stats = {"tau_motion": tau_m, "tau_appearance": tau_a}
+    if not persist:
+        return stats
 
     dataset_name = os.environ.get("AG_GUARD_DATASET", "default")
     save_dir = Path("outputs") / "agentguard" / "labels" / dataset_name

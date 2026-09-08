@@ -24,6 +24,9 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "agentguard" / "src"))
+from agentguard.cli import validate_train_iwg_rg_cma_command
+from agentguard.datasets.iwg_rg_cma_dataset import inspect_packed_train_data
 PYTHON = ROOT / ".venv" / "bin" / "python"
 TRACKER_DIR = ROOT / "3. Tracker"
 GENERALIZATION_ROOT = ROOT / "outputs" / "agentguard" / "generalization"
@@ -33,12 +36,23 @@ EVENT_CACHE_ROOT = ROOT / "outputs" / "agentguard" / "event_cache_v3_iwg_v2"
 DETECTION_CACHE_ROOT = ROOT / "outputs" / "agentguard" / "detection_cache"
 DATA_ROOT = Path("/home/shang/datasets")
 
-MOT17_DATASET_DIR = DATASET_ROOT / "MOT17" / "nsa_all_v3_compact"
-SPORTSMOT_TRAIN_DATASET_DIR = (
-    DATASET_ROOT / "SportsMOT" / "nsa_train_v3_compact"
+MOT17_DATASET_DIR = Path(
+    os.environ.get(
+        "MOT17_DATASET_DIR",
+        str(DATASET_ROOT / "MOT17" / "nsa_all_v3_compact"),
+    )
 )
-SPORTSMOT_TRAINVAL_DATASET_DIR = (
-    DATASET_ROOT / "SportsMOT" / "nsa_trainval_v3_compact"
+SPORTSMOT_TRAIN_DATASET_DIR = Path(
+    os.environ.get(
+        "SPORTSMOT_TRAIN_DATASET_DIR",
+        str(DATASET_ROOT / "SportsMOT" / "nsa_train_v3_compact"),
+    )
+)
+SPORTSMOT_TRAINVAL_DATASET_DIR = Path(
+    os.environ.get(
+        "SPORTSMOT_TRAINVAL_DATASET_DIR",
+        str(DATASET_ROOT / "SportsMOT" / "nsa_trainval_v3_compact"),
+    )
 )
 SPORTSMOT_TRAIN_LABEL_DIR = LABEL_ROOT / "SportsMOT" / "nsa_train_v3_compact"
 
@@ -192,15 +206,13 @@ def _ensure_sportsmot_train_dataset(*, log_path: Path) -> None:
     if SPORTSMOT_TRAIN_DATASET_DIR.is_file():
         raise RuntimeError(f"dataset path is a file: {SPORTSMOT_TRAIN_DATASET_DIR}")
     if (SPORTSMOT_TRAIN_DATASET_DIR / "metadata.json").is_file():
-        metadata = json.loads(
-            (SPORTSMOT_TRAIN_DATASET_DIR / "metadata.json").read_text()
-        )
+        report = inspect_packed_train_data(SPORTSMOT_TRAIN_DATASET_DIR)
         expected = {"dataset": "SportsMOT", "split": "train", "context_size": CONTEXT_SIZE}
         for key, value in expected.items():
-            if metadata.get(key) != value:
+            if report.get(key) != value:
                 raise ValueError(
                     f"existing SportsMOT train dataset has {key}="
-                    f"{metadata.get(key)!r}, expected {value!r}"
+                    f"{report.get(key)!r}, expected {value!r}"
                 )
         return
 
@@ -474,16 +486,14 @@ def _run_experiment(experiment: dict[str, Any], *, git_commit: str) -> list[dict
             sequences=sequences,
         )
         dataset_metadata = experiment["dataset_dir"] / "metadata.json"
-        if not dataset_metadata.is_file():
-            raise FileNotFoundError(dataset_metadata)
-        metadata = json.loads(dataset_metadata.read_text())
+        dataset_report = inspect_packed_train_data(experiment["dataset_dir"])
         for key, expected in (
             ("context_size", CONTEXT_SIZE),
             ("split", experiment["train_split"]),
         ):
-            if metadata.get(key) != expected:
+            if dataset_report.get(key) != expected:
                 raise ValueError(
-                    f"{dataset_metadata}: {key}={metadata.get(key)!r}, "
+                    f"{dataset_metadata}: {key}={dataset_report.get(key)!r}, "
                     f"expected {expected!r}"
                 )
 
@@ -557,6 +567,12 @@ def _run_experiment(experiment: dict[str, Any], *, git_commit: str) -> list[dict
             except (OSError, ValueError, TypeError):
                 training_complete = False
         train_command = _training_command(experiment, checkpoint_dir)
+        train_config = validate_train_iwg_rg_cma_command(
+            train_command, selected_epoch=SELECTED_EPOCH
+        )
+        protocol["checkpoint_epochs"] = list(train_config["checkpoint_epochs"])
+        protocol["checkpoint_every"] = train_config["checkpoint_every"]
+        _write_json(paths["protocol"], protocol)
         (provenance / "train.command.txt").write_text(shlex.join(train_command) + "\n")
         if training_complete:
             print(f"Reusing completed training: {training_summary_path}", flush=True)
@@ -661,8 +677,7 @@ def main() -> None:
 
     if not PYTHON.is_file():
         raise FileNotFoundError(PYTHON)
-    if not MOT17_DATASET_DIR.joinpath("metadata.json").is_file():
-        raise FileNotFoundError(MOT17_DATASET_DIR / "metadata.json")
+    inspect_packed_train_data(MOT17_DATASET_DIR)
     if not SPORTSMOT_TRAINVAL_DATASET_DIR.joinpath("metadata.json").is_file():
         raise FileNotFoundError(SPORTSMOT_TRAINVAL_DATASET_DIR / "metadata.json")
 

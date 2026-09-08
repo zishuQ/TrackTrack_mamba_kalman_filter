@@ -171,16 +171,23 @@ def build_compact_rollout_labels_for_sequence(
     *,
     max_events: int = 0,
     future_frames: int = 5,
+    motion_normalization: str = "pred",
+    prototype_mode: str = "standard",
+    reader: CompactEventCacheReader | None = None,
+    persist_stats: bool = True,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    reader = CompactEventCacheReader(
-        event_cache_dir,
-        detection_cache_dir,
-        max_cached_shards=16,
+    if motion_normalization not in {"pred", "gt"}:
+        raise ValueError(f"unknown motion normalization: {motion_normalization}")
+    if prototype_mode not in {"standard", "leave_one_out"}:
+        raise ValueError(f"unknown prototype mode: {prototype_mode}")
+    reader = reader if reader is not None else CompactEventCacheReader(
+        event_cache_dir, detection_cache_dir, max_cached_shards=16,
     )
     gt_reader = GTReader(str(gt_root), str(reader.manifest["sequence"]))
     motion_model = NSAKalmanFilter()
     vote_state = TrackIdentityVoteState()
     proto_features: Dict[Tuple[str, int], List[np.ndarray]] = defaultdict(list)
+    unique_proto_features: dict[tuple[str, int], dict[int, np.ndarray]] = defaultdict(dict)
     target_info: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
     try:
@@ -201,9 +208,15 @@ def build_compact_rollout_labels_for_sequence(
                     and detection_iou >= 0.7
                     and event.detection.score >= 0.6
                 ):
-                    proto_features[(event.sequence, detection_gt_id)].append(
-                        event.detection.feature.reshape(-1).astype(np.float32)
-                    )
+                    feature = event.detection.feature.reshape(-1).astype(np.float32)
+                    key = (event.sequence, detection_gt_id)
+                    if prototype_mode == "standard":
+                        proto_features[key].append(feature)
+                    else:
+                        detection_index = int(record["accepted_detection_index"])
+                        if detection_index < 0:
+                            raise ValueError("matched prototype observation has no detection index")
+                        unique_proto_features[key].setdefault(detection_index, feature)
             target_info[(int(record["event_shard_id"]), int(record["event_offset"]))] = {
                 "target_gt_id": target_gt_id,
                 "target_identity_key": identity_key,
@@ -228,7 +241,12 @@ def build_compact_rollout_labels_for_sequence(
             "valid_appearance_labels": 0,
             "future_gt_coverage_count": 0,
             "future_oracle_coverage_count": 0,
-            "prototype_count": len(prototypes),
+            "prototype_count": (
+                len(prototypes) if prototype_mode == "standard"
+                else sum(len(values) >= 3 for values in unique_proto_features.values())
+            ),
+            "motion_normalization": motion_normalization,
+            "prototype_mode": prototype_mode,
             "skipped_unreliable": 0,
             "skipped_invalid": 0,
         }
@@ -259,6 +277,11 @@ def build_compact_rollout_labels_for_sequence(
 
             proto = prototypes.get((event.sequence, int(target_gt_id)))
             accepted_detection_index = int(record.get("accepted_detection_index", -1))
+            if prototype_mode == "leave_one_out":
+                proto = IdentityPrototypeBuilder.build_leave_one_out(
+                    unique_proto_features.get((event.sequence, int(target_gt_id)), {}),
+                    accepted_detection_index,
+                )
             candidate_specs = (
                 [
                     {
@@ -304,6 +327,7 @@ def build_compact_rollout_labels_for_sequence(
                             motion_model,
                             future_frames=future_frames,
                             include_current=True,
+                            normalization=motion_normalization,
                         )
                         motion_valid_count = int(np.asarray(m_mask, dtype=bool).sum())
                         valid_motion = motion_valid_count > 0
@@ -388,7 +412,8 @@ def build_compact_rollout_labels_for_sequence(
                     for b, lbl in zip(appearance_benefits, raw_labels)
                     if lbl["valid_appearance"]
                 ],
-            }
+            },
+            **({"persist": False} if not persist_stats else {}),
         )
         for lbl in raw_labels:
             motion_soft = (

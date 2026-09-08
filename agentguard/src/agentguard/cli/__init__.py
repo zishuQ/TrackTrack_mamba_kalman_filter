@@ -281,7 +281,9 @@ def _cmd_cache_events(args: argparse.Namespace) -> None:
     tracker_args.tai_thr = 0.55
     tracker_args.disable_gmc = False
     tracker_args.kf_type = "nsa"
-    tracker_args.agentguard_mode = "off"
+    # Capture constructs the recorder while preserving pure TrackTrack updates.
+    # 'off' no longer creates an adapter in the current Tracker implementation.
+    tracker_args.agentguard_mode = "capture"
     tracker_args.capture_agentguard_events = True
     tracker_args.no_reid = False
 
@@ -351,7 +353,7 @@ def _cmd_cache_events(args: argparse.Namespace) -> None:
             else ""
         )
         tracker_config = {
-            "agentguard_mode": "off",
+            "agentguard_mode": "capture",
             "capture_agentguard_events": True,
             "schema_version": COMPACT_CACHE_SCHEMA_VERSION,
             "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
@@ -1013,13 +1015,37 @@ def _cmd_build_iwg_rg_cma_data(args: argparse.Namespace) -> None:
     print(json.dumps(metadata, indent=2, sort_keys=True))
 
 
-def _add_train_iwg_rg_cma_parser(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser(
-        "train_iwg_rg_cma",
-        help="Train fixed safe-direct IWG+RG-CMA for 100 or 200 epochs.",
-    )
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"invalid integer: {value!r}") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(
+            f"must be a positive integer, got {parsed}"
+        )
+    return parsed
+
+
+class _RaisingArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise ValueError(message)
+
+
+def _add_train_iwg_rg_cma_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dataset-dir", required=True)
     parser.add_argument("--checkpoint-dir", required=True)
+    parser.add_argument(
+        "--checkpoint-every",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help=(
+            "Additionally save a numbered checkpoint every N epochs. "
+            "Omitted keeps the default 100e/200e/finetune cadence. "
+            "Does not replace last.pt or the final numbered checkpoint."
+        ),
+    )
     parser.add_argument("--device", default="cuda", choices=["cuda"])
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=1024)
@@ -1152,12 +1178,23 @@ def _add_train_iwg_rg_cma_parser(subparsers: argparse._SubParsersAction) -> None
             "budget and samples within sequences with replacement."
         ),
     )
-def _cmd_train_iwg_rg_cma(args: argparse.Namespace) -> None:
-    from agentguard.training.train_iwg_rg_cma import train_iwg_rg_cma
 
-    config = {
+
+def _add_train_iwg_rg_cma_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "train_iwg_rg_cma",
+        help="Train fixed safe-direct IWG+RG-CMA for 100 or 200 epochs.",
+    )
+    _add_train_iwg_rg_cma_arguments(parser)
+
+
+def train_iwg_rg_cma_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    return {
         "dataset_dir": str(Path(args.dataset_dir).resolve()),
         "checkpoint_dir": str(Path(args.checkpoint_dir).resolve()),
+        "checkpoint_every": (
+            None if args.checkpoint_every is None else int(args.checkpoint_every)
+        ),
         "device": args.device,
         "epochs": int(args.epochs),
         "batch_size": int(args.batch_size),
@@ -1194,6 +1231,51 @@ def _cmd_train_iwg_rg_cma(args: argparse.Namespace) -> None:
         "randomize_shard_order": bool(args.randomize_shard_order),
         "sequence_sampling": str(args.sequence_sampling),
     }
+
+
+def parse_train_iwg_rg_cma_command(command: List[str]) -> dict[str, Any]:
+    """Parse a process command list that invokes train_iwg_rg_cma."""
+    argv = [str(item) for item in command]
+    try:
+        index = argv.index("train_iwg_rg_cma")
+    except ValueError as exc:
+        raise ValueError("command does not invoke train_iwg_rg_cma") from exc
+    parser = _RaisingArgumentParser(prog="train_iwg_rg_cma")
+    _add_train_iwg_rg_cma_arguments(parser)
+    args = parser.parse_args(argv[index + 1 :])
+    return train_iwg_rg_cma_config_from_args(args)
+
+
+def validate_train_iwg_rg_cma_command(
+    command: List[str],
+    *,
+    selected_epoch: int | None = None,
+) -> dict[str, Any]:
+    """Parse a train command and check it against the current training contract."""
+    from agentguard.training.train_iwg_rg_cma import (
+        _validate_formal_config,
+        numbered_checkpoint_epochs,
+    )
+
+    config = parse_train_iwg_rg_cma_command(command)
+    _validate_formal_config(config)
+    planned = numbered_checkpoint_epochs(
+        int(config["epochs"]),
+        checkpoint_every=config.get("checkpoint_every"),
+        warm_start=bool(str(config.get("init_checkpoint", "")).strip()),
+    )
+    if selected_epoch is not None and int(selected_epoch) not in planned:
+        raise ValueError(
+            f"selected epoch {int(selected_epoch):03d} would not be saved; "
+            f"checkpoint plan is {[f'{epoch:03d}' for epoch in planned]}"
+        )
+    return config
+
+
+def _cmd_train_iwg_rg_cma(args: argparse.Namespace) -> None:
+    from agentguard.training.train_iwg_rg_cma import train_iwg_rg_cma
+
+    config = train_iwg_rg_cma_config_from_args(args)
     summary = train_iwg_rg_cma(config)
     checkpoint_dir = Path(config["checkpoint_dir"])
     (checkpoint_dir / "training_summary.json").write_text(

@@ -7,7 +7,7 @@ import tempfile
 from bisect import bisect_right
 from collections import deque
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import numpy as np
 import torch
@@ -449,6 +449,170 @@ def accepted_iwg_rg_cma_dataset_schema_sha256(
     )
 COMPACT_INDEX_FORMAT = "compact_memmap_v1"
 PACKED_TRAIN_DATA_FORMAT = "train_data"
+PACKED_TRAIN_DATA_V1_INDEX_FORMAT = "train_data"
+PACKED_TRAIN_DATA_V2_INDEX_FORMAT = "train_data_v2"
+PACKED_TRAIN_DATA_V2_SCHEMA_VERSION = 2
+PACKED_SEQUENCE_FILES = ("data.pt", "reid_features.npy")
+PACKED_V2_SEQUENCE_FILES = ("data.pt", "reid_features.npy", "manifest.json")
+
+
+def identify_packed_train_data(metadata: Mapping[str, Any]) -> str:
+    """Identify packed train_data vs train_data_v2 from metadata, not directory names."""
+    fmt = metadata.get("format")
+    schema_raw = metadata.get("schema_version")
+    index_format = metadata.get("index_format")
+    schema: int | None
+    try:
+        schema = None if schema_raw is None else int(schema_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "incompatible packed train_data metadata: "
+            f"format={fmt!r}, schema_version={schema_raw!r}, "
+            f"index_format={index_format!r}"
+        ) from exc
+    if fmt != PACKED_TRAIN_DATA_FORMAT:
+        extra = ""
+        if fmt == COMPACT_INDEX_FORMAT:
+            extra = (
+                "; this is a legacy compact_memmap_v1 index, which is no longer "
+                "a training input"
+            )
+        raise ValueError(
+            "only packed AgentGuard train_data is supported; "
+            f"got format={fmt!r} (expected {PACKED_TRAIN_DATA_FORMAT!r} with "
+            "schema_version omitted/1 or 2)"
+            + extra
+        )
+    v1_index = index_format in (
+        None,
+        PACKED_TRAIN_DATA_FORMAT,
+        PACKED_TRAIN_DATA_V1_INDEX_FORMAT,
+    )
+    v2_index = index_format in (None, PACKED_TRAIN_DATA_V2_INDEX_FORMAT)
+    if schema == PACKED_TRAIN_DATA_V2_SCHEMA_VERSION:
+        if not v2_index or index_format == PACKED_TRAIN_DATA_V1_INDEX_FORMAT:
+            raise ValueError(
+                "incompatible packed train_data metadata: schema_version=2 but "
+                f"index_format={index_format!r} (expected "
+                f"{PACKED_TRAIN_DATA_V2_INDEX_FORMAT!r})"
+            )
+        return PACKED_TRAIN_DATA_V2_INDEX_FORMAT
+    if schema in (None, 1) and v1_index and index_format != PACKED_TRAIN_DATA_V2_INDEX_FORMAT:
+        return PACKED_TRAIN_DATA_V1_INDEX_FORMAT
+    raise ValueError(
+        "incompatible packed train_data metadata: "
+        f"format={fmt!r}, schema_version={schema_raw!r}, "
+        f"index_format={index_format!r}"
+    )
+
+
+def inspect_packed_train_data(
+    dataset_dir: str | Path,
+    *,
+    detection_cache_root: str | Path | None = None,
+    check_detection: bool = True,
+) -> dict[str, Any]:
+    """Validate packed train_data / train_data_v2 and report the resolved variant."""
+    root = Path(dataset_dir).resolve()
+    metadata_path = root / "metadata.json"
+    if not metadata_path.is_file():
+        raise FileNotFoundError(
+            f"training dataset metadata is missing: {metadata_path}"
+        )
+    try:
+        metadata = json.loads(metadata_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid training dataset metadata JSON: {metadata_path}") from exc
+    if not isinstance(metadata, dict):
+        raise ValueError(f"training dataset metadata must be an object: {metadata_path}")
+    variant = identify_packed_train_data(metadata)
+    schema_version = (
+        PACKED_TRAIN_DATA_V2_SCHEMA_VERSION
+        if variant == PACKED_TRAIN_DATA_V2_INDEX_FORMAT
+        else 1
+    )
+    sequences = list(metadata.get("train_sequences") or [])
+    problems: list[str] = []
+    if not sequences:
+        problems.append("metadata.train_sequences is empty")
+    required_files = (
+        PACKED_V2_SEQUENCE_FILES
+        if variant == PACKED_TRAIN_DATA_V2_INDEX_FORMAT
+        else PACKED_SEQUENCE_FILES
+    )
+    sequence_files: dict[str, list[str]] = {}
+    detection_refs: dict[str, str] = {}
+    for sequence in sequences:
+        sequence_dir = root / str(sequence)
+        present = [
+            name for name in required_files if (sequence_dir / name).is_file()
+        ]
+        sequence_files[str(sequence)] = present
+        missing = [name for name in required_files if name not in present]
+        if missing:
+            problems.append(
+                f"sequence {sequence} is missing {missing} under {sequence_dir}"
+            )
+            continue
+        if variant != PACKED_TRAIN_DATA_V2_INDEX_FORMAT or not check_detection:
+            continue
+        from agentguard.data.train_data_v2 import (
+            check_detection_reference,
+            resolve_detection_dir,
+        )
+
+        sequence_manifest = json.loads((sequence_dir / "manifest.json").read_text())
+        if not isinstance(sequence_manifest, dict):
+            problems.append(f"sequence {sequence} manifest.json is not an object")
+            continue
+        try:
+            identify_packed_train_data(sequence_manifest)
+        except ValueError as exc:
+            problems.append(f"sequence {sequence} manifest is incompatible: {exc}")
+            continue
+        if int(sequence_manifest.get("schema_version", -1)) != PACKED_TRAIN_DATA_V2_SCHEMA_VERSION:
+            problems.append(
+                f"sequence {sequence} manifest schema_version is not "
+                f"{PACKED_TRAIN_DATA_V2_SCHEMA_VERSION}"
+            )
+            continue
+        try:
+            directory = resolve_detection_dir(
+                sequence_dir, sequence_manifest, detection_cache_root
+            )
+            check_detection_reference(directory, sequence_manifest, full=False)
+        except (KeyError, TypeError, ValueError, FileNotFoundError, OSError) as exc:
+            problems.append(
+                f"sequence {sequence} detection cache reference is invalid: {exc}"
+            )
+            continue
+        detection_refs[str(sequence)] = str(directory)
+    if problems:
+        raise ValueError(
+            f"incompatible AgentGuard training dataset {root}: "
+            + "; ".join(problems)
+        )
+    report = {
+        "dataset_dir": str(root),
+        "format": PACKED_TRAIN_DATA_FORMAT,
+        "schema_version": schema_version,
+        "index_format": variant,
+        "variant": variant,
+        "dataset": metadata.get("dataset"),
+        "split": metadata.get("split"),
+        "context_size": metadata.get("context_size"),
+        "num_train_samples": metadata.get("num_train_samples"),
+        "train_sequences": sequences,
+        "sequence_files": sequence_files,
+        "reid_feature_file": metadata.get("reid_feature_file", "reid_features.npy"),
+        "reid_layout": metadata.get(
+            "reid_layout",
+            "track_and_detection" if schema_version == 1 else "track_only",
+        ),
+    }
+    if detection_refs:
+        report["detection_cache"] = detection_refs
+    return report
 COMPACT_SAMPLE_ARRAY_FILES_V1 = {
     "event_indices": "event_indices.npy",
     "event_shard_ids": "event_shard_ids.npy",
@@ -1122,26 +1286,32 @@ def migrate_compact_iwg_rg_cma_sequence(
 class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
     """Load the self-contained packed AgentGuard training dataset."""
 
-    def __init__(self, dataset_dir: str | Path, *, max_samples: int = 0) -> None:
+    def __init__(self, dataset_dir: str | Path, *, max_samples: int = 0, detection_cache_root=None) -> None:
         self.dataset_dir = Path(dataset_dir).resolve()
+        self.detection_cache_root = detection_cache_root
+        self._max_samples = max_samples
+        report = inspect_packed_train_data(
+            self.dataset_dir,
+            detection_cache_root=detection_cache_root,
+            check_detection=False,
+        )
         self.metadata = json.loads((self.dataset_dir / "metadata.json").read_text())
-        if self.metadata.get("format") != PACKED_TRAIN_DATA_FORMAT:
-            raise ValueError(
-                "only packed AgentGuard train_data is supported; "
-                "legacy compact datasets are no longer training inputs"
-            )
+        self.packed_variant = report["variant"]
         self._init_packed(max_samples=max_samples)
 
     def _init_packed(self, *, max_samples: int) -> None:
         """Load AgentGuard arrays and the separate mmap ReID feature cache."""
         self.context_size = int(self.metadata["context_size"])
-        self.index_format = PACKED_TRAIN_DATA_FORMAT
+        self.index_format = self.packed_variant
         self._packed_sequences: list[dict[str, Any]] = []
         self._packed_boundaries: list[int] = []
         total = 0
         for sequence in self.metadata["train_sequences"]:
             path = self.dataset_dir / str(sequence) / "data.pt"
-            packed = torch.load(path, weights_only=False)
+            is_v2 = self.metadata.get("schema_version") == 2
+            packed = torch.load(path, map_location="cpu", mmap=is_v2, weights_only=is_v2)
+            if is_v2 and packed["metadata"].get("schema_version") != 2:
+                raise ValueError(f"mixed v1/v2 sequence: {path}")
             if not isinstance(packed, dict) or not isinstance(packed.get("arrays"), dict):
                 raise ValueError(f"invalid packed AgentGuard data: {path}")
             arrays = packed["arrays"]
@@ -1181,14 +1351,26 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
                 raise FileNotFoundError(f"packed ReID feature cache not found: {reid_path}")
             reid_features = np.load(reid_path, mmap_mode="r", allow_pickle=False)
             expected_reid_dim = int(self.metadata.get("reid_dim", 0))
-            if reid_features.shape != (timeline_count, 2, expected_reid_dim):
+            expected_shape = (timeline_count, expected_reid_dim) if is_v2 else (timeline_count, 2, expected_reid_dim)
+            if reid_features.shape != expected_shape:
                 raise ValueError(
                     f"packed ReID feature shape mismatch in {reid_path}: "
-                    f"{reid_features.shape} != {(timeline_count, 2, expected_reid_dim)}"
+                    f"{reid_features.shape} != {expected_shape}"
                 )
-            self._packed_sequences.append(
-                {"name": str(sequence), "arrays": arrays, "reid_features": reid_features}
-            )
+            item = {"name": str(sequence), "arrays": arrays, "reid_features": reid_features}
+            if is_v2:
+                from agentguard.data.train_data_v2 import resolve_detection_dir, check_detection_reference
+                directory = resolve_detection_dir(path.parent, packed["metadata"], self.detection_cache_root)
+                check_detection_reference(directory, packed["metadata"])
+                indices = np.asarray(arrays["timeline_detection_indices"])
+                matched = np.asarray(arrays["timeline_has_detection"], dtype=bool)
+                det_features = np.load(directory / "features.npy", mmap_mode="r", allow_pickle=False)
+                if det_features.ndim != 2 or det_features.shape[1] != expected_reid_dim:
+                    raise ValueError(f"detection feature dimension mismatch: {directory}")
+                if indices.shape != (timeline_count,) or np.any(indices[~matched] != -1) or np.any(indices[matched] < 0) or np.any(indices[matched] >= len(det_features)):
+                    raise ValueError(f"invalid detection references: {path}")
+                item["detection_features"] = det_features
+            self._packed_sequences.append(item)
             total += count
             self._packed_boundaries.append(total)
         self._length = min(total, int(max_samples)) if max_samples > 0 else total
@@ -1220,6 +1402,8 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
             has_detection[pad_left:] = np.asarray(
                 arrays["timeline_has_detection"][indices], dtype=np.bool_
             )
+            if self.metadata.get("schema_version") == 2:
+                scalar[pad_left:] = self.norm_stats.transform(scalar[pad_left:].astype(np.float64)).astype(np.float32)
         padding = np.ones(context, dtype=np.bool_)
         padding[pad_left:] = False
         reset = np.zeros(context, dtype=np.bool_)
@@ -1229,12 +1413,16 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
         detection_features = np.zeros((context, reid_dim), dtype=np.float32)
         if valid_positions.any():
             indices = event_indices[valid_positions]
-            track_features[pad_left:] = np.asarray(
-                reid_features[indices, 0, :], dtype=np.float32
-            )
-            detection_features[pad_left:] = np.asarray(
-                reid_features[indices, 1, :], dtype=np.float32
-            )
+            if self.metadata.get("schema_version") == 2:
+                track_features[pad_left:] = np.asarray(reid_features[indices], dtype=np.float32)
+                det_indices = np.asarray(arrays["timeline_detection_indices"][indices], dtype=np.int64)
+                valid_detection = det_indices >= 0
+                detection_features[pad_left:][valid_detection] = np.asarray(
+                    item["detection_features"][det_indices[valid_detection]], dtype=np.float32
+                )
+            else:
+                track_features[pad_left:] = np.asarray(reid_features[indices, 0, :], dtype=np.float32)
+                detection_features[pad_left:] = np.asarray(reid_features[indices, 1, :], dtype=np.float32)
         result = {
             "track_feats": torch.from_numpy(track_features),
             "det_feats": torch.from_numpy(detection_features),
@@ -1264,9 +1452,10 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
         if not hasattr(self, "metadata"):
             return
         for item in getattr(self, "_packed_sequences", []):
-            mapped = getattr(item.get("reid_features"), "_mmap", None)
-            if mapped is not None:
-                mapped.close()
+            for name in ("reid_features", "detection_features"):
+                mapped = getattr(item.get(name), "_mmap", None)
+                if mapped is not None:
+                    mapped.close()
         self._packed_sequences = []
         self._packed_boundaries = []
 
@@ -1274,15 +1463,28 @@ class StreamingIWGRGCMADataset(torch.utils.data.Dataset):
         """Release clean mmap pages between low-memory training phases."""
         advised_mmaps = 0
         for item in getattr(self, "_packed_sequences", []):
-            mapped = getattr(item.get("reid_features"), "_mmap", None)
-            if mapped is None:
-                continue
-            try:
-                mapped.madvise(mmap.MADV_DONTNEED)
-                advised_mmaps += 1
-            except (AttributeError, OSError, ValueError):
-                pass
+            for name in ("reid_features", "detection_features"):
+                mapped = getattr(item.get(name), "_mmap", None)
+                if mapped is None:
+                    continue
+                try:
+                    mapped.madvise(mmap.MADV_DONTNEED)
+                    advised_mmaps += 1
+                except (AttributeError, OSError, ValueError):
+                    pass
         return {"mmap_regions": advised_mmaps, "files": 0}
+
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        if self.metadata.get("schema_version") == 2:
+            # Spawn workers reopen read-only mappings rather than pickle arrays.
+            state.pop("_packed_sequences", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        if "_packed_sequences" not in state:
+            self._init_packed(max_samples=self._max_samples)
 
     def __del__(self) -> None:
         self.close()

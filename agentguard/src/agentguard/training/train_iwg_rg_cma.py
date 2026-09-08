@@ -47,6 +47,67 @@ FORMAL_CHECKPOINT_EPOCHS = {
     200: {50, 100, 150, 200},
 }
 FORMAL_TRAIN_EPOCHS = frozenset(FORMAL_CHECKPOINT_EPOCHS)
+
+
+def resolve_checkpoint_every(config: dict[str, Any]) -> int | None:
+    raw = config.get("checkpoint_every")
+    if raw is None or raw == "":
+        return None
+    try:
+        every = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"checkpoint_every must be a positive integer, got {raw!r}"
+        ) from exc
+    if every < 1:
+        raise ValueError(
+            f"checkpoint_every must be a positive integer, got {raw!r}"
+        )
+    return every
+
+
+def numbered_checkpoint_epochs(
+    epochs: int,
+    *,
+    checkpoint_every: int | None = None,
+    warm_start: bool = False,
+) -> tuple[int, ...]:
+    """Return numbered checkpoint epochs that will actually be written.
+
+    Default cadence is unchanged. ``checkpoint_every=N`` adds every Nth epoch
+    without replacing the default nodes, last.pt updates, or the final epoch.
+    """
+    total = int(epochs)
+    if total < 1:
+        raise ValueError(f"epochs must be a positive integer, got {epochs!r}")
+    if warm_start:
+        base = set(FINETUNE_CHECKPOINT_EPOCHS)
+    else:
+        base = set(FORMAL_CHECKPOINT_EPOCHS.get(total, {total}))
+    extra: set[int] = set()
+    if checkpoint_every is not None:
+        every = int(checkpoint_every)
+        if every < 1:
+            raise ValueError(
+                f"checkpoint_every must be a positive integer, got {checkpoint_every!r}"
+            )
+        extra = set(range(every, total + 1, every))
+    selected = {epoch for epoch in (base | extra | {total}) if 1 <= epoch <= total}
+    return tuple(sorted(selected))
+
+
+def record_checkpoint_plan(config: dict[str, Any]) -> tuple[int, ...]:
+    """Store the resolved save plan on ``config`` and return numbered epochs."""
+    every = resolve_checkpoint_every(config)
+    warm_start = bool(str(config.get("init_checkpoint", "")).strip())
+    epochs = numbered_checkpoint_epochs(
+        int(config["epochs"]),
+        checkpoint_every=every,
+        warm_start=warm_start,
+    )
+    config["checkpoint_every"] = every
+    config["checkpoint_epochs"] = [int(epoch) for epoch in epochs]
+    return epochs
 REQUIRED_CONFIG = {
     "seed": 42,
     "num_workers": 4,
@@ -931,6 +992,7 @@ def _run_training_attempt(
     )
     checkpoint_dir = Path(config["checkpoint_dir"])
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_epochs = set(record_checkpoint_plan(config))
     metrics_path = checkpoint_dir / "metrics.jsonl"
     training_log_path = checkpoint_dir / "training.log"
     start_time = time.time()
@@ -943,6 +1005,17 @@ def _run_training_attempt(
         _write_training_log(training_log, "=" * 60)
         _write_training_log(training_log, "Safe-Direct IWG + RG-CMA Training - start")
         _write_training_log(training_log, f"Output directory: {checkpoint_dir}")
+        every = config.get("checkpoint_every")
+        _write_training_log(
+            training_log,
+            "Numbered checkpoints: "
+            + ",".join(f"{epoch:03d}" for epoch in config["checkpoint_epochs"])
+            + (
+                f" (default cadence plus every {every} epochs)"
+                if every is not None
+                else " (default cadence)"
+            ),
+        )
         _write_training_log(
             training_log,
             "Config: " + json.dumps(config, indent=2, sort_keys=True),
@@ -1304,13 +1377,6 @@ def _run_training_attempt(
                     initialization=initialization,
                 )
                 torch.save(payload, checkpoint_dir / "iwg_rg_cma_last.pt")
-                checkpoint_epochs = (
-                    FINETUNE_CHECKPOINT_EPOCHS
-                    if initialization["mode"] == "warm_start"
-                    else FORMAL_CHECKPOINT_EPOCHS.get(
-                        int(config["epochs"]), {int(config["epochs"])}
-                    )
-                )
                 if epoch in checkpoint_epochs:
                     torch.save(
                         payload,
@@ -1336,6 +1402,8 @@ def _run_training_attempt(
         "optimizer_learning_rates": _resolved_optimizer_lrs(config),
         "architecture_variant": str(model.architecture_variant),
         "checkpoint": str(checkpoint_dir / "iwg_rg_cma_last.pt"),
+        "checkpoint_every": config.get("checkpoint_every"),
+        "checkpoint_epochs": list(config.get("checkpoint_epochs", [])),
         "elapsed_s": time.time() - start_time,
         "validation": "disabled",
         "metrics": last_metrics,
@@ -1389,6 +1457,7 @@ def _validate_formal_config(config: dict[str, Any]) -> int:
                 "warm-start IWG RG-CMA training requires one full-data phase "
                 f"for {epochs} epochs"
             )
+    record_checkpoint_plan(config)
     _resolved_schedule_settings(config)
     return batch_size
 

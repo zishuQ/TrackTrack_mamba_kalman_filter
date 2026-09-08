@@ -62,7 +62,7 @@ if [[ ! -f "${DATASET_DIR}/metadata.json" ]]; then
   echo "Build it before running this training script." >&2
   exit 2
 fi
-"${PY}" -c "import json; x=json.load(open('${DATASET_DIR}/metadata.json')); assert x.get('format') == 'agentguard_train_data_v1', x.get('format'); print('packed dataset:', x['num_train_samples'], 'samples')" \
+"${PY}" -c "from agentguard.datasets.iwg_rg_cma_dataset import inspect_packed_train_data; import json; print(json.dumps(inspect_packed_train_data('${DATASET_DIR}'), indent=2, sort_keys=True))" \
   2>&1 | tee "${LOG_DIR}/dataset_check.log"
 
 TRAIN_COMMAND=(
