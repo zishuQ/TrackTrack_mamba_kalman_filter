@@ -3,19 +3,38 @@ import numpy as np
 
 
 def bbox_overlaps(a_x1y1x2y2, b_x1y1x2y2):
-    num_a = a_x1y1x2y2.shape[0]
-    num_b = b_x1y1x2y2.shape[0]
-    overlaps = np.zeros((num_a, num_b))
+    """Pairwise IoU with TrackTrack's inclusive ``+1`` pixel convention.
 
-    for n_b in range(num_b):
-        box_area = (b_x1y1x2y2[n_b, 2] - b_x1y1x2y2[n_b, 0] + 1) * (b_x1y1x2y2[n_b, 3] - b_x1y1x2y2[n_b, 1] + 1)
-        for n_a in range(num_a):
-            iw = min(a_x1y1x2y2[n_a, 2], b_x1y1x2y2[n_b, 2]) - max(a_x1y1x2y2[n_a, 0], b_x1y1x2y2[n_b, 0]) + 1
-            if iw > 0:
-                ih = min(a_x1y1x2y2[n_a, 3], b_x1y1x2y2[n_b, 3]) - max(a_x1y1x2y2[n_a, 1], b_x1y1x2y2[n_b, 1]) + 1
-                if ih > 0:
-                    ua = (a_x1y1x2y2[n_a, 2] - a_x1y1x2y2[n_a, 0] + 1) * (a_x1y1x2y2[n_a, 3] - a_x1y1x2y2[n_a, 1] + 1) + box_area - iw * ih
-                    overlaps[n_a, n_b] = iw * ih / ua
+    Intersection is written only when width and height are both strictly
+    positive; the rest stay 0. Areas are not clipped, matching the original
+    loop, including inverted boxes. Output is always float64.
+    """
+    boxes_a = np.asarray(a_x1y1x2y2, dtype=np.float64)
+    boxes_b = np.asarray(b_x1y1x2y2, dtype=np.float64)
+    num_a = boxes_a.shape[0]
+    num_b = boxes_b.shape[0]
+    if num_a == 0 or num_b == 0:
+        return np.zeros((num_a, num_b), dtype=np.float64)
+
+    intersection_w = (
+        np.minimum(boxes_a[:, None, 2], boxes_b[None, :, 2])
+        - np.maximum(boxes_a[:, None, 0], boxes_b[None, :, 0])
+        + 1.0
+    )
+    intersection_h = (
+        np.minimum(boxes_a[:, None, 3], boxes_b[None, :, 3])
+        - np.maximum(boxes_a[:, None, 1], boxes_b[None, :, 1])
+        + 1.0
+    )
+    overlap_mask = (intersection_w > 0.0) & (intersection_h > 0.0)
+    intersection = np.where(overlap_mask, intersection_w * intersection_h, 0.0)
+
+    area_a = (boxes_a[:, 2] - boxes_a[:, 0] + 1.0) * (boxes_a[:, 3] - boxes_a[:, 1] + 1.0)
+    area_b = (boxes_b[:, 2] - boxes_b[:, 0] + 1.0) * (boxes_b[:, 3] - boxes_b[:, 1] + 1.0)
+    union = area_a[:, None] + area_b[None, :] - intersection
+
+    overlaps = np.zeros((num_a, num_b), dtype=np.float64)
+    np.divide(intersection, union, out=overlaps, where=overlap_mask)
     return overlaps
 
 
