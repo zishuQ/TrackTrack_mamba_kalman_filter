@@ -23,9 +23,12 @@ class TrackStateSnapshot:
     covariance: Optional[np.ndarray]  # (8, 8) KF cov or None
     velocity: np.ndarray  # (4, 2)
     feature: np.ndarray  # (1, D) ReID feature
-    history: Dict[int, Any]  # {frame_id: [box, score, mean, cov, feat]}
+    history: Dict[int, Any]  # {frame_id: [box, score, ...]}
     end_frame_id: int
     state: int  # TrackState enum value
+    # Cumulative matched observations. None means "use len(history)", which
+    # is the compact-snapshot length when the runtime window is bounded.
+    observation_count: Optional[int] = None
 
     def __post_init__(self) -> None:
         # Deep-copy all numpy arrays to enforce immutability.

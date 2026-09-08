@@ -114,9 +114,12 @@ class AgentGuardRuntime:
 
     def is_mature_track(self, track) -> bool:
         """Return whether a track has the configured event context."""
+        observation_count = getattr(track, "observation_count", None)
+        if observation_count is None:
+            observation_count = len(track.history)
         return (
             track.state in (1, 2)
-            and len(track.history) >= self.iwg_context_size
+            and int(observation_count) >= self.iwg_context_size
         )
 
     def get_or_create_event_buffer(self, track_id: int) -> EventBuffer:

@@ -2,6 +2,60 @@ import lap
 import numpy as np
 
 
+# Compact event snapshots persist the last 6 observation boxes/scores.
+COMPACT_SNAPSHOT_HISTORY = 6
+
+# Runtime Track history is a bounded box/score window. It must cover:
+#   * velocity / angle lookback (dt = 1, 2, 3) plus the current write
+#   * conf_distance's second-most-recent score
+#   * scalar-feature last-3 scores
+#   * compact snapshots of the last 6 observations
+# It is not the IWG context size (6 or 8). Age and maturity use
+# observation_count, not this container length.
+ONLINE_HISTORY_KEEP = 8
+
+
+def chronological_history_frame_ids(history):
+    """Return observation frame ids in increasing order.
+
+    TrackTrack writes increasing frame ids and never back-fills, so dict
+    insertion order already matches sorted order. Fall back to a sort only
+    when a caller mutates keys out of order.
+    """
+    frame_ids = list(history)
+    for index in range(1, len(frame_ids)):
+        if frame_ids[index] < frame_ids[index - 1]:
+            return sorted(history)
+    return frame_ids
+
+
+def recent_history_frame_ids(history, count):
+    """Return the last ``count`` observation frame ids in chronological order."""
+    frame_ids = chronological_history_frame_ids(history)
+    if count is None or count >= len(frame_ids):
+        return frame_ids
+    return frame_ids[-count:]
+
+
+def second_recent_history_score(history):
+    """Score of the second-most-recent observation, or the only one if n == 1.
+
+    Matches ``sorted(keys, reverse=True)[min(1, len-1)]`` without sorting a
+    long history on the monotonic write path.
+    """
+    frame_ids = chronological_history_frame_ids(history)
+    frame_id = frame_ids[-2] if len(frame_ids) > 1 else frame_ids[-1]
+    return history[frame_id][1]
+
+
+def track_observation_count(track):
+    """Cumulative matched observations, independent of the bounded history window."""
+    count = getattr(track, "observation_count", None)
+    if count is None:
+        return len(getattr(track, "history", {}) or {})
+    return int(count)
+
+
 def bbox_overlaps(a_x1y1x2y2, b_x1y1x2y2):
     """Pairwise IoU with TrackTrack's inclusive ``+1`` pixel convention.
 
@@ -96,12 +150,8 @@ def conf_distance(tracks, dets):
     if len(tracks) == 0 or len(dets) == 0:
         return np.ones((len(tracks), len(dets)), dtype=np.float64)
 
-    # Get previous scores
-    t_score_prev = []
-    for t in tracks:
-        frame_ids = sorted(list(t.history.keys()), reverse=True)
-        frame_id = frame_ids[min(1, len(frame_ids) - 1)]
-        t_score_prev.append(t.history[frame_id][1])
+    # Get previous scores (second-most-recent observation; no full-history sort)
+    t_score_prev = [second_recent_history_score(t.history) for t in tracks]
 
     # Linear projection
     t_score_prev = np.array(t_score_prev)
@@ -116,13 +166,13 @@ def conf_distance(tracks, dets):
 
 
 def get_prev_box(history, frame_id, dt):
-    # Try
+    # Prefer the exact frame_id - dt observation when it still exists.
     target_key = frame_id - dt
-    if target_key in history.keys():
+    if target_key in history:
         return history[target_key][0]
 
-    # If there are no recent observation
-    return history[max(history.keys())][0]
+    # If there is no observation at that offset, use the latest remaining one.
+    return history[max(history)][0]
 
 
 def get_vel_t_d(b_1, b_2):

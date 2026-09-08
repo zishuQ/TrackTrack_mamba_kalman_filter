@@ -192,6 +192,9 @@ class CompactEventCacheReader:
                 np.asarray(box, dtype=np.float64),
                 score,
             ]
+        observation_count = record.get("history_count")
+        if observation_count is None:
+            observation_count = len(history)
         return TrackStateSnapshot(
             track_id=int(track_id),
             box=np.asarray(record.get("box", np.zeros(4)), dtype=np.float64),
@@ -207,6 +210,7 @@ class CompactEventCacheReader:
             history=history,
             end_frame_id=int(record.get("end_frame_id", -1)),
             state=int(record.get("state", -1)),
+            observation_count=int(observation_count),
         )
 
     def materialize_training_event(self, record: dict, candidate_detection_index: int | None = None):

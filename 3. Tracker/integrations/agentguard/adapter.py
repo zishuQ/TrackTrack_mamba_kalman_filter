@@ -644,6 +644,9 @@ class AgentGuardTrackerAdapter:
                 np.asarray(item[0], dtype=np.float32).copy(),
                 float(item[1]) if len(item) > 1 else float(snapshot.score),
             ]
+        observation_count = getattr(snapshot, "observation_count", None)
+        if observation_count is None:
+            observation_count = len(history)
         return {
             "track_id": int(snapshot.track_id),
             "box": np.asarray(snapshot.box, dtype=np.float32).copy(),
@@ -662,6 +665,7 @@ class AgentGuardTrackerAdapter:
             "history": history,
             "end_frame_id": int(snapshot.end_frame_id),
             "state": int(snapshot.state),
+            "observation_count": int(observation_count),
         }
 
     def _compact_event_dict(self, event: TrackEvent) -> dict:

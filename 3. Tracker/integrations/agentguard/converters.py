@@ -19,9 +19,14 @@ from agentguard.contracts.states import (
 def export_track_state(track) -> TrackStateSnapshot:
     """Export a Track object's current state as a TrackStateSnapshot.
 
-    Deep-copies all numpy arrays and the history dict.  Does **not** save the
-    KalmanFilter object, ``args``, or any Tracker reference.
+    Production Track objects retain a bounded box/score window. This helper
+    uses the compact snapshot contract (last 6 observations plus
+    ``observation_count``). Call ``snapshot_state(compact_history=False)``
+    only on a Track constructed with ``retain_full_history=True``.
     """
+    if hasattr(track, "snapshot_state"):
+        return track.snapshot_state(compact_history=True)
+
     history_copy: Dict[int, Any] = {}
     for frame_id, entry in track.history.items():
         copied_entry: list[Any] = []
@@ -32,6 +37,9 @@ def export_track_state(track) -> TrackStateSnapshot:
                 copied_entry.append(item)
         history_copy[frame_id] = copied_entry
 
+    observation_count = getattr(track, "observation_count", None)
+    if observation_count is None:
+        observation_count = len(history_copy)
     return TrackStateSnapshot(
         track_id=track.track_id,
         box=track.box.copy(),
@@ -43,6 +51,7 @@ def export_track_state(track) -> TrackStateSnapshot:
         history=history_copy,
         end_frame_id=track.end_frame_id,
         state=track.state,
+        observation_count=int(observation_count),
     )
 
 

@@ -55,7 +55,11 @@ def _compact_state(snapshot: dict | None) -> dict:
             else np.zeros((0, 4), dtype=np.float32)
         ),
         "recent_history_scores": np.asarray(scores, dtype=np.float32),
-        "history_count": int(len(history)),
+        "history_count": int(
+            snapshot["observation_count"]
+            if snapshot.get("observation_count") is not None
+            else len(history)
+        ),
     }
 
 

@@ -239,6 +239,7 @@ def test_track_compact_snapshot_copies_recent_6_only():
         [compact["history"][i][1] for i in range(4, 10)],
         [0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
     )
+    assert compact["observation_count"] == 10
 
 
 def test_sequence_enumeration_from_detection_manifest(tmp_path, monkeypatch):
@@ -399,6 +400,16 @@ def test_compact_event_does_not_copy_detection_feature_or_full_history(tmp_path)
     assert frames[0]["frame_id"] == 1
     assert frames[0]["frame_index"] == 0
     assert "warp_matrix" in frames[0]
+
+
+def test_compact_state_uses_observation_count_not_truncated_history():
+    from agentguard.data.compact_event_cache import _compact_state
+
+    state = _state(history_len=6)
+    state["observation_count"] = 42
+    compact = _compact_state(state)
+    assert compact["history_count"] == 42
+    assert compact["recent_history_boxes"].shape[0] == 6
 
 
 def test_association_saved_once_per_frame_and_manifest_counts(tmp_path):

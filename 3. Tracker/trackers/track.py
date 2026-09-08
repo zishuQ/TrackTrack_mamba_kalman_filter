@@ -1,5 +1,11 @@
 import numpy as np
-from trackers.utils import get_prev_box
+from trackers.utils import (
+    COMPACT_SNAPSHOT_HISTORY,
+    ONLINE_HISTORY_KEEP,
+    chronological_history_frame_ids,
+    get_prev_box,
+    recent_history_frame_ids,
+)
 from trackers.kalman_filter import create_kalman_filter
 
 
@@ -48,7 +54,7 @@ class BaseTrack(object):
 
 
 class Track(BaseTrack):
-    def __init__(self, args, detection):
+    def __init__(self, args, detection, retain_full_history=False):
         # Initialize 1
         self.args = args
         self.box = detection[:4]  # x1y1x2y2
@@ -57,6 +63,13 @@ class Track(BaseTrack):
         # Initialize 2
         self.delta_t = 3
         self.history = {}
+        # Cumulative matched observations. Independent of the bounded history
+        # window so New/Tracked and AgentGuard maturity keep the original
+        # "number of observations" semantics.
+        self.observation_count = 0
+        # Opt-in debug/test path. Production Trackers leave this False so
+        # runtime memory does not keep both a full and a compact history.
+        self._retain_full_history = bool(retain_full_history)
         self.kalman_filter = None
         self.mean, self.covariance = None, None
         self.velocity = np.zeros((4, 2))
@@ -64,6 +77,42 @@ class Track(BaseTrack):
         # Initialize 3
         self.alpha = 0.95
         self.feat = detection[6:][np.newaxis, :].copy()
+
+    def _write_history(self, frame_id, box, score, mean=None, covariance=None, feat=None):
+        """Record one matched observation and prune the online window.
+
+        Unmatched frames never call this, matching the original write policy.
+        Duplicate frame ids overwrite the entry and do not increase the
+        observation count, matching ``len(history)`` growth of the unbounded
+        dict.
+        """
+        is_new = frame_id not in self.history
+        box = np.asarray(box).copy()
+        score = float(score)
+        if self._retain_full_history:
+            self.history[frame_id] = [
+                box,
+                score,
+                None if mean is None else np.asarray(mean).copy(),
+                None if covariance is None else np.asarray(covariance).copy(),
+                None if feat is None else np.asarray(feat).copy(),
+            ]
+        else:
+            # Current KF mean/covariance/ReID live on the Track itself. Historical
+            # copies of those arrays have no remaining online consumer.
+            self.history[frame_id] = [box, score]
+        if is_new:
+            self.observation_count += 1
+        self._prune_online_history()
+
+    def _prune_online_history(self):
+        if self._retain_full_history:
+            return
+        extra = len(self.history) - ONLINE_HISTORY_KEEP
+        if extra <= 0:
+            return
+        for old_frame_id in chronological_history_frame_ids(self.history)[:extra]:
+            del self.history[old_frame_id]
 
     def update_features(self, feat, score):
         # Update and normalize
@@ -80,8 +129,9 @@ class Track(BaseTrack):
         self.mean, self.covariance = self.kalman_filter.initiate(self.cxcywh.copy())
 
         # Initiate history
-        self.history[frame_id] = [self.box.copy(), self.score.copy(), self.mean.copy(),
-                                  self.covariance.copy(), self.feat.copy()]
+        self._write_history(
+            frame_id, self.box, self.score, self.mean, self.covariance, self.feat
+        )
 
         # Initiate parameters
         self.end_frame_id = frame_id
@@ -103,8 +153,14 @@ class Track(BaseTrack):
         self.update_features(detection.feat.copy(), detection.score)
 
         # Update history
-        self.history[frame_id] = [detection.box.copy(), detection.score, self.mean.copy(),
-                                  self.covariance.copy(), self.feat.copy()]
+        self._write_history(
+            frame_id,
+            detection.box,
+            detection.score,
+            self.mean,
+            self.covariance,
+            self.feat,
+        )
 
         # Update velocity
         self.velocity = np.zeros((4, 2))
@@ -117,31 +173,37 @@ class Track(BaseTrack):
         self.box = detection.box.copy()
         self.score = detection.score
         self.end_frame_id = frame_id
-        self.state = TrackState.Tracked if len(self.history.keys()) >= self.args.min_len else TrackState.New
+        self.state = (
+            TrackState.Tracked if self.observation_count >= self.args.min_len else TrackState.New
+        )
 
     def snapshot_state(self, compact_history=False):
         from agentguard.contracts.states import TrackStateSnapshot
 
+        observation_count = int(getattr(self, "observation_count", len(self.history)))
         history_copy = {}
-        frame_ids = (
-            sorted(self.history.keys())[-6:]
-            if compact_history
-            else self.history.keys()
-        )
-        for frame_id in frame_ids:
-            hist_list = self.history[frame_id]
-            if compact_history:
+        if compact_history:
+            frame_ids = recent_history_frame_ids(self.history, COMPACT_SNAPSHOT_HISTORY)
+            for frame_id in frame_ids:
+                item = self.history[frame_id]
+                history_copy[frame_id] = [np.asarray(item[0]).copy(), float(item[1])]
+        else:
+            if not getattr(self, "_retain_full_history", False):
+                raise ValueError(
+                    "snapshot_state(compact_history=False) requires unbounded "
+                    "per-frame KF mean/covariance/ReID history, which runtime "
+                    "Track no longer retains. Use compact_history=True for the "
+                    f"last {COMPACT_SNAPSHOT_HISTORY} observation boxes and "
+                    "scores (plus observation_count), or construct "
+                    "Track(..., retain_full_history=True)."
+                )
+            for frame_id, item in self.history.items():
                 history_copy[frame_id] = [
-                    hist_list[0].copy(),
-                    float(hist_list[1]),
-                ]
-            else:
-                history_copy[frame_id] = [
-                    hist_list[0].copy(),
-                    hist_list[1],
-                    hist_list[2].copy() if hist_list[2] is not None else None,
-                    hist_list[3].copy() if hist_list[3] is not None else None,
-                    hist_list[4].copy(),
+                    item[0].copy(),
+                    item[1],
+                    item[2].copy() if item[2] is not None else None,
+                    item[3].copy() if item[3] is not None else None,
+                    item[4].copy(),
                 ]
 
         return TrackStateSnapshot(
@@ -155,6 +217,7 @@ class Track(BaseTrack):
             history=history_copy,
             end_frame_id=self.end_frame_id,
             state=self.state,
+            observation_count=observation_count,
         )
 
     def update_with_gates(self, frame_id, detection, motion_gate, appearance_gate):
@@ -206,10 +269,14 @@ class Track(BaseTrack):
             self.feat = feat_final / (np.linalg.norm(feat_final) + 1e-12)
 
         # Step 6: Other fields (same as original update)
-        self.history[frame_id] = [
-            effective_box.copy(), detection.score,
-            self.mean.copy(), self.covariance.copy(), self.feat.copy()
-        ]
+        self._write_history(
+            frame_id,
+            effective_box,
+            detection.score,
+            self.mean,
+            self.covariance,
+            self.feat,
+        )
 
         self.velocity = np.zeros((4, 2))
         for d_t in range(1, self.delta_t + 1):
@@ -220,7 +287,9 @@ class Track(BaseTrack):
         self.box = effective_box.copy()
         self.score = detection.score
         self.end_frame_id = frame_id
-        self.state = TrackState.Tracked if len(self.history.keys()) >= self.args.min_len else TrackState.New
+        self.state = (
+            TrackState.Tracked if self.observation_count >= self.args.min_len else TrackState.New
+        )
 
     @property
     def cxcywh(self):
