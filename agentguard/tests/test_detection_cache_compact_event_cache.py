@@ -155,6 +155,16 @@ def test_detection_cache_frame_slice_and_mmap(tmp_path):
         assert source["detection_indices"].tolist() == [0, 1]
         assert target["detection_indices"].tolist() == [1]
         assert target["boxes"].shape == (1, 4)
+        src_idx, src_boxes = cache.get_frame_indices_and_boxes(0, view="source")
+        tgt_idx, tgt_boxes = cache.get_frame_indices_and_boxes(0, view="target")
+        assert src_idx.tolist() == [0, 1]
+        assert tgt_idx.tolist() == [1]
+        np.testing.assert_array_equal(np.asarray(src_boxes), np.asarray(source["boxes"]))
+        np.testing.assert_array_equal(np.asarray(tgt_boxes), np.asarray(target["boxes"]))
+        geom = cache.get_detection(1, include_feature=False)
+        assert "feature" not in geom
+        full = cache.get_detection(1, include_feature=True)
+        assert full["feature"].shape[0] == cache.reid_dim
         arr = cache.get_frame_array(1, view="target")
         assert arr.shape == (1, 10)
     finally:

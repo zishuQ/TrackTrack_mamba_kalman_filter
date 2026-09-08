@@ -128,10 +128,12 @@ class CompactEventCacheReader:
                     self._frame_by_index[idx] = frame
         return self._frame_by_index.get(frame_index)
 
-    def get_detection(self, detection_index: int) -> dict:
+    def get_detection(self, detection_index: int, *, include_feature: bool = True) -> dict:
         if self.detection_cache is None:
             raise RuntimeError("detection_cache_dir is required to read detections")
-        return self.detection_cache.get_detection(detection_index)
+        return self.detection_cache.get_detection(
+            detection_index, include_feature=include_feature
+        )
 
     def _association_detection_overlap_row(
         self,
@@ -213,7 +215,13 @@ class CompactEventCacheReader:
             observation_count=int(observation_count),
         )
 
-    def materialize_training_event(self, record: dict, candidate_detection_index: int | None = None):
+    def materialize_training_event(
+        self,
+        record: dict,
+        candidate_detection_index: int | None = None,
+        *,
+        include_association: bool = True,
+    ):
         from agentguard.contracts.events import TrackEvent
         from agentguard.contracts.states import (
             AssociationContext,
@@ -230,9 +238,13 @@ class CompactEventCacheReader:
             record["state_shard_id"],
             record["pre_update_state_offset"],
         )
-        association = self.get_association(
-            record.get("association_shard_id", -1),
-            record.get("association_offset", -1),
+        association = (
+            self.get_association(
+                record.get("association_shard_id", -1),
+                record.get("association_offset", -1),
+            )
+            if include_association
+            else None
         )
         frame_record = self.get_frame_record(record.get("frame_index", int(record["frame_id"]) - 1))
 

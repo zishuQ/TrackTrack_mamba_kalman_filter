@@ -75,6 +75,42 @@ class SequenceDetectionCache:
         end = int(self.frame_offsets[frame_id + 1])
         return np.arange(start, end, dtype=np.int64)
 
+    def get_frame_indices_and_boxes(
+        self,
+        frame_id: int,
+        view: DetectionView = "source",
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return detection indices and boxes without copying ReID features.
+
+        Source frames are a contiguous mmap slice. Target frames may copy boxes
+        because their indices are an indirection table. Returned arrays are
+        read-only views or copies.
+        """
+        frame_id = int(frame_id)
+        if frame_id < 0 or frame_id >= self.num_frames:
+            raise IndexError(
+                f"frame_id={frame_id} outside [0, {self.num_frames}) for {self.sequence_dir}"
+            )
+        if view == "target":
+            if self.target_frame_offsets is None or self.target_detection_indices is None:
+                raise FileNotFoundError(
+                    f"Target detection index files are required for target view: {self.sequence_dir}"
+                )
+            start = int(self.target_frame_offsets[frame_id])
+            end = int(self.target_frame_offsets[frame_id + 1])
+            indices = self.target_detection_indices[start:end]
+            boxes = self.boxes[indices]
+        else:
+            start = int(self.frame_offsets[frame_id])
+            end = int(self.frame_offsets[frame_id + 1])
+            indices = np.arange(start, end, dtype=np.int64)
+            boxes = self.boxes[start:end]
+        if boxes.flags.writeable:
+            boxes.flags.writeable = False
+        if indices.flags.writeable:
+            indices.flags.writeable = False
+        return indices, boxes
+
     def get_frame(self, frame_id: int, view: DetectionView = "source") -> Dict[str, Any]:
         indices = self._slice_indices(frame_id, view)
         return {
@@ -122,21 +158,28 @@ class SequenceDetectionCache:
             return (-1, -1)
         return (int(indices[0]), int(indices[-1]) + 1)
 
-    def get_detection(self, detection_index: int) -> Dict[str, Any]:
+    def get_detection(
+        self,
+        detection_index: int,
+        *,
+        include_feature: bool = True,
+    ) -> Dict[str, Any]:
         detection_index = int(detection_index)
         if detection_index < 0 or detection_index >= self.num_detections:
             raise IndexError(
                 f"detection_index={detection_index} outside [0, {self.num_detections}) "
                 f"for {self.sequence_dir}"
             )
-        return {
+        payload: Dict[str, Any] = {
             "detection_index": detection_index,
             "box": self.boxes[detection_index],
             "score": self.scores[detection_index],
-            "feature": self.features[detection_index],
             "source": self.sources[detection_index],
             "class_id": self.class_ids[detection_index],
         }
+        if include_feature:
+            payload["feature"] = self.features[detection_index]
+        return payload
 
     def close(self) -> None:
         self._frame_array_cache.clear()

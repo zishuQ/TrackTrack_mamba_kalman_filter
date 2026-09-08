@@ -36,22 +36,37 @@ def test_current_rollout_builder_golden_fixture(monkeypatch):
         "association_shard_id": 2,
         "association_offset": 7,
         "frame_index": 9,
+        "frame_id": 10,
+        "track_id": 3,
+        "matched": True,
         "accepted_detection_index": 0,
     }
     warmup_records = [
-        {**record, "event_offset": 5, "accepted_detection_index": -1},
-        {**record, "event_offset": 6, "accepted_detection_index": -1},
         record,
+        {**record, "event_offset": 5, "accepted_detection_index": 1},
+        {**record, "event_offset": 6, "accepted_detection_index": 2},
     ]
 
     class Reader:
         def __init__(self, *args, **kwargs):
             self.manifest = {"sequence": "seq"}
+            self.detection_cache = object()
 
         def iter_event_records(self):
             return warmup_records
 
-        def materialize_training_event(self, value):
+        def get_detection(self, detection_index, *, include_feature=True):
+            payload = {
+                "box": box,
+                "score": 0.9,
+                "source": 0,
+                "class_id": 1,
+            }
+            if include_feature:
+                payload["feature"] = np.ones((1, 4), dtype=np.float32)
+            return payload
+
+        def materialize_training_event(self, value, **kwargs):
             return event
 
         def close(self):
@@ -118,7 +133,7 @@ def test_current_rollout_builder_golden_fixture(monkeypatch):
         future_frames=2,
     )
 
-    assert len(labels) == 1
+    assert len(labels) == 3
     label = labels[0]
     assert {
         key: label[key]
@@ -153,8 +168,8 @@ def test_current_rollout_builder_golden_fixture(monkeypatch):
         "oracle_detection_coverage": 0.0,
     }
     np.testing.assert_allclose(label["cue_target"], [2.0 / 3.0, 0.0, 2.0 / 3.0])
-    assert summary["num_labels"] == 1
-    assert summary["candidate_a_count"] == 1
-    assert summary["valid_motion_labels"] == 1
-    assert summary["valid_appearance_labels"] == 1
+    assert summary["num_labels"] == 3
+    assert summary["candidate_a_count"] == 3
+    assert summary["valid_motion_labels"] == 3
+    assert summary["valid_appearance_labels"] == 3
     assert summary["prototype_count"] == 1

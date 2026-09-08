@@ -2,22 +2,28 @@
 from __future__ import annotations
 
 import os
-import time
-from collections import OrderedDict, defaultdict
-from pathlib import Path
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from agentguard.contracts.states import DetectionObservation
+import importlib.util
+from pathlib import Path as _Path
+
 from agentguard.data.cache_reader import CompactEventCacheReader
 from agentguard.data.cache_schema import COMPACT_CACHE_SCHEMA_VERSION, FEATURE_SCHEMA_SHA256
 from agentguard.data.gt_reader import GTReader
-from agentguard.data.identity_prototype import (
-    IdentityPrototypeBuilder,
-    PreparedIdentityCandidates,
-)
 from agentguard.data.identity_vote import TrackIdentityVoteState
+
+_spec = importlib.util.spec_from_file_location(
+    "_frozen_unoptimized_identity_prototype",
+    _Path(__file__).with_name("identity_prototype.py"),
+)
+_mod = importlib.util.module_from_spec(_spec)
+assert _spec.loader is not None
+_spec.loader.exec_module(_mod)
+IdentityPrototypeBuilder = _mod.IdentityPrototypeBuilder
 from agentguard.data.label_schema import (
     ROLLOUT_LABEL_SCHEMA_SHA256,
     ROLLOUT_LABEL_SCHEMA_VERSION,
@@ -57,7 +63,7 @@ def detection_observation(
     reader: CompactEventCacheReader,
     detection_index: int,
 ) -> DetectionObservation:
-    det = reader.get_detection(int(detection_index), include_feature=True)
+    det = reader.get_detection(int(detection_index))
     feature = np.asarray(det["feature"], dtype=np.float64).reshape(1, -1)
     return DetectionObservation(
         detection_index=int(detection_index),
@@ -100,22 +106,6 @@ def gt_box_for_id(
     return None
 
 
-def _select_oracle_detection_index(
-    indices: np.ndarray,
-    boxes: np.ndarray,
-    gt_box: np.ndarray,
-    min_iou: float,
-) -> int:
-    best_idx = -1
-    best_iou = float(min_iou)
-    for det_idx, det_box in zip(indices, boxes):
-        iou = box_iou(gt_box, det_box)
-        if iou > best_iou:
-            best_iou = iou
-            best_idx = int(det_idx)
-    return best_idx
-
-
 def best_oracle_detection(
     reader: CompactEventCacheReader,
     frame_index: int,
@@ -124,116 +114,17 @@ def best_oracle_detection(
 ) -> Optional[DetectionObservation]:
     if gt_box is None or reader.detection_cache is None:
         return None
-    indices, boxes = reader.detection_cache.get_frame_indices_and_boxes(
-        int(frame_index), view="source"
-    )
-    best_idx = _select_oracle_detection_index(indices, boxes, gt_box, min_iou)
+    frame = reader.detection_cache.get_frame(int(frame_index), view="source")
+    best_idx = -1
+    best_iou = float(min_iou)
+    for det_idx, det_box in zip(frame["detection_indices"], frame["boxes"]):
+        iou = box_iou(gt_box, det_box)
+        if iou > best_iou:
+            best_iou = iou
+            best_idx = int(det_idx)
     if best_idx < 0:
         return None
     return detection_observation(reader, best_idx)
-
-
-class _SequenceReplayCache:
-    """Bounded per-sequence caches for GT/LOO label building.
-
-    Oracle keys include the replay directory, detection-cache directory, frame,
-    GT identity and IoU threshold. Frame-box and warp entries are released once
-    the event stream moves past them; oracle entries are also LRU-capped.
-    Cached arrays are stored read-only.
-    """
-
-    def __init__(self, reader: CompactEventCacheReader, future_frames: int) -> None:
-        self.reader = reader
-        det = reader.detection_cache
-        cache_dir = getattr(reader, "cache_dir", "")
-        det_dir = getattr(det, "sequence_dir", "") if det is not None else ""
-        self._source = (
-            str(Path(cache_dir).resolve()) if cache_dir else "",
-            str(Path(det_dir).resolve()) if det_dir else "",
-        )
-        self.future_frames = int(future_frames)
-        self._box_limit = max(16, self.future_frames + 3)
-        self._warp_limit = max(16, self.future_frames + 3)
-        self._oracle_limit = 4096
-        self._boxes: OrderedDict[tuple, tuple[np.ndarray, np.ndarray]] = OrderedDict()
-        self._oracle: OrderedDict[tuple, Optional[DetectionObservation]] = OrderedDict()
-        self._warps: OrderedDict[tuple, np.ndarray] = OrderedDict()
-        self.box_high_water = 0
-        self.oracle_high_water = 0
-        self.warp_high_water = 0
-
-    def evict_before(self, frame_id: int) -> None:
-        min_index = int(frame_id)
-        for store in (self._boxes, self._warps):
-            for key in [key for key in store if int(key[-1]) < min_index]:
-                del store[key]
-        for key in [key for key in self._oracle if int(key[2]) < min_index]:
-            del self._oracle[key]
-
-    @staticmethod
-    def _trim(store: OrderedDict, limit: int) -> None:
-        while len(store) > limit:
-            store.popitem(last=False)
-
-    def frame_boxes(self, frame_index: int) -> tuple[np.ndarray, np.ndarray]:
-        key = (*self._source, int(frame_index))
-        cached = self._boxes.get(key)
-        if cached is not None:
-            self._boxes.move_to_end(key)
-            return cached
-        if self.reader.detection_cache is None:
-            indices = np.zeros((0,), dtype=np.int64)
-            boxes = np.zeros((0, 4), dtype=np.float64)
-            indices.flags.writeable = False
-            boxes.flags.writeable = False
-            result = (indices, boxes)
-        else:
-            result = self.reader.detection_cache.get_frame_indices_and_boxes(
-                int(frame_index), view="source"
-            )
-        self._boxes[key] = result
-        self._trim(self._boxes, self._box_limit)
-        self.box_high_water = max(self.box_high_water, len(self._boxes))
-        return result
-
-    def warp(self, frame_index: int) -> np.ndarray:
-        key = (*self._source, int(frame_index))
-        cached = self._warps.get(key)
-        if cached is not None:
-            self._warps.move_to_end(key)
-            return cached
-        warp = np.array(_warp_for_frame(self.reader, int(frame_index)), dtype=np.float64, copy=True)
-        warp.flags.writeable = False
-        self._warps[key] = warp
-        self._trim(self._warps, self._warp_limit)
-        self.warp_high_water = max(self.warp_high_water, len(self._warps))
-        return warp
-
-    def oracle(
-        self,
-        frame_index: int,
-        gt_id: int,
-        gt_box: Optional[np.ndarray],
-        min_iou: float = 0.3,
-    ) -> Optional[DetectionObservation]:
-        if gt_box is None or self.reader.detection_cache is None:
-            return None
-        key = (*self._source, int(frame_index), int(gt_id), float(min_iou))
-        if key in self._oracle:
-            self._oracle.move_to_end(key)
-            return self._oracle[key]
-        indices, boxes = self.frame_boxes(int(frame_index))
-        best_idx = _select_oracle_detection_index(indices, boxes, gt_box, min_iou)
-        det = detection_observation(self.reader, best_idx) if best_idx >= 0 else None
-        if det is not None:
-            if det.box.flags.writeable:
-                det.box.flags.writeable = False
-            if det.feature.flags.writeable:
-                det.feature.flags.writeable = False
-        self._oracle[key] = det
-        self._trim(self._oracle, self._oracle_limit)
-        self.oracle_high_water = max(self.oracle_high_water, len(self._oracle))
-        return det
 
 
 def _warp_for_frame(reader: CompactEventCacheReader, frame_index: int) -> np.ndarray:
@@ -249,7 +140,6 @@ def _build_future_context(
     frame_id: int,
     target_gt_id: int,
     future_frames: int,
-    cache: _SequenceReplayCache | None = None,
 ) -> Tuple[
     Optional[np.ndarray],
     List[Optional[np.ndarray]],
@@ -269,8 +159,6 @@ def _build_future_context(
         or reader.manifest.get("num_frames")
         or 0
     )
-    if cache is not None:
-        cache.evict_before(int(frame_id))
     for step in range(1, future_frames + 1):
         fid = int(frame_id) + step
         if total_frames and fid > total_frames:
@@ -279,15 +167,11 @@ def _build_future_context(
         future_gt.append(gt_box)
         if gt_box is not None:
             gt_count += 1
-        if cache is not None:
-            oracle_det = cache.oracle(fid - 1, int(target_gt_id), gt_box)
-            future_warps.append(cache.warp(fid - 1))
-        else:
-            oracle_det = best_oracle_detection(reader, fid - 1, gt_box)
-            future_warps.append(_warp_for_frame(reader, fid - 1))
+        oracle_det = best_oracle_detection(reader, fid - 1, gt_box)
         if oracle_det is not None:
             oracle_count += 1
         future_oracle.append(oracle_det)
+        future_warps.append(_warp_for_frame(reader, fid - 1))
     return current_gt, future_gt, future_oracle, future_warps, gt_count, oracle_count
 
 
@@ -316,69 +200,47 @@ def build_compact_rollout_labels_for_sequence(
     proto_features: Dict[Tuple[str, int], List[np.ndarray]] = defaultdict(list)
     unique_proto_features: dict[tuple[str, int], dict[int, np.ndarray]] = defaultdict(dict)
     target_info: Dict[Tuple[int, int], Dict[str, Any]] = {}
-    sequence = str(reader.manifest["sequence"])
-    replay_cache = _SequenceReplayCache(reader, future_frames)
-    profile = os.environ.get("AGENTGUARD_LABEL_PROFILE", "").strip() not in {"", "0", "false"}
-    timings: Dict[str, float] = {}
-    started = time.perf_counter()
 
     try:
-        pass_t0 = time.perf_counter()
         for record in reader.iter_event_records():
-            track_id = int(record["track_id"])
-            frame_id = int(record["frame_id"])
-            target_gt_id = vote_state.resolve_before_current(sequence, track_id)
-            identity_key = vote_state.get_target_identity_key(track_id)
+            event = reader.materialize_training_event(record)
+            target_gt_id = vote_state.resolve_before_current(event.sequence, event.track_id)
+            identity_key = vote_state.get_target_identity_key(event.track_id)
             detection_gt_id = -1
             detection_iou = 0.0
-            accepted = int(record.get("accepted_detection_index", -1))
-            has_detection = bool(record.get("matched", False)) or accepted >= 0
-            if has_detection and accepted >= 0:
-                geometry = reader.get_detection(accepted, include_feature=False)
+            if event.has_detection and event.detection is not None:
                 detection_gt_id, detection_iou, _ = match_detection_to_gt(
-                    geometry["box"],
-                    gt_reader.get_gt_for_frame(frame_id),
+                    event.detection.box,
+                    gt_reader.get_gt_for_frame(event.frame_id),
                     min_iou=0.5,
                 )
                 if (
                     detection_gt_id >= 0
                     and detection_iou >= 0.7
-                    and float(geometry["score"]) >= 0.6
+                    and event.detection.score >= 0.6
                 ):
-                    feature = np.asarray(
-                        reader.get_detection(accepted, include_feature=True)["feature"],
-                        dtype=np.float32,
-                    ).reshape(-1)
-                    key = (sequence, detection_gt_id)
+                    feature = event.detection.feature.reshape(-1).astype(np.float32)
+                    key = (event.sequence, detection_gt_id)
                     if prototype_mode == "standard":
                         proto_features[key].append(feature)
                     else:
-                        if accepted < 0:
+                        detection_index = int(record["accepted_detection_index"])
+                        if detection_index < 0:
                             raise ValueError("matched prototype observation has no detection index")
-                        unique_proto_features[key].setdefault(accepted, feature)
+                        unique_proto_features[key].setdefault(detection_index, feature)
             target_info[(int(record["event_shard_id"]), int(record["event_offset"]))] = {
                 "target_gt_id": target_gt_id,
                 "target_identity_key": identity_key,
                 "detection_gt_id": detection_gt_id,
                 "detection_gt_iou": detection_iou,
             }
-            vote_state.add_current_observation(sequence, track_id, detection_gt_id)
-        timings["identity_pass_s"] = time.perf_counter() - pass_t0
+            vote_state.add_current_observation(event.sequence, event.track_id, detection_gt_id)
 
-        proto_t0 = time.perf_counter()
         prototypes: Dict[Tuple[str, int], np.ndarray] = {}
         for key, feats in proto_features.items():
             if len(feats) >= 3:
                 prototypes[key] = IdentityPrototypeBuilder.build_prototype(feats)
         proto_features.clear()
-        prepared_by_identity: dict[tuple[str, int], PreparedIdentityCandidates] = {}
-        if prototype_mode == "leave_one_out":
-            prepared_by_identity = {
-                key: PreparedIdentityCandidates.from_features_by_detection(feats)
-                for key, feats in unique_proto_features.items()
-            }
-            unique_proto_features.clear()
-        timings["prototype_prepare_s"] = time.perf_counter() - proto_t0
 
         raw_labels: List[Dict[str, Any]] = []
         motion_benefits: List[float] = []
@@ -392,7 +254,7 @@ def build_compact_rollout_labels_for_sequence(
             "future_oracle_coverage_count": 0,
             "prototype_count": (
                 len(prototypes) if prototype_mode == "standard"
-                else sum(len(values) >= 3 for values in prepared_by_identity.values())
+                else sum(len(values) >= 3 for values in unique_proto_features.values())
             ),
             "motion_normalization": motion_normalization,
             "prototype_mode": prototype_mode,
@@ -400,7 +262,6 @@ def build_compact_rollout_labels_for_sequence(
             "skipped_invalid": 0,
         }
 
-        label_t0 = time.perf_counter()
         for record in reader.iter_event_records():
             if max_events > 0 and len(raw_labels) >= max_events:
                 break
@@ -410,7 +271,7 @@ def build_compact_rollout_labels_for_sequence(
                 summary["skipped_unreliable"] += 1
                 continue
 
-            event = reader.materialize_training_event(record, include_association=False)
+            event = reader.materialize_training_event(record)
             summary["reliable_identity_events"] += 1
             current_gt, future_gt, future_oracle, future_warps, gt_count, oracle_count = (
                 _build_future_context(
@@ -419,7 +280,6 @@ def build_compact_rollout_labels_for_sequence(
                     event.frame_id,
                     int(target_gt_id),
                     future_frames,
-                    cache=replay_cache,
                 )
             )
             if current_gt is None:
@@ -429,11 +289,9 @@ def build_compact_rollout_labels_for_sequence(
             proto = prototypes.get((event.sequence, int(target_gt_id)))
             accepted_detection_index = int(record.get("accepted_detection_index", -1))
             if prototype_mode == "leave_one_out":
-                prepared = prepared_by_identity.get((event.sequence, int(target_gt_id)))
-                proto = (
-                    None
-                    if prepared is None
-                    else prepared.leave_one_out(accepted_detection_index)
+                proto = IdentityPrototypeBuilder.build_leave_one_out(
+                    unique_proto_features.get((event.sequence, int(target_gt_id)), {}),
+                    accepted_detection_index,
                 )
             candidate_specs = (
                 [
@@ -554,9 +412,7 @@ def build_compact_rollout_labels_for_sequence(
 
             if not wrote_any:
                 summary["skipped_invalid"] += 1
-        timings["label_pass_s"] = time.perf_counter() - label_t0
 
-        target_t0 = time.perf_counter()
         stats = compute_dataset_stats(
             {
                 "motion_benefits": [
@@ -667,13 +523,6 @@ def build_compact_rollout_labels_for_sequence(
                 "cache_schema_version": COMPACT_CACHE_SCHEMA_VERSION,
             }
         )
-        timings["targets_s"] = time.perf_counter() - target_t0
-        timings["total_s"] = time.perf_counter() - started
-        timings["oracle_cache_high_water"] = float(replay_cache.oracle_high_water)
-        timings["box_cache_high_water"] = float(replay_cache.box_high_water)
-        timings["warp_cache_high_water"] = float(replay_cache.warp_high_water)
-        if profile:
-            summary["profile"] = timings
         return raw_labels, summary
     finally:
         reader.close()
