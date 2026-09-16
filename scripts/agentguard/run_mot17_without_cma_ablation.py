@@ -387,7 +387,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--dataset-dir",
         type=Path,
         default=DATASET_DIR,
-        help="Packed train_data or train_data_v2 directory. "
+        help="Packed train_data directory. "
         "Also honors AGENTGUARD_DATASET_DIR / MOT17_DATASET_DIR.",
     )
     return parser.parse_args(argv)

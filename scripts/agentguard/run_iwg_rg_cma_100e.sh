@@ -90,7 +90,6 @@ run_case() {
   local command=(
     "${PY}" run.py --dataset MOT17 --mode all --sequences "${SEQUENCES[@]}"
     --seed 10000 --agentguard-mode iwg-rg-cma
-    --legacy-output-naming
     --agentguard-checkpoint "${CHECKPOINT}" --iwg-rg-cma-output "${output}"
     --agentguard-device cuda --detection-cache-root "${DETECTION_CACHE_ROOT}"
     --tracker-suffix "${suffix}" --print-per-sequence-metrics
@@ -110,10 +109,10 @@ run_case final "${RUN_NAME}_final_raw" false
 run_case base "${RUN_NAME}_base_post" true
 run_case final "${RUN_NAME}_final_post" true
 
-BASE_RAW="mot17_all_0.80_${RUN_NAME}_base_raw_agentguard_iwg_rg_cma_base"
-FINAL_RAW="mot17_all_0.80_${RUN_NAME}_final_raw_agentguard_iwg_rg_cma_final"
-BASE_POST="mot17_all_0.80_${RUN_NAME}_base_post_agentguard_iwg_rg_cma_base_post"
-FINAL_POST="mot17_all_0.80_${RUN_NAME}_final_post_agentguard_iwg_rg_cma_final_post"
+BASE_RAW="mot17_all_0.80_${RUN_NAME}_base_raw_iwg_rg_cma_base"
+FINAL_RAW="mot17_all_0.80_${RUN_NAME}_final_raw_iwg_rg_cma_final"
+BASE_POST="mot17_all_0.80_${RUN_NAME}_base_post_iwg_rg_cma_base_post"
+FINAL_POST="mot17_all_0.80_${RUN_NAME}_final_post_iwg_rg_cma_final_post"
 "${PY}" "${ROOT}/scripts/agentguard/evaluate_iwg_rg_cma.py" \
   --case "base_raw=${BASE_RAW}" --case "final_raw=${FINAL_RAW}" \
   --case "base_post=${BASE_POST}" --case "final_post=${FINAL_POST}" \
@@ -130,7 +129,7 @@ touch "${RUN_ROOT}/promoted"
 TEST_SUFFIX="${RUN_NAME}_test_final_post"
 TEST_COMMAND=(
   "${PY}" run.py --dataset MOT17 --mode test --seed 10000
-  --agentguard-mode iwg-rg-cma --legacy-output-naming --agentguard-checkpoint "${CHECKPOINT}"
+  --agentguard-mode iwg-rg-cma --agentguard-checkpoint "${CHECKPOINT}"
   --iwg-rg-cma-output final --agentguard-device cuda
   --detection-cache-root "${DETECTION_CACHE_ROOT}"
   --tracker-suffix "${TEST_SUFFIX}" --use_post --skip-eval
@@ -141,7 +140,7 @@ printf '\n' >> "${PROVENANCE_DIR}/test.command.txt"
 (cd "${ROOT}/3. Tracker" && "${TEST_COMMAND[@]}") \
   2>&1 | tee "${LOG_DIR}/test.log"
 
-TEST_FOLDER="mot17_test_0.80_${TEST_SUFFIX}_agentguard_iwg_rg_cma_final_post"
+TEST_FOLDER="mot17_test_0.80_${TEST_SUFFIX}_iwg_rg_cma_final_post"
 "${PY}" "${ROOT}/scripts/agentguard/package_mot17_submission.py" \
   --source-dir "${TRACKER_ROOT}/${TEST_FOLDER}" \
   --output-zip "${RUN_ROOT}/MOT17_test_RG_CMA_final_post.zip" \

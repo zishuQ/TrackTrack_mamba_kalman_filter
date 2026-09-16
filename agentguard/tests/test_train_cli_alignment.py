@@ -15,7 +15,6 @@ from agentguard.cli import (
 from agentguard.datasets.iwg_rg_cma_dataset import (
     COMPACT_INDEX_FORMAT,
     PACKED_TRAIN_DATA_FORMAT,
-    PACKED_TRAIN_DATA_V2_INDEX_FORMAT,
     StreamingIWGRGCMADataset,
     identify_packed_train_data,
     inspect_packed_train_data,
@@ -138,22 +137,7 @@ def test_identify_packed_variants_from_metadata_not_directory_name(tmp_path):
         json.loads((v1_in_v2_name / "metadata.json").read_text())
     ) == PACKED_TRAIN_DATA_FORMAT
 
-    v2_in_v1_name = tmp_path / "train_data" / "MOT17"
-    v2_in_v1_name.mkdir(parents=True)
-    (v2_in_v1_name / "metadata.json").write_text(
-        json.dumps(
-            {
-                "format": "train_data",
-                "schema_version": 2,
-                "index_format": "train_data_v2",
-            }
-        )
-    )
-    assert identify_packed_train_data(
-        json.loads((v2_in_v1_name / "metadata.json").read_text())
-    ) == PACKED_TRAIN_DATA_V2_INDEX_FORMAT
-
-    with pytest.raises(ValueError, match="schema_version=2"):
+    with pytest.raises(ValueError, match="incompatible packed train_data"):
         identify_packed_train_data(
             {"format": "train_data", "schema_version": 2, "index_format": "train_data"}
         )
@@ -188,47 +172,6 @@ def test_inspect_packed_train_data_reports_missing_and_incompatible(tmp_path):
         inspect_packed_train_data(incomplete)
 
 
-def test_inspect_v2_requires_detection_reference(tmp_path):
-    root = tmp_path / "v2"
-    sequence = "MOT17-09-FRCNN"
-    sequence_dir = root / sequence
-    sequence_dir.mkdir(parents=True)
-    (sequence_dir / "data.pt").write_bytes(b"not-a-real-archive")
-    np.save(sequence_dir / "reid_features.npy", np.zeros((2, 4), dtype=np.float32))
-    (sequence_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "format": "train_data",
-                "schema_version": 2,
-                "index_format": "train_data_v2",
-                "dataset": "MOT17",
-                "sequence": sequence,
-                "references": {
-                    "detection_cache": str(tmp_path / "missing-det"),
-                    "detection_fingerprint": {
-                        "manifest.json": {"sha256": "abc", "bytes": 1},
-                    },
-                },
-            }
-        )
-    )
-    (root / "metadata.json").write_text(
-        json.dumps(
-            {
-                "format": "train_data",
-                "schema_version": 2,
-                "index_format": "train_data_v2",
-                "train_sequences": [sequence],
-            }
-        )
-    )
-    with pytest.raises(ValueError, match="detection cache"):
-        inspect_packed_train_data(root)
-    report = inspect_packed_train_data(root, check_detection=False)
-    assert report["variant"] == PACKED_TRAIN_DATA_V2_INDEX_FORMAT
-    assert report["schema_version"] == 2
-
-
 def test_inspect_accepts_tiny_packed_v1(tmp_path):
     root = _write_packed_v1(tmp_path / "v1")
     report = inspect_packed_train_data(root)
@@ -236,7 +179,6 @@ def test_inspect_accepts_tiny_packed_v1(tmp_path):
     assert report["schema_version"] == 1
     dataset = StreamingIWGRGCMADataset(root)
     try:
-        assert dataset.packed_variant == PACKED_TRAIN_DATA_FORMAT
         assert len(dataset) == 2
     finally:
         dataset.close()

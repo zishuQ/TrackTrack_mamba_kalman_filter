@@ -122,7 +122,7 @@ run_raw_case() {
   local suffix="$2"
   local command=(
     "${PY}" run.py --dataset MOT20 --mode all --sequences "${SEQUENCES[@]}"
-    --seed 10000 --agentguard-mode iwg-rg-cma --legacy-output-naming
+    --seed 10000 --agentguard-mode iwg-rg-cma
     --agentguard-checkpoint "${CHECKPOINT}" --iwg-rg-cma-output "${output}"
     --agentguard-device cpu --detection-cache-root "${DETECTION_CACHE_ROOT}"
     --tracker-suffix "${suffix}" --print-per-sequence-metrics
@@ -137,8 +137,8 @@ run_raw_case() {
 run_raw_case base "${RUN_NAME}_base_raw"
 run_raw_case final "${RUN_NAME}_final_raw"
 
-BASE_RAW="mot20_all_0.80_${RUN_NAME}_base_raw_agentguard_iwg_rg_cma_base"
-FINAL_RAW="mot20_all_0.80_${RUN_NAME}_final_raw_agentguard_iwg_rg_cma_final"
+BASE_RAW="mot20_all_0.80_${RUN_NAME}_base_raw_iwg_rg_cma_base"
+FINAL_RAW="mot20_all_0.80_${RUN_NAME}_final_raw_iwg_rg_cma_final"
 BASE_POST="${BASE_RAW}_post"
 FINAL_POST="${FINAL_RAW}_post"
 "${PY}" "${ROOT}/scripts/agentguard/postprocess_mot_tracker_folder.py" \
