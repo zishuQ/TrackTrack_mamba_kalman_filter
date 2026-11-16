@@ -1,4 +1,4 @@
-"""Shared fixtures for SHUTrack v2 tests."""
+"""Shared fixtures for SHUTrack v3 tests."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from shutrack.data.evidence import EventEvidence
-from shutrack.features.margins import DEFAULT_MARGIN_STATS
 from shutrack.models.shutrack import ShutrackV2Config, ShutrackV2Model
 from shutrack.schema import CONTEXT_SIZE
 from shutrack.training.checkpoint import build_checkpoint_payload, save_checkpoint_atomic
@@ -30,8 +29,8 @@ def make_evidence(
     reid_dim: int = 8,
     has_detection: bool = True,
     seed: int = 0,
-    motion_scale: float = 1.0,
-    context_scale: float = 1.0,
+    evidence_scale: float = 1.0,
+    competition_scale: float = 1.0,
 ) -> EventEvidence:
     rng = np.random.RandomState(seed)
     track = rng.randn(reid_dim).astype(np.float32)
@@ -41,8 +40,8 @@ def make_evidence(
     if not has_detection:
         detection = np.zeros_like(detection)
     return EventEvidence(
-        motion=(rng.randn(12) * motion_scale).astype(np.float32),
-        context=(rng.randn(8) * context_scale).astype(np.float32),
+        evidence=(rng.randn(13) * evidence_scale).astype(np.float32),
+        competition=(rng.randn(3) * competition_scale).astype(np.float32),
         track_feature=track,
         detection_feature=detection,
         has_detection=has_detection,
@@ -53,7 +52,7 @@ def make_evidence(
     )
 
 
-def make_model(reid_dim: int = 8, seed: int = 7) -> ShutrackV2Model:
+def make_model(reid_dim: int = 8, seed: int = 7, competition_enabled: bool = True) -> ShutrackV2Model:
     torch.manual_seed(seed)
     return ShutrackV2Model(
         ShutrackV2Config(
@@ -64,19 +63,14 @@ def make_model(reid_dim: int = 8, seed: int = 7) -> ShutrackV2Model:
             ff_dim=64,
             dropout=0.0,
             appearance_proj_dim=16,
+            competition_enabled=competition_enabled,
         )
     )
 
 
-def model_inputs(events: list[EventEvidence], current) -> dict[str, torch.Tensor]:
-    from shutrack.features.windows import build_window, stack_windows
-
-    window = build_window(events, current)
-    batch = stack_windows([window])
-    return {key: torch.from_numpy(value) for key, value in batch.items()}
-
-
-def write_tiny_packed_dataset(root: Path, *, reid_dim: int = 8) -> Path:
+def write_tiny_packed_dataset(
+    root: Path, *, reid_dim: int = 8, competition_enabled: bool = True
+) -> Path:
     """Create a small self-contained packed train_data fixture."""
 
     sequences = ["seqA", "seqB"]
@@ -123,11 +117,18 @@ def write_tiny_packed_dataset(root: Path, *, reid_dim: int = 8) -> Path:
     for sequence in sequences:
         timeline_count = timelines[sequence]
         scalar = rng.randn(timeline_count, 63).astype(np.float32) * 0.25
-        # Give the context indices recognizable values.
+        # Evidence columns: 4 box residuals, 4 velocities, 2 center variances,
+        # detection score, observation gap.
+        scalar[:, 27:31] = np.linspace(0.1, 0.4, timeline_count).reshape(-1, 1)
+        scalar[:, 39:43] = np.linspace(1.0, 4.0, timeline_count).reshape(-1, 1)
+        scalar[:, 43:45] = np.linspace(-1.0, -2.0, timeline_count).reshape(-1, 1)
         scalar[:, 9] = np.linspace(0.1, 0.9, timeline_count)
-        scalar[:, 26] = 1.0
-        scalar[:, 58] = np.linspace(0.0, 1.0, timeline_count)
         scalar[:, 59] = np.linspace(1.0, 0.0, timeline_count)
+        scalar[:, 26] = 1.0
+        # Competition columns: row gap, col gap, max IoU.
+        scalar[:, 15] = np.linspace(0.05, 0.5, timeline_count)
+        scalar[:, 21] = np.linspace(0.5, 0.05, timeline_count)
+        scalar[:, 25] = np.linspace(0.0, 0.25, timeline_count)
         has_detection = np.ones(timeline_count, dtype=np.bool_)
         event_indices = np.asarray(
             [item["indices"] for item in samples[sequence]], dtype=np.int32
@@ -164,9 +165,9 @@ def write_tiny_checkpoint(
     *,
     reid_dim: int = 8,
     max_frame_gap: int = 30,
-    margin_enabled: bool = False,
+    competition_enabled: bool = True,
 ) -> ShutrackV2Model:
-    model = make_model(reid_dim=reid_dim)
+    model = make_model(reid_dim=reid_dim, competition_enabled=competition_enabled)
     payload = build_checkpoint_payload(
         model=model,
         training_config={"smoke": True},
@@ -175,11 +176,9 @@ def write_tiny_checkpoint(
             "split": "train",
             "dataset_dir": "fixture",
             "max_frame_gap": max_frame_gap,
-            "margin_enabled": margin_enabled,
-            "margin_source": (
-                "source_cache" if margin_enabled else "unavailable_packed_train_data"
-            ),
-            "margin_valid_rate": 1.0 if margin_enabled else 0.0,
+            "competition_enabled": competition_enabled,
+            "label_source": "packed_train_data_safe_gate_target",
+            "feature_schema_version": "shutrack_v3_evidence13_competition3",
         },
         epoch=1,
         global_step=1,
@@ -188,14 +187,6 @@ def write_tiny_checkpoint(
         scheduler=None,
         normalization_mean=np.zeros(63),
         normalization_std=np.ones(63),
-        margin={
-            "enabled": margin_enabled,
-            "source": (
-                "source_cache" if margin_enabled else "unavailable_packed_train_data"
-            ),
-            "valid_rate": 1.0 if margin_enabled else 0.0,
-            "stats": DEFAULT_MARGIN_STATS,
-        },
         include_optimizer=False,
     )
     save_checkpoint_atomic(path, payload)
@@ -225,11 +216,18 @@ class FakeSnapshot:
 
 
 class FakeDetection:
-    def __init__(self, feature: np.ndarray | None = None, box=None, score=0.9) -> None:
+    def __init__(
+        self,
+        feature: np.ndarray | None = None,
+        box=None,
+        score=0.9,
+        frame_detection_index: int = 0,
+    ) -> None:
         self.feat = np.asarray(feature if feature is not None else np.ones(8), dtype=np.float32)
         self.box = np.asarray(box if box is not None else [95, 95, 115, 125], dtype=np.float64)
         self.score = float(score)
         self.source = 0
+        self.frame_detection_index = int(frame_detection_index)
 
     @property
     def x1y1x2y2(self) -> np.ndarray:

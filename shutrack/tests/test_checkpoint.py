@@ -1,4 +1,4 @@
-"""Checkpoint schema, roundtrip and legacy rejection tests."""
+"""Checkpoint schema, roundtrip, branch config and legacy rejection tests."""
 
 from __future__ import annotations
 
@@ -18,19 +18,18 @@ from shutrack.training.checkpoint import (
 from shutrack.tests.conftest import make_model, write_tiny_checkpoint
 
 
-def _batch(reid_dim: int = 8, batch_size: int = 3) -> dict[str, torch.Tensor]:
+def _batch(reid_dim: int = 8, batch_size: int = 3, competition_enabled: bool = True):
     generator = torch.Generator().manual_seed(11)
     return {
-        "history_motion": torch.randn(batch_size, 5, 12, generator=generator),
+        "history_evidence": torch.randn(batch_size, 5, 13, generator=generator),
         "history_track": torch.randn(batch_size, 5, reid_dim, generator=generator),
         "history_detection": torch.randn(batch_size, 5, reid_dim, generator=generator),
-        "history_context": torch.randn(batch_size, 5, 8, generator=generator),
         "history_mask": torch.zeros(batch_size, 5, dtype=torch.bool),
         "history_has_detection": torch.ones(batch_size, 5, dtype=torch.bool),
-        "current_motion": torch.randn(batch_size, 12, generator=generator),
+        "current_evidence": torch.randn(batch_size, 13, generator=generator),
         "current_track": torch.randn(batch_size, reid_dim, generator=generator),
         "current_detection": torch.randn(batch_size, reid_dim, generator=generator),
-        "current_context": torch.randn(batch_size, 8, generator=generator),
+        "current_competition": torch.randn(batch_size, 3, generator=generator),
         "current_has_detection": torch.ones(batch_size, dtype=torch.bool),
         "history_reset": torch.zeros(batch_size, 5, dtype=torch.bool),
     }
@@ -52,7 +51,19 @@ def test_checkpoint_roundtrip_is_bitwise_equivalent(tmp_path: Path):
     torch.testing.assert_close(expected, actual, atol=0.0, rtol=0.0)
     summary = checkpoint_summary(checkpoint)
     assert summary["architecture"] == "shutrack_hce_rsc"
-    assert summary["margin"]["source"] == "unavailable_packed_train_data"
+    assert summary["competition_enabled"] is True
+
+
+def test_competition_disabled_checkpoint_roundtrip(tmp_path: Path):
+    path = tmp_path / "best.pt"
+    write_tiny_checkpoint(path, competition_enabled=False)
+    model, checkpoint = load_shutrack_checkpoint(path)
+    assert checkpoint["competition_enabled"] is False
+    assert model.competition_enabled is False
+    model.eval()
+    with torch.no_grad():
+        gates = model(**_batch(competition_enabled=False))["gates"]
+    assert torch.isfinite(gates).all()
 
 
 def test_checkpoint_rejects_wrong_architecture(tmp_path: Path):
@@ -92,6 +103,17 @@ def test_checkpoint_rejects_feature_schema_mismatch(tmp_path: Path):
     tampered = tmp_path / "tampered_schema.pt"
     save_checkpoint_atomic(tampered, payload)
     with pytest.raises(ValueError, match="feature schema hash mismatch"):
+        load_shutrack_checkpoint(tampered)
+
+
+def test_checkpoint_rejects_branch_mismatch(tmp_path: Path):
+    path = tmp_path / "best.pt"
+    write_tiny_checkpoint(path)
+    payload = torch.load(path, weights_only=False)
+    payload["competition_enabled"] = False
+    tampered = tmp_path / "tampered_branch.pt"
+    save_checkpoint_atomic(tampered, payload)
+    with pytest.raises(ValueError, match="competition_enabled does not match"):
         load_shutrack_checkpoint(tampered)
 
 

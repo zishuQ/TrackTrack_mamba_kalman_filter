@@ -1,4 +1,4 @@
-"""Read-only compact-cache adapter: recorded candidate-pool margins."""
+"""Read-only compact-cache adapter: evidence and competition columns."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 
 import numpy as np
-import pytest
 import torch
 
 from agentguard.data.cache_schema import (
@@ -15,9 +14,9 @@ from agentguard.data.cache_schema import (
 )
 from shutrack.data.legacy_adapter import (
     evidence_from_cached_event,
-    margins_from_cached_event,
     open_compact_event_reader,
 )
+from shutrack.schema import COMPETITION_SCALAR_INDICES, EVIDENCE_SCALAR_INDICES
 
 
 def _write_cache(root: Path) -> tuple[Path, Path]:
@@ -46,14 +45,14 @@ def _write_cache(root: Path) -> tuple[Path, Path]:
         )
     )
     scalar = np.zeros(63, dtype=np.float32)
-    scalar[list(range(12))] = np.arange(12, dtype=np.float32)
     scalar[27:31] = [0.1, 0.2, 0.3, 0.4]
     scalar[39:43] = [1.0, 2.0, 3.0, 4.0]
-    scalar[43:47] = [-1.0, -2.0, -3.0, -4.0]
+    scalar[43:45] = [-1.0, -2.0]
     scalar[9] = 0.8
-    scalar[26] = 1.0
-    scalar[58] = 0.2
     scalar[59] = 0.1
+    scalar[15] = 0.6
+    scalar[21] = 0.5
+    scalar[25] = 0.7
     record = {
         "event_shard_id": 0,
         "event_offset": 0,
@@ -114,52 +113,45 @@ def _write_cache(root: Path) -> tuple[Path, Path]:
     return event_dir, detection_dir
 
 
-def test_cached_margins_and_evidence_are_read_only(tmp_path: Path):
+def test_cached_evidence_uses_normalized_evidence_and_competition_columns(tmp_path: Path):
     event_dir, detection_dir = _write_cache(tmp_path)
     reader = open_compact_event_reader(event_dir, detection_dir, max_cached_shards=2)
     try:
         record = reader.get_event_record(0, 0)
-        margins = margins_from_cached_event(reader, record)
-        assert margins.row_valid and margins.col_valid
-        assert margins.row_margin == pytest.approx(0.7, abs=1e-6)
-        assert margins.col_margin == pytest.approx(0.6, abs=1e-6)
-
+        scalar = np.asarray(record["scalar_features"], dtype=np.float64)
         evidence = evidence_from_cached_event(
             reader,
             record,
             scalar_mean=np.zeros(63),
             scalar_std=np.ones(63),
-            margin_stats={
-                "mean": [0.0, 0.0],
-                "std": [1.0, 1.0],
-            },
+            competition_enabled=True,
             segment_id=0,
         )
         assert evidence.has_detection
-        assert evidence.context[0] == pytest.approx(0.8)
-        assert evidence.context[1] == pytest.approx(0.7)
-        assert evidence.context[2] == pytest.approx(0.6)
-        assert evidence.context[3] == pytest.approx(0.2)
-        assert evidence.context[4] == pytest.approx(0.1)
-        assert evidence.context[5] == pytest.approx(1.0)
-        assert evidence.context[6] == pytest.approx(1.0)
-        assert evidence.context[7] == pytest.approx(1.0)
-        np.testing.assert_allclose(evidence.motion[:4], [0.1, 0.2, 0.3, 0.4])
-        np.testing.assert_allclose(evidence.motion[4:8], [1.0, 2.0, 3.0, 4.0])
-        np.testing.assert_allclose(evidence.motion[8:], [-1.0, -2.0, -3.0, -4.0])
+        expected_evidence = [float(scalar[index]) for index in EVIDENCE_SCALAR_INDICES] + [1.0]
+        np.testing.assert_allclose(evidence.evidence, expected_evidence, atol=1e-6)
+        expected_competition = [float(scalar[index]) for index in COMPETITION_SCALAR_INDICES]
+        np.testing.assert_allclose(
+            evidence.competition, expected_competition, atol=1e-6
+        )
         np.testing.assert_allclose(evidence.detection_feature, 0.5)
     finally:
         reader.close()
 
 
-def test_missing_association_yields_invalid_margins(tmp_path: Path):
+def test_cached_evidence_zeros_competition_when_branch_disabled(tmp_path: Path):
     event_dir, detection_dir = _write_cache(tmp_path)
     reader = open_compact_event_reader(event_dir, detection_dir)
     try:
-        record = dict(reader.get_event_record(0, 0))
-        record["association_shard_id"] = -1
-        record["association_offset"] = -1
-        margins = margins_from_cached_event(reader, record)
-        assert not margins.row_valid and not margins.col_valid
+        record = reader.get_event_record(0, 0)
+        evidence = evidence_from_cached_event(
+            reader,
+            record,
+            scalar_mean=np.zeros(63),
+            scalar_std=np.ones(63),
+            competition_enabled=False,
+            segment_id=0,
+        )
+        assert evidence.competition.tolist() == [0.0, 0.0, 0.0]
     finally:
         reader.close()

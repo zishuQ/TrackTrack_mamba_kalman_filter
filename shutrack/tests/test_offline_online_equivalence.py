@@ -93,20 +93,24 @@ def test_future_events_do_not_change_current_window_or_gate():
             frame_id=events[index].frame_id,
             observation_count=events[index].observation_count,
             seed=900 + index,
-            motion_scale=25.0,
-            context_scale=25.0,
+            evidence_scale=25.0,
+            competition_scale=25.0,
         )
     window_after = window_from_sequence(perturbed, current_index)
 
     for name in (
-        "history_motion",
+        "history_evidence",
         "history_track",
         "history_detection",
-        "history_context",
     ):
         np.testing.assert_allclose(
             getattr(window_before, name), getattr(window_after, name), atol=1e-6
         )
+    np.testing.assert_allclose(
+        window_before.current_competition,
+        window_after.current_competition,
+        atol=1e-6,
+    )
 
     model = make_model()
     model.eval()
@@ -133,5 +137,5 @@ def test_windows_never_cross_tracks_or_sequences():
     )
     assert window.history_mask.tolist() == [True, True, True, True, False]
     np.testing.assert_allclose(
-        window.history_motion[-1], same_track_same_segment.motion
+        window.history_evidence[-1], same_track_same_segment.evidence
     )

@@ -44,6 +44,9 @@ def run_entry_smoke(
     if stats_path.exists():
         stats_path.unlink()
     suffix = f"shutrack_v2_entry_smoke_{sequence}_{max_frames}"
+    early = bool(os.environ.get("SHUTRACK_SMOKE_EARLY"))
+    if early:
+        suffix += "_early"
     command = [
         sys.executable,
         "-u",
@@ -68,6 +71,8 @@ def run_entry_smoke(
         "--agentguard-stats-output",
         str(stats_path),
     ]
+    if early:
+        command.append("--shutrack-early-enable")
     result = subprocess.run(
         command,
         cwd=TRACKER_DIR,

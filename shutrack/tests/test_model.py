@@ -1,8 +1,7 @@
-"""HCE/RSC model contract, gradient and cold-start tests."""
+"""HCE/RSC model contract, gradient, branch and cold-start tests."""
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 import torch
 
@@ -11,26 +10,33 @@ from shutrack.tests.conftest import make_model
 from shutrack.training.loss import gate_loss
 
 
-def _batch(batch_size: int, reid_dim: int = 8, mask=None, reset=None):
+def _batch(
+    batch_size: int,
+    reid_dim: int = 8,
+    mask=None,
+    reset=None,
+    competition_enabled: bool = True,
+):
     generator = torch.Generator().manual_seed(3)
     shape = (batch_size, 5, reid_dim)
     batch = {
-        "history_motion": torch.randn(batch_size, 5, 12, generator=generator),
+        "history_evidence": torch.randn(batch_size, 5, 13, generator=generator),
         "history_track": torch.randn(*shape, generator=generator),
         "history_detection": torch.randn(*shape, generator=generator),
-        "history_context": torch.randn(batch_size, 5, 8, generator=generator),
         "history_mask": (
             torch.zeros(batch_size, 5, dtype=torch.bool)
             if mask is None
             else torch.as_tensor(mask, dtype=torch.bool)
         ),
         "history_has_detection": torch.ones(batch_size, 5, dtype=torch.bool),
-        "current_motion": torch.randn(batch_size, 12, generator=generator),
+        "current_evidence": torch.randn(batch_size, 13, generator=generator),
         "current_track": torch.randn(batch_size, reid_dim, generator=generator),
         "current_detection": torch.randn(batch_size, reid_dim, generator=generator),
-        "current_context": torch.randn(batch_size, 8, generator=generator),
+        "current_competition": torch.randn(batch_size, 3, generator=generator),
         "current_has_detection": torch.ones(batch_size, dtype=torch.bool),
     }
+    if not competition_enabled:
+        batch["current_competition"] = torch.zeros(batch_size, 3)
     if reset is not None:
         batch["history_reset"] = torch.as_tensor(reset, dtype=torch.bool)
     return batch
@@ -58,14 +64,30 @@ def test_no_legacy_heads_or_parameters():
     assert hasattr(model, "hce") and hasattr(model, "rsc")
 
 
+def test_competition_branch_on_and_off():
+    full = make_model(competition_enabled=True)
+    lean = make_model(competition_enabled=False)
+    assert full.competition_encoder is not None
+    assert lean.competition_encoder is None
+    assert full.rsc.token_count == 3
+    assert lean.rsc.token_count == 2
+    full.eval()
+    lean.eval()
+    with torch.no_grad():
+        full_gates = full(**_batch(4))["gates"]
+        lean_gates = lean(**_batch(4, competition_enabled=False))["gates"]
+    assert torch.isfinite(full_gates).all()
+    assert torch.isfinite(lean_gates).all()
+    assert full.parameter_report()["total"] > lean.parameter_report()["total"]
+
+
 def test_cold_start_and_all_padding_history_is_finite():
     model = make_model()
     model.eval()
     batch = _batch(3)
-    batch["history_motion"].zero_()
+    batch["history_evidence"].zero_()
     batch["history_track"].zero_()
     batch["history_detection"].zero_()
-    batch["history_context"].zero_()
     batch["history_mask"][:] = True
     batch["history_has_detection"][:] = False
     with torch.no_grad():
@@ -89,10 +111,9 @@ def test_history_reset_mask_removes_history_influence():
     model.eval()
     first = _batch(1)
     second = _batch(1)
-    second["history_motion"] = torch.randn_like(second["history_motion"]) * 7.0
+    second["history_evidence"] = torch.randn_like(second["history_evidence"]) * 7.0
     second["history_track"] = torch.randn_like(second["history_track"]) * 7.0
     second["history_detection"] = torch.randn_like(second["history_detection"]) * 7.0
-    second["history_context"] = torch.randn_like(second["history_context"]) * 7.0
     reset = torch.ones(1, 5, dtype=torch.bool)
     with torch.no_grad():
         gates_first = model(**{**first, "history_reset": reset})["gates"]
@@ -137,7 +158,11 @@ def test_loss_all_invalid_is_finite_zero_with_gradient_path():
 
 
 def test_parameter_growth_is_modest():
-    model = ShutrackV2Model(ShutrackV2Config(reid_dim=2048))
-    counts = model.parameter_report()
-    assert counts["total"] < 2_000_000
-    assert counts["hce"] > 0 and counts["rsc"] > 0
+    full = ShutrackV2Model(ShutrackV2Config(reid_dim=2048))
+    lean = ShutrackV2Model(
+        ShutrackV2Config(reid_dim=2048, competition_enabled=False)
+    )
+    assert full.parameter_report()["total"] < 2_000_000
+    assert lean.parameter_report()["total"] < full.parameter_report()["total"]
+    assert full.parameter_report()["hce"] > 0
+    assert full.parameter_report()["rsc"] > 0

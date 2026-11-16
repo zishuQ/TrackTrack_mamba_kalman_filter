@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from shutrack.data.packed_dataset import PackedShutrackDataset
-from shutrack.schema import MOTION_SCALAR_INDICES
+from shutrack.schema import COMPETITION_SCALAR_INDICES, EVIDENCE_SCALAR_INDICES
 from shutrack.tests.conftest import write_tiny_packed_dataset
 
 
@@ -23,35 +23,33 @@ def _snapshot(root: Path) -> dict[str, tuple[int, int]]:
 
 
 def test_packed_sample_contract(tiny_packed_dir: Path):
-    with pytest.warns(RuntimeWarning):
-        dataset = PackedShutrackDataset(tiny_packed_dir)
+    dataset = PackedShutrackDataset(tiny_packed_dir)
     try:
         assert len(dataset) == 4
         sample = dataset[0]
-        assert sample["history_motion"].shape == (5, 12)
+        assert sample["history_evidence"].shape == (5, 13)
         assert sample["history_track"].shape == (5, 8)
         assert sample["history_detection"].shape == (5, 8)
-        assert sample["history_context"].shape == (5, 8)
+        assert sample["current_evidence"].shape == (13,)
+        assert sample["current_competition"].shape == (3,)
         assert sample["history_mask"].tolist() == [True, True, True, False, False]
         assert sample["current_has_detection"].item() is True
         assert sample["safe_gate_target"].shape == (2,)
         assert sample["valid_channels"].tolist() == [True, True]
         assert sample["sample_weight"].item() == pytest.approx(1.0)
-        assert sample["margin_valid"].item() is False
-        assert dataset.margin_source == "unavailable_packed_train_data"
-        assert dataset.margin_valid_rate == 0.0
+        assert dataset.competition_enabled is True
 
         batch = dataset.collate_fn([dataset[index] for index in range(3)])
-        assert batch["history_motion"].shape == (3, 5, 12)
+        assert batch["history_evidence"].shape == (3, 5, 13)
+        assert batch["current_competition"].shape == (3, 3)
         assert batch["safe_gate_target"].shape == (3, 2)
         assert isinstance(batch["sequence"], list)
     finally:
         dataset.close()
 
 
-def test_packed_scalars_are_selected_not_renormalized(tiny_packed_dir: Path):
-    with pytest.warns(RuntimeWarning):
-        dataset = PackedShutrackDataset(tiny_packed_dir)
+def test_packed_values_are_selected_from_normalized_scalars(tiny_packed_dir: Path):
+    dataset = PackedShutrackDataset(tiny_packed_dir)
     try:
         packed = torch.load(
             tiny_packed_dir / "seqA" / "data.pt", weights_only=False
@@ -59,30 +57,28 @@ def test_packed_scalars_are_selected_not_renormalized(tiny_packed_dir: Path):
         sample = dataset[0]
         current_index = int(packed["event_indices"][0, -1])
         scalar = packed["timeline_scalar_feats"][current_index].numpy()
-        expected_motion = [float(scalar[index]) for index in MOTION_SCALAR_INDICES]
+        expected_evidence = [float(scalar[index]) for index in EVIDENCE_SCALAR_INDICES] + [1.0]
         np.testing.assert_allclose(
-            sample["current_motion"].numpy(), expected_motion, atol=1e-6
+            sample["current_evidence"].numpy(), expected_evidence, atol=1e-6
         )
-        context = sample["current_context"].numpy()
-        assert context[0] == pytest.approx(float(scalar[9]))
-        assert context[3] == pytest.approx(float(scalar[58]))
-        assert context[4] == pytest.approx(float(scalar[59]))
-        assert context[5] == pytest.approx(float(scalar[26]))
-        assert context[1] == 0.0 and context[2] == 0.0
-        assert context[6] == 0.0 and context[7] == 0.0
+        expected_competition = [
+            float(scalar[index]) for index in COMPETITION_SCALAR_INDICES
+        ]
+        np.testing.assert_allclose(
+            sample["current_competition"].numpy(), expected_competition, atol=1e-6
+        )
     finally:
         dataset.close()
 
 
-def test_margin_required_mode_reports_missing_fields(tiny_packed_dir: Path):
-    with pytest.raises(ValueError, match="raw_cost"):
-        PackedShutrackDataset(tiny_packed_dir, margin_mode="required")
-
-
-def test_margin_disabled_mode_is_explicit_and_quiet(tiny_packed_dir: Path):
-    dataset = PackedShutrackDataset(tiny_packed_dir, margin_mode="disabled")
+def test_competition_disabled_zeros_the_branch(tmp_path: Path):
+    root = write_tiny_packed_dataset(tmp_path / "packed")
+    dataset = PackedShutrackDataset(root, competition_enabled=False)
     try:
-        assert dataset.margin_source == "disabled"
+        sample = dataset[0]
+        assert sample["current_competition"].abs().sum().item() == 0.0
+        assert dataset.competition_enabled is False
+        assert dataset.descriptor()["competition_enabled"] is False
     finally:
         dataset.close()
 
@@ -105,12 +101,11 @@ def test_dataset_reading_is_read_only(tiny_packed_dir: Path, monkeypatch):
     )
 
     before = _snapshot(tiny_packed_dir)
-    with pytest.warns(RuntimeWarning):
-        dataset = PackedShutrackDataset(tiny_packed_dir, max_samples=0)
+    dataset = PackedShutrackDataset(tiny_packed_dir, max_samples=0)
     try:
         for index in range(len(dataset)):
             sample = dataset[index]
-            assert torch.isfinite(sample["current_motion"]).all()
+            assert torch.isfinite(sample["current_evidence"]).all()
     finally:
         dataset.close()
     after = _snapshot(tiny_packed_dir)
@@ -118,8 +113,7 @@ def test_dataset_reading_is_read_only(tiny_packed_dir: Path, monkeypatch):
 
 
 def test_max_samples_truncates_view_only(tiny_packed_dir: Path):
-    with pytest.warns(RuntimeWarning):
-        dataset = PackedShutrackDataset(tiny_packed_dir, max_samples=2)
+    dataset = PackedShutrackDataset(tiny_packed_dir, max_samples=2)
     try:
         assert len(dataset) == 2
         assert dataset.total_samples == 4

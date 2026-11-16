@@ -37,7 +37,20 @@ def _association_meta() -> dict:
         "assignment_round": np.zeros_like(raw, dtype=np.int16),
         "assignment_threshold": np.full_like(raw, 0.5),
         "detection_source": np.zeros_like(raw, dtype=np.int8),
+        "detection_indices": np.arange(3, dtype=np.int64),
     }
+
+
+def _pool() -> list:
+    boxes = [
+        [180, 180, 220, 240],
+        [180, 180, 220, 240],
+        [300, 300, 340, 360],
+    ]
+    return [
+        FakeDetection(box=boxes[index], frame_detection_index=index)
+        for index in range(3)
+    ]
 
 
 def _write_single_event_packed(
@@ -94,9 +107,9 @@ def _write_single_event_packed(
     return root
 
 
-def test_packed_offline_matches_online_features_and_gates(tmp_path: Path):
+def test_packed_offline_matches_online_features_masks_and_gates(tmp_path: Path):
     checkpoint_path = tmp_path / "best.pt"
-    write_tiny_checkpoint(checkpoint_path, margin_enabled=False)
+    write_tiny_checkpoint(checkpoint_path, competition_enabled=True)
     model, checkpoint = load_runtime_model(checkpoint_path, device="cpu")
     runtime = ShutrackRuntime(
         model,
@@ -105,11 +118,14 @@ def test_packed_offline_matches_online_features_and_gates(tmp_path: Path):
         config=ShutrackRuntimeConfig(min_observations=1),
     )
     adapter = ShutrackTrackerAdapter(
-        SimpleNamespace(img_w=640, img_h=480), "tiny", runtime=runtime
+        SimpleNamespace(img_w=640, img_h=480, shutrack_early_enable=False),
+        "tiny",
+        runtime=runtime,
     )
-    adapter.begin_frame(1, 640, 480)
+    pool = _pool()
+    adapter.begin_frame(1, 640, 480, detection_pool=pool)
     track = FakeTrack(track_id=1, observation_count=6)
-    detection = FakeDetection()
+    detection = pool[1]
     snapshot = FakeSnapshot(frame_id=1)
     association_meta = _association_meta()
 
@@ -144,6 +160,13 @@ def test_packed_offline_matches_online_features_and_gates(tmp_path: Path):
         np.asarray(checkpoint["normalization_mean"], dtype=np.float64),
         np.asarray(checkpoint["normalization_std"], dtype=np.float64),
     )
+    # Cross-check the online competition token against the legacy columns the
+    # packed cache stores (15/21/25), including the single-candidate fallback.
+    np.testing.assert_allclose(
+        evidence.competition,
+        normalized[[15, 21, 25]].astype(np.float32),
+        atol=1e-6,
+    )
 
     dataset_dir = _write_single_event_packed(
         tmp_path / "packed",
@@ -151,14 +174,16 @@ def test_packed_offline_matches_online_features_and_gates(tmp_path: Path):
         track_feature=evidence.track_feature,
         detection_feature=evidence.detection_feature,
     )
-    dataset = PackedShutrackDataset(dataset_dir, margin_mode="disabled")
+    dataset = PackedShutrackDataset(dataset_dir, competition_enabled=True)
     try:
         sample = dataset[0]
         np.testing.assert_allclose(
-            sample["current_motion"].numpy(), evidence.motion, atol=1e-6
+            sample["current_evidence"].numpy(), evidence.evidence, atol=1e-6
         )
         np.testing.assert_allclose(
-            sample["current_context"].numpy(), evidence.context, atol=1e-6
+            sample["current_competition"].numpy(),
+            evidence.competition,
+            atol=1e-6,
         )
         np.testing.assert_allclose(
             sample["current_track"].numpy(), evidence.track_feature, atol=1e-6
@@ -177,6 +202,69 @@ def test_packed_offline_matches_online_features_and_gates(tmp_path: Path):
         with torch.no_grad():
             offline_gates = model(**offline_inputs)["gates"].numpy()[0]
         online_gates = runtime.infer_batch([(1, evidence)])[0]
+        np.testing.assert_allclose(offline_gates, online_gates, atol=1e-6)
+    finally:
+        dataset.close()
+
+
+def test_no_competition_parity_when_branch_disabled(tmp_path: Path):
+    checkpoint_path = tmp_path / "best.pt"
+    write_tiny_checkpoint(checkpoint_path, competition_enabled=False)
+    model, checkpoint = load_runtime_model(checkpoint_path, device="cpu")
+    runtime = ShutrackRuntime(
+        model,
+        checkpoint,
+        device="cpu",
+        config=ShutrackRuntimeConfig(min_observations=1),
+    )
+    adapter = ShutrackTrackerAdapter(
+        SimpleNamespace(img_w=640, img_h=480, shutrack_early_enable=False),
+        "tiny",
+        runtime=runtime,
+    )
+    pool = _pool()
+    adapter.begin_frame(1, 640, 480, detection_pool=pool)
+    track = FakeTrack(track_id=2, observation_count=6)
+    snapshot = FakeSnapshot(frame_id=1)
+    event = adapter.build_matched_event(
+        track, pool[1], 0, 1, _association_meta(), np.eye(2, 3), snapshot, snapshot
+    )
+    assert event.evidence.competition.tolist() == [0.0, 0.0, 0.0]
+
+    params = runtime.scalar_params_for(
+        frame_id=1,
+        image_width=640,
+        image_height=480,
+        has_detection=True,
+        pre_update_state=snapshot,
+        detection_box=pool[1].box,
+        detection_score=pool[1].score,
+        association_meta=_association_meta(),
+        track_row=0,
+        detection_col=1,
+    )
+    raw = legacy_shutrack_scalar63(params)
+    normalized = normalize_scalar63(
+        raw,
+        np.asarray(checkpoint["normalization_mean"], dtype=np.float64),
+        np.asarray(checkpoint["normalization_std"], dtype=np.float64),
+    )
+    dataset_dir = _write_single_event_packed(
+        tmp_path / "packed",
+        normalized_scalar=normalized,
+        track_feature=event.evidence.track_feature,
+        detection_feature=event.evidence.detection_feature,
+    )
+    dataset = PackedShutrackDataset(dataset_dir, competition_enabled=False)
+    try:
+        sample = dataset[0]
+        assert sample["current_competition"].abs().sum().item() == 0.0
+        offline_inputs = {
+            key: sample[key].unsqueeze(0) for key in MODEL_INPUT_KEYS
+        }
+        with torch.no_grad():
+            offline_gates = model(**offline_inputs)["gates"].numpy()[0]
+        online_gates = runtime.infer_batch([(2, event.evidence)])[0]
         np.testing.assert_allclose(offline_gates, online_gates, atol=1e-6)
     finally:
         dataset.close()

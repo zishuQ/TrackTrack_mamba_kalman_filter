@@ -12,7 +12,7 @@ from shutrack.data.sampling import SequenceBatchSampler
 
 
 def _dataset(path: Path) -> PackedShutrackDataset:
-    return PackedShutrackDataset(path, margin_mode="disabled")
+    return PackedShutrackDataset(path)
 
 
 def _batch_sequence(

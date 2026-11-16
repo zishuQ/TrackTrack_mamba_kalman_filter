@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -34,16 +36,18 @@ def _association_meta(num_tracks: int = 2, num_detections: int = 3) -> dict:
         "assignment_round": np.zeros_like(raw, dtype=np.int16),
         "assignment_threshold": np.full_like(raw, 0.5),
         "detection_source": np.zeros_like(raw, dtype=np.int8),
+        "detection_indices": np.arange(num_detections, dtype=np.int64),
     }
 
 
 def _adapter(
     tmp_path,
     min_observations: int = 1,
-    margin_enabled: bool = False,
+    competition_enabled: bool = True,
+    early_enable: bool = False,
 ):
     checkpoint_path = tmp_path / "best.pt"
-    write_tiny_checkpoint(checkpoint_path, margin_enabled=margin_enabled)
+    write_tiny_checkpoint(checkpoint_path, competition_enabled=competition_enabled)
     model, checkpoint = load_runtime_model(checkpoint_path, device="cpu")
     runtime = ShutrackRuntime(
         model,
@@ -51,15 +55,32 @@ def _adapter(
         device="cpu",
         config=ShutrackRuntimeConfig(min_observations=min_observations),
     )
-    args = SimpleNamespace(img_w=640, img_h=480)
+    args = SimpleNamespace(
+        img_w=640,
+        img_h=480,
+        shutrack_early_enable=early_enable,
+    )
     return ShutrackTrackerAdapter(args, "tiny", runtime=runtime), runtime
+
+
+def _pool(count: int = 3) -> list:
+    boxes = [
+        [180, 180, 220, 240],
+        [180, 180, 220, 240],
+        [300, 300, 340, 360],
+    ]
+    return [
+        FakeDetection(box=boxes[i % len(boxes)], frame_detection_index=i)
+        for i in range(count)
+    ]
 
 
 def test_matched_event_produces_gates_and_delegates_update(tmp_path):
     adapter, runtime = _adapter(tmp_path)
-    adapter.begin_frame(5, 640, 480)
+    pool = _pool()
+    adapter.begin_frame(5, 640, 480, detection_pool=pool)
     track = FakeTrack(track_id=1, observation_count=3)
-    detection = FakeDetection()
+    detection = pool[1]
     snapshot = FakeSnapshot(frame_id=5)
     event = adapter.build_matched_event(
         track,
@@ -87,10 +108,84 @@ def test_matched_event_produces_gates_and_delegates_update(tmp_path):
     assert runtime.stats.model_inferences == 1
 
 
+def test_competition_token_uses_recorded_candidate_pool(tmp_path):
+    adapter, runtime = _adapter(tmp_path, competition_enabled=True)
+    pool = _pool()
+    adapter.begin_frame(2, 640, 480, detection_pool=pool)
+    track = FakeTrack(track_id=2, observation_count=6)
+    snapshot = FakeSnapshot(frame_id=2)
+    event = adapter.build_matched_event(
+        track,
+        pool[1],
+        track_idx=0,
+        det_idx=1,
+        association_meta=_association_meta(),
+        warp_matrix=np.eye(2, 3),
+        frame_start_state_snapshot=snapshot,
+        pre_update_state_snapshot=snapshot,
+    )
+    competition = event.evidence.competition
+    # Row diff: second-best 0.8 - selected 0.2 = 0.6.
+    # Column diff: second-best 0.7 - selected 0.2 = 0.5.
+    # Self-excluded max IoU: detection 1 overlaps pool entry 0.
+    assert competition[0] == pytest.approx(0.6, abs=1e-6)
+    assert competition[1] == pytest.approx(0.5, abs=1e-6)
+    assert competition[2] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_single_candidate_competition_uses_old_boundary(tmp_path):
+    adapter, runtime = _adapter(tmp_path, competition_enabled=True)
+    pool = [FakeDetection(frame_detection_index=0)]
+    adapter.begin_frame(2, 640, 480, detection_pool=pool)
+    track = FakeTrack(track_id=3, observation_count=6)
+    snapshot = FakeSnapshot(frame_id=2)
+    meta = {
+        "raw_cost": np.array([[0.4]]),
+        "final_cost": np.array([[0.4]]),
+        "iou_similarity": np.ones((1, 1)),
+        "detection_indices": np.array([0], dtype=np.int64),
+        "detection_source": np.zeros((1, 1), dtype=np.int8),
+    }
+    event = adapter.build_matched_event(
+        track,
+        pool[0],
+        track_idx=0,
+        det_idx=0,
+        association_meta=meta,
+        warp_matrix=np.eye(2, 3),
+        frame_start_state_snapshot=snapshot,
+        pre_update_state_snapshot=snapshot,
+    )
+    competition = event.evidence.competition
+    assert competition[0] == pytest.approx(0.6, abs=1e-6)
+    assert competition[1] == pytest.approx(0.6, abs=1e-6)
+    assert competition[2] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_competition_disabled_checkpoint_zeros_the_token(tmp_path):
+    adapter, runtime = _adapter(tmp_path, competition_enabled=False)
+    pool = _pool()
+    adapter.begin_frame(2, 640, 480, detection_pool=pool)
+    track = FakeTrack(track_id=4, observation_count=6)
+    snapshot = FakeSnapshot(frame_id=2)
+    event = adapter.build_matched_event(
+        track,
+        pool[1],
+        track_idx=0,
+        det_idx=1,
+        association_meta=_association_meta(),
+        warp_matrix=np.eye(2, 3),
+        frame_start_state_snapshot=snapshot,
+        pre_update_state_snapshot=snapshot,
+    )
+    assert event.evidence.competition.tolist() == [0.0, 0.0, 0.0]
+
+
 def test_unmatched_event_is_zero_gated_without_model_call(tmp_path):
     adapter, runtime = _adapter(tmp_path)
-    adapter.begin_frame(2, 640, 480)
-    track = FakeTrack(track_id=2, observation_count=2)
+    pool = _pool()
+    adapter.begin_frame(2, 640, 480, detection_pool=pool)
+    track = FakeTrack(track_id=5, observation_count=2)
     snapshot = FakeSnapshot(frame_id=2)
     event = adapter.build_unmatched_event(track, np.eye(2, 3), snapshot, snapshot)
     assert event.has_detection is False
@@ -101,54 +196,62 @@ def test_unmatched_event_is_zero_gated_without_model_call(tmp_path):
     assert len(runtime.event_buffers[track.track_id]) == 1
 
 
-def test_cold_start_enters_model_with_empty_history(tmp_path):
+def test_reset_happens_once_and_segment_ids_match(tmp_path):
     adapter, runtime = _adapter(tmp_path)
-    adapter.begin_frame(1, 640, 480)
-    track = FakeTrack(track_id=3, observation_count=1)
-    snapshot = FakeSnapshot(frame_id=1)
-    event = adapter.build_matched_event(
-        track,
-        FakeDetection(),
-        0,
-        0,
-        _association_meta(),
-        np.eye(2, 3),
-        snapshot,
-        snapshot,
-    )
-    decision = adapter.get_iwg_decisions_batch([(track.track_id, event)])[0]
-    assert np.isfinite([decision.motion_gate, decision.appearance_gate]).all()
-    # Cold start is applied, not bypassed.
-    assert runtime.stats.model_inferences == 1
+    pool = _pool()
+    track = FakeTrack(track_id=6, observation_count=1)
+    seen_masks: list[torch.Tensor] = []
+    original_forward = runtime.model.forward
 
+    def spy(*args, **kwargs):
+        seen_masks.append(kwargs["history_mask"].detach().clone())
+        return original_forward(*args, **kwargs)
 
-def test_gap_resets_per_track_history(tmp_path):
-    adapter, runtime = _adapter(tmp_path)
-    track = FakeTrack(track_id=4, observation_count=3)
-    adapter.begin_frame(1, 640, 480)
-    snapshot = FakeSnapshot(frame_id=1)
+    runtime.model.forward = spy
+
+    adapter.begin_frame(1, 640, 480, detection_pool=pool)
     first = adapter.build_matched_event(
-        track, FakeDetection(), 0, 0, _association_meta(), np.eye(2, 3), snapshot, snapshot
+        track, pool[0], 0, 0, _association_meta(), np.eye(2, 3),
+        FakeSnapshot(frame_id=1), FakeSnapshot(frame_id=1),
     )
     adapter.record_event(track.track_id, first, adapter.get_iwg_decisions_batch([(track.track_id, first)])[0])
-    assert len(runtime.event_buffers[track.track_id]) == 1
-    adapter.begin_frame(50, 640, 480)
-    snapshot2 = FakeSnapshot(frame_id=50)
-    second = adapter.build_matched_event(
-        track, FakeDetection(), 0, 0, _association_meta(), np.eye(2, 3), snapshot2, snapshot2
+
+    adapter.begin_frame(50, 640, 480, detection_pool=pool)
+    snap50 = FakeSnapshot(frame_id=50)
+    event50 = adapter.build_matched_event(
+        track, pool[0], 0, 0, _association_meta(), np.eye(2, 3), snap50, snap50
     )
-    adapter.record_event(track.track_id, second, adapter.get_iwg_decisions_batch([(track.track_id, second)])[0])
-    assert len(runtime.event_buffers[track.track_id]) == 1
+    decision50 = adapter.get_iwg_decisions_batch([(track.track_id, event50)])[0]
+    adapter.record_event(track.track_id, event50, decision50)
+    assert runtime.stats.buffer_resets == 1
+    assert seen_masks[-1].tolist() == [[True] * 5]
+    assert event50.evidence.segment_id == 1
+    assert all(event.segment_id == event50.evidence.segment_id for event in runtime.event_buffers[track.track_id])
+
+    adapter.begin_frame(51, 640, 480, detection_pool=pool)
+    snap51 = FakeSnapshot(frame_id=51)
+    event51 = adapter.build_matched_event(
+        track, pool[0], 0, 0, _association_meta(), np.eye(2, 3), snap51, snap51
+    )
+    decision51 = adapter.get_iwg_decisions_batch([(track.track_id, event51)])[0]
+    adapter.record_event(track.track_id, event51, decision51)
+    assert runtime.stats.buffer_resets == 1  # same event never resets twice
+    assert seen_masks[-1].tolist() == [[True, True, True, True, False]]
+    assert event51.evidence.segment_id == event50.evidence.segment_id
+    window = runtime.window_for(track.track_id, event51.evidence)
+    np.testing.assert_allclose(window.history_evidence[-1], event50.evidence.evidence)
+    assert runtime.event_buffers[track.track_id][-1].segment_id == event51.evidence.segment_id
 
 
 def test_track_buffers_do_not_mix(tmp_path):
     adapter, runtime = _adapter(tmp_path)
-    adapter.begin_frame(1, 640, 480)
+    pool = _pool()
+    adapter.begin_frame(1, 640, 480, detection_pool=pool)
     snapshot = FakeSnapshot(frame_id=1)
     for track_id in (10, 11):
         track = FakeTrack(track_id=track_id, observation_count=3)
         event = adapter.build_matched_event(
-            track, FakeDetection(), 0, 0, _association_meta(), np.eye(2, 3), snapshot, snapshot
+            track, pool[0], 0, 0, _association_meta(), np.eye(2, 3), snapshot, snapshot
         )
         adapter.record_event(track.track_id, event, adapter.get_iwg_decisions_batch([(track.track_id, event)])[0])
     assert len(runtime.event_buffers[10]) == 1
@@ -168,11 +271,15 @@ def test_is_mature_track_respects_state_and_min_observations(tmp_path):
     assert runtime.is_mature_track(FakeTrack(state=2, observation_count=4))
 
 
+def test_default_min_observations_matches_legacy_maturity():
+    assert ShutrackRuntimeConfig().min_observations == 6
+
+
 def test_disable_channel_gate_forces_one(tmp_path):
     adapter, runtime = _adapter(tmp_path)
     runtime.config = ShutrackRuntimeConfig(disable_kf_gate=True)
-    adapter.begin_frame(1, 640, 480)
-    track = FakeTrack(track_id=5)
+    adapter.begin_frame(1, 640, 480, detection_pool=_pool())
+    track = FakeTrack(track_id=12)
     snapshot = FakeSnapshot(frame_id=1)
     event = adapter.build_matched_event(
         track, FakeDetection(), 0, 0, _association_meta(), np.eye(2, 3), snapshot, snapshot
@@ -182,103 +289,18 @@ def test_disable_channel_gate_forces_one(tmp_path):
     assert 0.0 <= decision.appearance_gate <= 1.0
 
 
-def test_no_margin_checkpoint_zeros_margin_inputs_even_with_association(tmp_path):
-    adapter, runtime = _adapter(tmp_path, margin_enabled=False)
-    assert runtime.margin_enabled is False
-    adapter.begin_frame(1, 640, 480)
-    track = FakeTrack(track_id=6)
-    snapshot = FakeSnapshot(frame_id=1)
-    event = adapter.build_matched_event(
-        track, FakeDetection(), 0, 1, _association_meta(), np.eye(2, 3), snapshot, snapshot
-    )
-    context = event.evidence.context
-    assert context[1] == 0.0
-    assert context[2] == 0.0
-    assert context[6] == 0.0
-    assert context[7] == 0.0
-
-
-def test_margin_enabled_checkpoint_uses_association_margins(tmp_path):
-    adapter, runtime = _adapter(tmp_path, margin_enabled=True)
-    assert runtime.margin_enabled is True
-    adapter.begin_frame(1, 640, 480)
-    track = FakeTrack(track_id=7)
-    snapshot = FakeSnapshot(frame_id=1)
-    event = adapter.build_matched_event(
-        track, FakeDetection(), 0, 1, _association_meta(), np.eye(2, 3), snapshot, snapshot
-    )
-    context = event.evidence.context
-    assert context[1] == pytest.approx(0.6, abs=1e-6)
-    assert context[2] == pytest.approx(0.5, abs=1e-6)
-    assert context[6] == 1.0
-    assert context[7] == 1.0
-
-
 def test_recovered_track_counter(tmp_path):
     adapter, runtime = _adapter(tmp_path)
-    adapter.begin_frame(1, 640, 480)
-    track = FakeTrack(track_id=8, observation_count=3)
+    pool = _pool()
+    adapter.begin_frame(1, 640, 480, detection_pool=pool)
+    track = FakeTrack(track_id=13, observation_count=3)
     snapshot = FakeSnapshot(frame_id=1)
     unmatched = adapter.build_unmatched_event(track, np.eye(2, 3), snapshot, snapshot)
     adapter.record_unmatched_event(track.track_id, unmatched)
-    adapter.begin_frame(2, 640, 480)
+    adapter.begin_frame(2, 640, 480, detection_pool=pool)
     snapshot2 = FakeSnapshot(frame_id=2)
     matched = adapter.build_matched_event(
-        track, FakeDetection(), 0, 0, _association_meta(), np.eye(2, 3), snapshot2, snapshot2
+        track, pool[0], 0, 0, _association_meta(), np.eye(2, 3), snapshot2, snapshot2
     )
     adapter.get_iwg_decisions_batch([(track.track_id, matched)])
     assert runtime.stats.recovered_tracks == 1
-
-
-def test_real_track_gap_reset_and_update_with_gates(tmp_path):
-    import sys
-    from pathlib import Path
-
-    repo_root = Path(__file__).resolve().parents[2]
-    tracker_dir = repo_root / "3. Tracker"
-    if str(tracker_dir) not in sys.path:
-        sys.path.insert(0, str(tracker_dir))
-    from trackers.track import Track, TrackCounter
-
-    adapter, runtime = _adapter(tmp_path)
-    track_args = SimpleNamespace(kf_type="nsa", data_path="MOT17", min_len=3)
-    detection = np.concatenate(
-        [np.array([100.0, 100.0, 140.0, 180.0, 0.9, 0.0]), np.ones(8)]
-    )
-    track = Track(track_args, detection)
-    track.initiate(1, TrackCounter())
-    snapshot = track.snapshot_state(compact_history=True)
-
-    adapter.begin_frame(1, 640, 480)
-    first = adapter.build_matched_event(
-        track,
-        FakeDetection(),
-        0,
-        0,
-        _association_meta(),
-        np.eye(2, 3),
-        snapshot,
-        snapshot,
-    )
-    decision = adapter.get_iwg_decisions_batch([(track.track_id, first)])[0]
-    adapter.apply_gate(track, FakeDetection(), decision)
-    adapter.record_event(track.track_id, first, decision)
-    assert track.end_frame_id == 1
-
-    # A real gap between recorded events resets the per-track history.
-    adapter.begin_frame(50, 640, 480)
-    snapshot2 = track.snapshot_state(compact_history=True)
-    second = adapter.build_matched_event(
-        track,
-        FakeDetection(),
-        0,
-        0,
-        _association_meta(),
-        np.eye(2, 3),
-        snapshot2,
-        snapshot2,
-    )
-    adapter.get_iwg_decisions_batch([(track.track_id, second)])
-    adapter.record_event(track.track_id, second, decision)
-    assert runtime.stats.buffer_resets >= 1
-    assert len(runtime.event_buffers[track.track_id]) == 1
