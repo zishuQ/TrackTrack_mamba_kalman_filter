@@ -164,6 +164,7 @@ def write_tiny_checkpoint(
     *,
     reid_dim: int = 8,
     max_frame_gap: int = 30,
+    margin_enabled: bool = False,
 ) -> ShutrackV2Model:
     model = make_model(reid_dim=reid_dim)
     payload = build_checkpoint_payload(
@@ -174,8 +175,11 @@ def write_tiny_checkpoint(
             "split": "train",
             "dataset_dir": "fixture",
             "max_frame_gap": max_frame_gap,
-            "margin_source": "unavailable_packed_train_data",
-            "margin_valid_rate": 0.0,
+            "margin_enabled": margin_enabled,
+            "margin_source": (
+                "source_cache" if margin_enabled else "unavailable_packed_train_data"
+            ),
+            "margin_valid_rate": 1.0 if margin_enabled else 0.0,
         },
         epoch=1,
         global_step=1,
@@ -185,8 +189,11 @@ def write_tiny_checkpoint(
         normalization_mean=np.zeros(63),
         normalization_std=np.ones(63),
         margin={
-            "source": "unavailable_packed_train_data",
-            "valid_rate": 0.0,
+            "enabled": margin_enabled,
+            "source": (
+                "source_cache" if margin_enabled else "unavailable_packed_train_data"
+            ),
+            "valid_rate": 1.0 if margin_enabled else 0.0,
             "stats": DEFAULT_MARGIN_STATS,
         },
         include_optimizer=False,
@@ -223,6 +230,18 @@ class FakeDetection:
         self.box = np.asarray(box if box is not None else [95, 95, 115, 125], dtype=np.float64)
         self.score = float(score)
         self.source = 0
+
+    @property
+    def x1y1x2y2(self) -> np.ndarray:
+        return self.box
+
+    @property
+    def cxcywh(self) -> np.ndarray:
+        x1, y1, x2, y2 = self.box
+        return np.array(
+            [(x1 + x2) / 2.0, (y1 + y2) / 2.0, x2 - x1, y2 - y1],
+            dtype=np.float64,
+        )
 
 
 class FakeTrack:

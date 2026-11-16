@@ -37,9 +37,13 @@ def _association_meta(num_tracks: int = 2, num_detections: int = 3) -> dict:
     }
 
 
-def _adapter(tmp_path, min_observations: int = 1):
+def _adapter(
+    tmp_path,
+    min_observations: int = 1,
+    margin_enabled: bool = False,
+):
     checkpoint_path = tmp_path / "best.pt"
-    write_tiny_checkpoint(checkpoint_path)
+    write_tiny_checkpoint(checkpoint_path, margin_enabled=margin_enabled)
     model, checkpoint = load_runtime_model(checkpoint_path, device="cpu")
     runtime = ShutrackRuntime(
         model,
@@ -176,3 +180,105 @@ def test_disable_channel_gate_forces_one(tmp_path):
     decision = adapter.get_iwg_decisions_batch([(track.track_id, event)])[0]
     assert decision.motion_gate == 1.0
     assert 0.0 <= decision.appearance_gate <= 1.0
+
+
+def test_no_margin_checkpoint_zeros_margin_inputs_even_with_association(tmp_path):
+    adapter, runtime = _adapter(tmp_path, margin_enabled=False)
+    assert runtime.margin_enabled is False
+    adapter.begin_frame(1, 640, 480)
+    track = FakeTrack(track_id=6)
+    snapshot = FakeSnapshot(frame_id=1)
+    event = adapter.build_matched_event(
+        track, FakeDetection(), 0, 1, _association_meta(), np.eye(2, 3), snapshot, snapshot
+    )
+    context = event.evidence.context
+    assert context[1] == 0.0
+    assert context[2] == 0.0
+    assert context[6] == 0.0
+    assert context[7] == 0.0
+
+
+def test_margin_enabled_checkpoint_uses_association_margins(tmp_path):
+    adapter, runtime = _adapter(tmp_path, margin_enabled=True)
+    assert runtime.margin_enabled is True
+    adapter.begin_frame(1, 640, 480)
+    track = FakeTrack(track_id=7)
+    snapshot = FakeSnapshot(frame_id=1)
+    event = adapter.build_matched_event(
+        track, FakeDetection(), 0, 1, _association_meta(), np.eye(2, 3), snapshot, snapshot
+    )
+    context = event.evidence.context
+    assert context[1] == pytest.approx(0.6, abs=1e-6)
+    assert context[2] == pytest.approx(0.5, abs=1e-6)
+    assert context[6] == 1.0
+    assert context[7] == 1.0
+
+
+def test_recovered_track_counter(tmp_path):
+    adapter, runtime = _adapter(tmp_path)
+    adapter.begin_frame(1, 640, 480)
+    track = FakeTrack(track_id=8, observation_count=3)
+    snapshot = FakeSnapshot(frame_id=1)
+    unmatched = adapter.build_unmatched_event(track, np.eye(2, 3), snapshot, snapshot)
+    adapter.record_unmatched_event(track.track_id, unmatched)
+    adapter.begin_frame(2, 640, 480)
+    snapshot2 = FakeSnapshot(frame_id=2)
+    matched = adapter.build_matched_event(
+        track, FakeDetection(), 0, 0, _association_meta(), np.eye(2, 3), snapshot2, snapshot2
+    )
+    adapter.get_iwg_decisions_batch([(track.track_id, matched)])
+    assert runtime.stats.recovered_tracks == 1
+
+
+def test_real_track_gap_reset_and_update_with_gates(tmp_path):
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    tracker_dir = repo_root / "3. Tracker"
+    if str(tracker_dir) not in sys.path:
+        sys.path.insert(0, str(tracker_dir))
+    from trackers.track import Track, TrackCounter
+
+    adapter, runtime = _adapter(tmp_path)
+    track_args = SimpleNamespace(kf_type="nsa", data_path="MOT17", min_len=3)
+    detection = np.concatenate(
+        [np.array([100.0, 100.0, 140.0, 180.0, 0.9, 0.0]), np.ones(8)]
+    )
+    track = Track(track_args, detection)
+    track.initiate(1, TrackCounter())
+    snapshot = track.snapshot_state(compact_history=True)
+
+    adapter.begin_frame(1, 640, 480)
+    first = adapter.build_matched_event(
+        track,
+        FakeDetection(),
+        0,
+        0,
+        _association_meta(),
+        np.eye(2, 3),
+        snapshot,
+        snapshot,
+    )
+    decision = adapter.get_iwg_decisions_batch([(track.track_id, first)])[0]
+    adapter.apply_gate(track, FakeDetection(), decision)
+    adapter.record_event(track.track_id, first, decision)
+    assert track.end_frame_id == 1
+
+    # A real gap between recorded events resets the per-track history.
+    adapter.begin_frame(50, 640, 480)
+    snapshot2 = track.snapshot_state(compact_history=True)
+    second = adapter.build_matched_event(
+        track,
+        FakeDetection(),
+        0,
+        0,
+        _association_meta(),
+        np.eye(2, 3),
+        snapshot2,
+        snapshot2,
+    )
+    adapter.get_iwg_decisions_batch([(track.track_id, second)])
+    adapter.record_event(track.track_id, second, decision)
+    assert runtime.stats.buffer_resets >= 1
+    assert len(runtime.event_buffers[track.track_id]) == 1
