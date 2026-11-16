@@ -51,29 +51,32 @@ class ShutrackRuntimeStatistics:
         if used_model:
             self.model_inferences += 1
         if matched:
+            # Gate diagnostics only cover actual matched events where the
+            # gates were applied. Unmatched events are counted separately and
+            # their forced [0,0] must not bias means or ranges.
             self.matched_events += 1
+            self.gate_sum += values
+            self.gate_min = np.minimum(self.gate_min, values)
+            self.gate_max = np.maximum(self.gate_max, values)
+            self.gate_count += 1
         else:
             self.unmatched_events += 1
             self.no_detection_events += 1
-        self.gate_sum += values
-        self.gate_min = np.minimum(self.gate_min, values)
-        self.gate_max = np.maximum(self.gate_max, values)
-        self.gate_count += 1
 
     def summary(self) -> Dict[str, float]:
-        count = max(int(self.gate_count.sum()), 1)
-        per_channel = np.maximum(self.gate_count, 1)
-        motion_min = (
-            float(self.gate_min[0]) if self.gate_count[0] > 0 else 0.0
+        motion_count = int(self.gate_count[0])
+        appearance_count = int(self.gate_count[1])
+        motion_avg = float(self.gate_sum[0] / motion_count) if motion_count else 0.0
+        appearance_avg = (
+            float(self.gate_sum[1] / appearance_count) if appearance_count else 0.0
         )
+        motion_min = float(self.gate_min[0]) if motion_count else 0.0
         appearance_min = (
-            float(self.gate_min[1]) if self.gate_count[1] > 0 else 0.0
+            float(self.gate_min[1]) if appearance_count else 0.0
         )
-        motion_max = (
-            float(self.gate_max[0]) if self.gate_count[0] > 0 else 0.0
-        )
+        motion_max = float(self.gate_max[0]) if motion_count else 0.0
         appearance_max = (
-            float(self.gate_max[1]) if self.gate_count[1] > 0 else 0.0
+            float(self.gate_max[1]) if appearance_count else 0.0
         )
         return {
             "total_events": float(self.total_events),
@@ -85,14 +88,14 @@ class ShutrackRuntimeStatistics:
             "early_gate_update_count": float(self.early_gate_updates),
             "buffer_reset_count": float(self.buffer_resets),
             "recovered_track_count": float(self.recovered_tracks),
-            "avg_motion_gate": float(self.gate_sum[0] / count),
-            "avg_appearance_gate": float(self.gate_sum[1] / count),
+            "avg_motion_gate": motion_avg,
+            "avg_appearance_gate": appearance_avg,
             "min_motion_gate": motion_min,
             "max_motion_gate": motion_max,
             "min_appearance_gate": appearance_min,
             "max_appearance_gate": appearance_max,
-            "motion_gate_observations": float(self.gate_count[0]),
-            "appearance_gate_observations": float(self.gate_count[1]),
+            "motion_gate_observations": float(motion_count),
+            "appearance_gate_observations": float(appearance_count),
         }
 
 

@@ -192,6 +192,20 @@ attention diagnostics.  `--shutrack-early-enable` enables the optional New-path
 behavior described above.  `--agentguard-disable-kf-gate` /
 `--agentguard-disable-ema-gate` remain channel=1 diagnostics.
 
+Statistics semantics: `avg_motion_gate` / `avg_appearance_gate` and their
+min/max are computed **only over matched events whose gates were actually
+applied**, each channel over its own valid-update count.  Unmatched
+(no-detection) events are counted separately in `unmatched_events` /
+`no_detection_events`; their forced `[0,0]` does not bias the gate diagnostics.
+When no matched gate exists, all diagnostic values are finite zeros.
+
+Detection dropout in the mmap entry applies one keep mask to both the detection
+rows and `agentguard_target_detection_indices`; source candidates keep their
+rows and `agentguard_source_detection_indices` aligned for the existing recovery
+rule.  `validate-checkpoint` compares the checkpoint's 63-dim normalization
+mean/std with the packed metadata before computing loss and names both the
+checkpoint and data directory on mismatch.
+
 ## Tests
 
 ```bash
