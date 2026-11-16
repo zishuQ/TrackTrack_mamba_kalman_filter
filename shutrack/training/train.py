@@ -528,6 +528,35 @@ def evaluate_checkpoint(
             raise ValueError(
                 "checkpoint/dataset competition branch mismatch"
             )
+        checkpoint_mean = np.asarray(
+            checkpoint.get("normalization_mean", []), dtype=np.float64
+        ).reshape(-1)
+        checkpoint_std = np.asarray(
+            checkpoint.get("normalization_std", []), dtype=np.float64
+        ).reshape(-1)
+        if checkpoint_mean.shape != (63,) or checkpoint_std.shape != (63,):
+            raise ValueError(
+                "SHUTrack checkpoint/data normalization mismatch: "
+                f"checkpoint={checkpoint_path} dataset_dir={dataset_dir}; "
+                "checkpoint does not contain 63-dim mean/std"
+            )
+        mean_matches = np.allclose(
+            checkpoint_mean, dataset.scalar_mean, rtol=0.0, atol=1e-12
+        )
+        std_matches = np.allclose(
+            checkpoint_std, dataset.scalar_std, rtol=0.0, atol=1e-12
+        )
+        if not (mean_matches and std_matches):
+            raise ValueError(
+                "SHUTrack checkpoint/data normalization mismatch: "
+                f"checkpoint={checkpoint_path} dataset_dir={dataset_dir}; "
+                "checkpoint mean/std differ from the packed metadata "
+                "(mean_max_abs_diff="
+                f"{float(np.max(np.abs(checkpoint_mean - dataset.scalar_mean))):.6g}, "
+                "std_max_abs_diff="
+                f"{float(np.max(np.abs(checkpoint_std - dataset.scalar_std))):.6g}). "
+                "Use a checkpoint trained on this dataset split."
+            )
         loader = DataLoader(
             dataset,
             batch_size=int(batch_size),

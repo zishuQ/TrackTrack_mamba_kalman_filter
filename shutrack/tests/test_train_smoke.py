@@ -140,3 +140,48 @@ def test_resume_contract_mismatch_is_rejected(tmp_path: Path):
     branch_mismatch["competition_enabled"] = False
     with pytest.raises(ValueError, match="resume contract mismatch"):
         train_shutrack(branch_mismatch)
+
+
+def test_evaluate_checkpoint_rejects_normalization_mismatch(tmp_path: Path):
+    dataset_dir = write_tiny_packed_dataset(tmp_path / "packed")
+    checkpoint_config = _base_config(tmp_path / "checkpoint_run", competition_enabled=True)
+    checkpoint_config["max_steps"] = 2
+    train_shutrack(checkpoint_config)
+    checkpoint_path = Path(checkpoint_config["checkpoint_dir"]) / "last.pt"
+
+    # Same data source: accepted.
+    result = evaluate_checkpoint(
+        checkpoint_path, dataset_dir, batch_size=2, max_batches=1
+    )
+    assert result["batches"] == 1
+
+    # Same model/ReID dimensions but different packed normalization: rejected.
+    metadata_path = dataset_dir / "metadata.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["normalization_mean"] = [0.5] * 63
+    metadata_path.write_text(json.dumps(metadata))
+    with pytest.raises(ValueError) as error:
+        evaluate_checkpoint(checkpoint_path, dataset_dir, batch_size=2, max_batches=1)
+    message = str(error.value)
+    assert "normalization mismatch" in message
+    assert str(checkpoint_path) in message
+    assert str(dataset_dir) in message
+    assert "mean_max_abs_diff" in message
+
+
+def test_mot17_checkpoint_rejects_mot20_normalization():
+    checkpoint = Path(
+        "outputs/agentguard/experiments/shutrack_v3_smoke_competition_20261116/"
+        "checkpoints/last.pt"
+    )
+    dataset_dir = Path("outputs/agentguard/train_data/MOT20")
+    if not checkpoint.exists() or not dataset_dir.exists():
+        pytest.skip("local MOT17 v3 checkpoint / MOT20 packed data not available")
+    with pytest.raises(ValueError) as error:
+        evaluate_checkpoint(
+            checkpoint, dataset_dir, batch_size=2, max_batches=1
+        )
+    message = str(error.value)
+    assert "normalization mismatch" in message
+    assert str(checkpoint) in message
+    assert str(dataset_dir) in message
