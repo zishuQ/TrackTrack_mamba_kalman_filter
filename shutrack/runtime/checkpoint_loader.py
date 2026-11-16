@@ -30,8 +30,13 @@ def load_runtime_model(
             "online inference cannot reproduce training features"
         )
     margin = checkpoint.get("margin", {})
-    if not isinstance(margin, dict) or "stats" not in margin:
-        raise ValueError("SHUTrack checkpoint is missing margin metadata")
+    if not isinstance(margin, dict) or not isinstance(margin.get("enabled"), bool):
+        raise ValueError(
+            "SHUTrack checkpoint is missing margin.enabled; retrain so online "
+            "inference can obey the training input contract"
+        )
+    if margin["enabled"] and "stats" not in margin:
+        raise ValueError("margin-enabled SHUTrack checkpoint is missing margin stats")
     return model, dict(checkpoint)
 
 

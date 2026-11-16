@@ -144,7 +144,7 @@ history里的每个事件保持当时自己的template与det，不用当前模�
 
 - 实际可用的训练源只有 packed `outputs/agentguard/train_data/{MOT17,MOT20,SportsMOT}`：`data.pt` 含 `event_indices [N,6]`、`safe_gate_target`、`valid_channels`、`sample_weight`、已归一化的 `timeline_scalar_feats [T,63]`、`timeline_has_detection`；`reid_features.npy [T,2,2048]` 含更新前 track 模板与 det ReID。三者均 `context_size=6`、`reid_dim=2048`。
 - `outputs/agentguard/detection_cache` 在线可用。
-- 源 compact event cache（`events_*.pt`/`associations_*.pt`/`states_*.pt`）、compact labels 与关联矩阵在当前 checkout 中不存在；packed 数据也不含 `raw_cost`、`accepted_detection_index`、`association_track_row`。因此真实 packed 训练中 row/col margin 与两个 valid bit 恒为 0，`margin_source="unavailable_packed_train_data"`、`margin_valid_rate=0.0` 显式写入数据集元数据、checkpoint 与日志；`--margin-mode required` 会在启动时报告缺失字段。margin 计算、源缓存只读适配器与合成候选池测试均已实现，待只读缓存恢复即可启用。
+- 源 compact event cache（`events_*.pt`/`associations_*.pt`/`states_*.pt`）、compact labels 与关联矩阵在当前 checkout 中不存在；packed 数据也不含 `raw_cost`、`accepted_detection_index`、`association_track_row`。因此真实 packed 训练中 row/col margin 与两个 valid bit 恒为 0，`margin_enabled=false`、`margin_source="unavailable_packed_train_data"`、`margin_valid_rate=0.0` 显式写入数据集元数据、checkpoint 与日志；在线推理严格读取 checkpoint 的 `margin.enabled`，为 false 时即使拿到完整关联矩阵也强制两个 margin 与两个 bit 为 0，保证训练/在线输入契约一致。`--margin-mode required` 会在启动时报告缺失字段。margin 计算、源缓存只读适配器与合成候选池测试均已实现，待只读缓存恢复即可启用。
 
 ## 4. 只读数据适配路径
 
@@ -194,7 +194,7 @@ history里的每个事件保持当时自己的template与det，不用当前模�
 新架构不使用--iwg-rg-cma-output base或rg_cma_alpha做新语义的隐式映射；显式拒绝不适用的非默认选项，旧模式仍正常。
 新架构若要求policy fallback_threshold>0，明确报不支持；不能通过虚构policy_probs让它运行。
 可保留运动/外观通道置1的诊断开关，但不需要本轮扩展消融套件。
-保证冷启动路径真正能进入新模型，而不是被旧is_mature_track条件全部旁路；若原集成对新生轨迹有特殊规则，明确保留/调整的边界并测试。
+第一版默认把启用条件对齐旧缓存的采集规则（`observation_count >= 6`），避免模型在训练分布之外的早期轨迹状态上直接决策；`--shutrack-min-observations 1` 保留为显式早冷启动选项，必须有单独的分布验证，不能仅凭 padding/null token 无 NaN 就宣称可用。若原集成对新生轨迹有特殊规则，明确保留/调整的边界并测试。
 推理按真实当前轨迹状态实时构建输入，不能从旧训练事件缓存注入状态。
 保存checkpoint包含architecture/version、feature schema、特征顺序/normalizer、context=6、hidden dims、源缓存/标签来源及训练配置。
 新模型需要重新训练；禁止strict=False静默加载旧模型并声称resume成功。迁移少数兼容层若实施，需明确列出并作为独立选项，默认不做。

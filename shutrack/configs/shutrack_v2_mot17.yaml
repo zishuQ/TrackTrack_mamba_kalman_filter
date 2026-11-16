@@ -12,7 +12,8 @@ history_size: 5
 data:
   dataset_dir: outputs/agentguard/train_data/MOT17
   split: all
-  margin_mode: auto          # explicit unavailable_margin degradation is logged
+  margin_mode: auto          # effective contract is margin_enabled=false
+  margin_enabled: false      # packed data has no candidate-pool matrices
   sequence_cache_size: 2     # bounded data.pt LRU; ReID stays memory-mapped
 
 model:
@@ -39,5 +40,5 @@ training:
 runtime:
   checkpoint: best.pt
   device: cpu
-  min_observations: 1
+  min_observations: 6        # match legacy event-cache maturity; 1 enables early cold start
   max_frame_gap: 30          # must equal the checkpoint dataset horizon

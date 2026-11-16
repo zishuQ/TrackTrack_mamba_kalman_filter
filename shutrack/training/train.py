@@ -15,6 +15,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from shutrack.data.packed_dataset import PackedShutrackDataset
+from shutrack.data.sampling import SequenceBatchSampler
 from shutrack.models.shutrack import ShutrackV2Config, ShutrackV2Model
 from shutrack.schema import ARCHITECTURE_NAME, ARCHITECTURE_VERSION
 from shutrack.training.checkpoint import (
@@ -145,8 +146,79 @@ def _resolved_warmup_steps(config: Mapping[str, Any], steps_per_epoch: int, tota
     return min(warmup, max(1, total_steps // 10))
 
 
+def _rss_mb() -> float:
+    try:
+        with open("/proc/self/status", "r") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    return float(int(line.split()[1]) / 1024.0)
+    except OSError:
+        pass
+    return 0.0
+
+
+def _validate_resume_contract(
+    checkpoint: Mapping[str, Any],
+    model: ShutrackV2Model,
+    dataset: PackedShutrackDataset,
+) -> None:
+    mismatches: dict[str, Any] = {}
+    if dict(checkpoint["model_config"]) != model.config.as_dict():
+        mismatches["model_config"] = (
+            checkpoint["model_config"],
+            model.config.as_dict(),
+        )
+    mean = np.asarray(checkpoint.get("normalization_mean", []), dtype=np.float64)
+    std = np.asarray(checkpoint.get("normalization_std", []), dtype=np.float64)
+    if not np.allclose(mean, dataset.scalar_mean, rtol=0.0, atol=1e-12):
+        mismatches["normalization_mean"] = "different"
+    if not np.allclose(std, dataset.scalar_std, rtol=0.0, atol=1e-12):
+        mismatches["normalization_std"] = "different"
+    margin = checkpoint.get("margin", {})
+    if bool(margin.get("enabled")) != bool(dataset.margin_enabled):
+        mismatches["margin.enabled"] = (
+            margin.get("enabled"),
+            dataset.margin_enabled,
+        )
+    if str(margin.get("source")) != str(dataset.margin_source):
+        mismatches["margin.source"] = (
+            margin.get("source"),
+            dataset.margin_source,
+        )
+    if json.dumps(margin.get("stats", {}), sort_keys=True) != json.dumps(
+        dataset.margin_stats, sort_keys=True
+    ):
+        mismatches["margin.stats"] = "different"
+    checkpoint_dataset = checkpoint.get("dataset", {})
+    current = dataset.descriptor()
+    for key in (
+        "dataset",
+        "split",
+        "train_sequences",
+        "context_size",
+        "max_frame_gap",
+        "scalar_dim",
+        "reid_dim",
+        "feature_schema_version",
+        "label_source",
+        "margin_enabled",
+    ):
+        if checkpoint_dataset.get(key) != current.get(key):
+            mismatches[f"dataset.{key}"] = (
+                checkpoint_dataset.get(key),
+                current.get(key),
+            )
+    if mismatches:
+        raise ValueError(
+            "SHUTrack resume contract mismatch; refusing to continue with a "
+            "different model/data/margin configuration: "
+            + json.dumps(mismatches, sort_keys=True, default=str)
+        )
+
+
 def _margin_block(dataset: PackedShutrackDataset) -> dict[str, Any]:
     return {
+        "enabled": bool(dataset.margin_enabled),
         "source": dataset.margin_source,
         "valid_rate": dataset.margin_valid_rate,
         "stats": dataset.margin_stats,
@@ -209,7 +281,13 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
             lr=float(resolved["lr"]),
             weight_decay=float(resolved["weight_decay"]),
         )
-        steps_per_epoch = max(1, math.ceil(len(dataset) / int(resolved["batch_size"])))
+        sampler = SequenceBatchSampler(
+            dataset.sample_boundaries,
+            int(resolved["batch_size"]),
+            total_samples=len(dataset),
+            seed=int(resolved["seed"]),
+        )
+        steps_per_epoch = max(1, len(sampler))
         max_steps = int(resolved.get("max_steps", 0))
         total_steps = (
             max_steps if max_steps > 0 else int(resolved["epochs"]) * steps_per_epoch
@@ -231,6 +309,7 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                     "resume requires a last.pt checkpoint with optimizer state; "
                     f"{resume_path} does not contain one"
                 )
+            _validate_resume_contract(checkpoint, model, dataset)
             model.load_state_dict(resumed_model.state_dict(), strict=True)
             validate_checkpoint(checkpoint)
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -242,12 +321,10 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
 
         loader = DataLoader(
             dataset,
-            batch_size=int(resolved["batch_size"]),
-            shuffle=True,
+            batch_sampler=sampler,
             num_workers=int(resolved["num_workers"]),
             collate_fn=PackedShutrackDataset.collate_fn,
             pin_memory=device.type == "cuda",
-            drop_last=False,
             persistent_workers=False,
         )
 
@@ -261,8 +338,10 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
         stop_requested = max_steps > 0 and global_step >= max_steps
         last_epoch = start_epoch
 
-        with training_log_path.open("w") as log_handle, metrics_path.open(
-            "w"
+        log_mode = "a" if resume_path else "w"
+        metrics_mode = "a" if resume_path else "w"
+        with training_log_path.open(log_mode) as log_handle, metrics_path.open(
+            metrics_mode
         ) as metrics_handle:
             def write_log(message: str) -> None:
                 log_handle.write(message + "\n")
@@ -271,6 +350,8 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
 
             write_log("=" * 72)
             write_log("SHUTrack v2 (HCE + RSC) training")
+            if resume_path:
+                write_log(f"RESUME from {resume_path}")
             write_log(f"architecture={ARCHITECTURE_NAME} version={ARCHITECTURE_VERSION}")
             write_log(f"dataset={dataset.dataset_dir}")
             write_log(f"device={device}")
@@ -278,8 +359,14 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
             write_log(f"samples={len(dataset)} steps_per_epoch={steps_per_epoch}")
             write_log(f"total_steps={total_steps} warmup_steps={warmup_steps}")
             write_log(
-                "margin_source="
-                f"{dataset.margin_source} margin_valid_rate={dataset.margin_valid_rate}"
+                "margin_enabled="
+                f"{str(dataset.margin_enabled).lower()} "
+                f"margin_source={dataset.margin_source} "
+                f"margin_valid_rate={dataset.margin_valid_rate}"
+            )
+            write_log(
+                "best.pt tracks the lowest average training loss, not tracker "
+                "HOTA/MOTA/IDF1"
             )
             write_log(f"config={json.dumps(dict(resolved), sort_keys=True)}")
 
@@ -287,9 +374,13 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                 if stop_requested:
                     break
                 model.train()
+                sampler.set_epoch(epoch)
                 accumulator = ScalarAccumulator()
                 epoch_started = time.time()
+                epoch_start_loads = dataset.sequence_load_count
+                epoch_samples = 0
                 for batch_index, batch in enumerate(loader):
+                    epoch_samples += int(batch["safe_gate_target"].shape[0])
                     batch = _move_batch(batch, device)
                     outputs = model(**_model_inputs(batch))
                     loss, components = gate_loss(outputs, batch)
@@ -346,7 +437,15 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                         "epoch": int(epoch),
                         "global_step": int(global_step),
                         "epoch_seconds": float(epoch_seconds),
-                        "samples": int(len(dataset)),
+                        "samples": int(epoch_samples),
+                        "samples_per_second": float(
+                            epoch_samples / max(epoch_seconds, 1e-9)
+                        ),
+                        "sequence_load_count": int(
+                            dataset.sequence_load_count - epoch_start_loads
+                        ),
+                        "rss_mb": _rss_mb(),
+                        "margin_enabled": bool(dataset.margin_enabled),
                         "margin_source": dataset.margin_source,
                         "margin_valid_rate": dataset.margin_valid_rate,
                     }
@@ -366,6 +465,9 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                 )
 
                 epoch_metric = float(metrics.get("loss", float("inf")))
+                improved = epoch_metric < best_metric
+                if improved:
+                    best_metric = epoch_metric
                 save_checkpoint_atomic(
                     last_path,
                     _checkpoint_payload(
@@ -380,8 +482,7 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                         include_optimizer=True,
                     ),
                 )
-                if epoch_metric < best_metric:
-                    best_metric = epoch_metric
+                if improved:
                     save_checkpoint_atomic(
                         best_path,
                         _checkpoint_payload(
@@ -411,7 +512,9 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
             "epochs_completed": int(last_epoch),
             "global_step": int(global_step),
             "best_metric": float(best_metric),
+            "best_metric_name": "training_loss",
             "elapsed_sec": float(time.time() - started),
+            "sequence_load_count": int(dataset.sequence_load_count),
             "parameter_counts": model.parameter_report(),
             "margin": _margin_block(dataset),
             "training_config": dict(resolved),

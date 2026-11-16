@@ -152,6 +152,23 @@ def validate_checkpoint(checkpoint: Mapping[str, Any]) -> None:
         raise ValueError("SHUTrack checkpoint model_config context_size mismatch")
     if int(model_config.get("reid_dim", -1)) != int(checkpoint.get("reid_dim", -2)):
         raise ValueError("SHUTrack checkpoint reid_dim does not match model_config")
+    margin = checkpoint.get("margin")
+    if not isinstance(margin, Mapping):
+        raise ValueError("SHUTrack checkpoint is missing the margin input contract")
+    if not isinstance(margin.get("enabled"), bool):
+        raise ValueError(
+            "SHUTrack checkpoint margin.enabled must be an explicit boolean; "
+            "retrain with the current code so the effective input contract is "
+            "recorded"
+        )
+    if not str(margin.get("source", "")):
+        raise ValueError("SHUTrack checkpoint margin.source is missing")
+    if margin["enabled"]:
+        stats = margin.get("stats")
+        if not isinstance(stats, Mapping) or "mean" not in stats or "std" not in stats:
+            raise ValueError(
+                "margin-enabled SHUTrack checkpoint must contain margin stats"
+            )
     missing = [key for key in _REQUIRED_CHECKPOINT_KEYS if key not in checkpoint]
     if missing:
         raise ValueError(f"SHUTrack checkpoint is missing fields: {missing}")
@@ -191,6 +208,7 @@ def build_checkpoint_payload(
         "epoch": int(epoch),
         "global_step": int(global_step),
         "best_metric": float(best_metric),
+        "best_metric_name": "training_loss",
         "training_config": dict(training_config),
         "dataset": dict(dataset_descriptor),
         "normalization_mean": list(map(float, normalization_mean)),

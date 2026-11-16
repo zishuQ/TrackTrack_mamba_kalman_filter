@@ -26,13 +26,13 @@ from shutrack.features.margins import INVALID_MARGIN, MarginResult
 from shutrack.features.windows import build_window, stack_windows
 from shutrack.models.shutrack import ShutrackV2Model
 from shutrack.runtime.statistics import ShutrackRuntimeStatistics
-from shutrack.schema import HISTORY_SIZE, MAX_FRAME_GAP
+from shutrack.schema import CONTEXT_SIZE, HISTORY_SIZE, MAX_FRAME_GAP
 
 
 @dataclass(frozen=True)
 class ShutrackRuntimeConfig:
     max_frame_gap: int = MAX_FRAME_GAP
-    min_observations: int = 1
+    min_observations: int = CONTEXT_SIZE
     disable_kf_gate: bool = False
     disable_ema_gate: bool = False
 
@@ -72,10 +72,24 @@ class ShutrackRuntime:
             }
         )
         margin = checkpoint.get("margin", {})
-        self.margin_stats = margin.get("stats") if isinstance(margin, Mapping) else None
-        self.margin_source = (
-            margin.get("source") if isinstance(margin, Mapping) else "unknown"
-        )
+        if not isinstance(margin, Mapping) or not isinstance(
+            margin.get("enabled"), bool
+        ):
+            raise ValueError(
+                "SHUTrack checkpoint is missing margin.enabled; retrain with the "
+                "current code so training and online inputs share the same contract"
+            )
+        self.margin_enabled = bool(margin["enabled"])
+        self.margin_stats = margin.get("stats") if self.margin_enabled else None
+        if self.margin_enabled and (
+            not isinstance(self.margin_stats, Mapping)
+            or "mean" not in self.margin_stats
+            or "std" not in self.margin_stats
+        ):
+            raise ValueError(
+                "margin-enabled SHUTrack checkpoint must contain margin stats"
+            )
+        self.margin_source = margin.get("source", "unknown")
         dataset_meta = checkpoint.get("dataset", {})
         checkpoint_gap = int(dataset_meta.get("max_frame_gap", MAX_FRAME_GAP))
         if config is None:
@@ -104,6 +118,8 @@ class ShutrackRuntime:
         self._last_frame: dict[int, int] = {}
         self._last_observation: dict[int, int] = {}
         self._segment: dict[int, int] = {}
+        self._last_reset_frame: dict[int, int] = {}
+        self._lost_tracks: set[int] = set()
 
     # ------------------------------------------------------------------
     # Track lifecycle helpers
@@ -137,6 +153,9 @@ class ShutrackRuntime:
         if reset:
             self.event_buffers.pop(track_id, None)
             self._segment[track_id] = self._segment.get(track_id, 0) + 1
+            if self._last_reset_frame.get(track_id) != frame_id:
+                self.stats.record_buffer_reset()
+                self._last_reset_frame[track_id] = frame_id
 
     def _buffer(self, track_id: int) -> deque[EventEvidence]:
         buffer = self.event_buffers.get(int(track_id))
@@ -151,6 +170,8 @@ class ShutrackRuntime:
         self._last_frame.pop(track_id, None)
         self._last_observation.pop(track_id, None)
         self._segment.pop(track_id, None)
+        self._last_reset_frame.pop(track_id, None)
+        self._lost_tracks.discard(track_id)
 
     # ------------------------------------------------------------------
     # Evidence construction
@@ -176,29 +197,26 @@ class ShutrackRuntime:
             pair[name] = float(array[track_row, detection_col])
         return pair or None
 
-    def make_evidence(
+    def scalar_params_for(
         self,
         *,
-        track_id: int,
         frame_id: int,
         image_width: int,
         image_height: int,
         has_detection: bool,
         pre_update_state: Any,
-        track_feature: np.ndarray,
-        detection_feature: np.ndarray | None = None,
         detection_box: np.ndarray | None = None,
         detection_score: float | None = None,
         detection_source: int = 0,
         association_meta: Mapping[str, Any] | None = None,
         track_row: int = -1,
         detection_col: int = -1,
-        observation_count: int = 0,
-    ) -> EventEvidence:
-        track_id = int(track_id)
-        frame_id = int(frame_id)
-        self._maybe_reset(track_id, frame_id, observation_count)
-        segment_id = int(self._segment.get(track_id, 0))
+    ) -> dict[str, Any]:
+        """Build the exact legacy scalar parameters used online.
+
+        Exposed so contract tests can feed the same evidence through the
+        offline packed adapter and the online builder.
+        """
 
         association_pair = (
             self._pair_from_association_meta(
@@ -215,7 +233,7 @@ class ShutrackRuntime:
             "has_detection": bool(has_detection),
             "image_width": int(image_width),
             "image_height": int(image_height),
-            "frame_id": frame_id,
+            "frame_id": int(frame_id),
             "pre_update_state": {
                 "mean": (
                     None
@@ -266,15 +284,57 @@ class ShutrackRuntime:
                 }
             if association_pair is not None:
                 scalar_params["association"] = association_pair
+        return scalar_params
+
+    def make_evidence(
+        self,
+        *,
+        track_id: int,
+        frame_id: int,
+        image_width: int,
+        image_height: int,
+        has_detection: bool,
+        pre_update_state: Any,
+        track_feature: np.ndarray,
+        detection_feature: np.ndarray | None = None,
+        detection_box: np.ndarray | None = None,
+        detection_score: float | None = None,
+        detection_source: int = 0,
+        association_meta: Mapping[str, Any] | None = None,
+        track_row: int = -1,
+        detection_col: int = -1,
+        observation_count: int = 0,
+    ) -> EventEvidence:
+        track_id = int(track_id)
+        frame_id = int(frame_id)
+        self._maybe_reset(track_id, frame_id, observation_count)
+        segment_id = int(self._segment.get(track_id, 0))
+
+        scalar_params = self.scalar_params_for(
+            frame_id=frame_id,
+            image_width=image_width,
+            image_height=image_height,
+            has_detection=has_detection,
+            pre_update_state=pre_update_state,
+            detection_box=detection_box,
+            detection_score=detection_score,
+            detection_source=detection_source,
+            association_meta=association_meta,
+            track_row=track_row,
+            detection_col=detection_col,
+        )
 
         margins: MarginResult
-        if has_detection:
+        if has_detection and self.margin_enabled:
             margins = online_margins_from_association_meta(
                 association_meta,
                 track_row=int(track_row),
                 detection_col=int(detection_col),
             )
         else:
+            # The training input contract disabled margins (or there is no
+            # detection).  Online inference must feed the exact same zeros,
+            # even when a full association matrix is available.
             margins = INVALID_MARGIN
 
         evidence = build_online_evidence(
@@ -337,6 +397,10 @@ class ShutrackRuntime:
             if self.config.disable_ema_gate:
                 applied[1] = 1.0
             applied = np.clip(applied, 0.0, 1.0)
+            track_id = int(track_id)
+            if track_id in self._lost_tracks:
+                self.stats.record_recovery()
+                self._lost_tracks.discard(track_id)
             self.stats.record_event()
             self.stats.record_gates(applied, matched=True, used_model=True)
             results.append(applied)
@@ -356,6 +420,7 @@ class ShutrackRuntime:
         self, track_id: int, evidence: EventEvidence
     ) -> np.ndarray:
         self.push_evidence(track_id, evidence)
+        self._lost_tracks.add(int(track_id))
         gates = np.zeros(2, dtype=np.float64)
         self.stats.record_event()
         self.stats.record_gates(gates, matched=False, used_model=False)

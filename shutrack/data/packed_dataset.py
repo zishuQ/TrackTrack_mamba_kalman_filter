@@ -115,6 +115,10 @@ class PackedShutrackDataset(Dataset):
         self.margin_source = (
             "disabled" if margin_mode == "disabled" else "unavailable_packed_train_data"
         )
+        # The packed format has no association candidate pools.  The effective
+        # model-input contract is therefore "margins disabled": training and
+        # online inference must both feed zeros and zero validity bits.
+        self.margin_enabled = False
         if margin_mode == "auto":
             warnings.warn(
                 "SHUTrack packed data has no association cost matrices; row/col "
@@ -151,6 +155,13 @@ class PackedShutrackDataset(Dataset):
 
         self._sequence_cache_size = max(1, int(sequence_cache_size))
         self._cache: OrderedDict[int, dict[str, Any]] = OrderedDict()
+        self.sequence_load_count = 0
+
+    @property
+    def sample_boundaries(self) -> tuple[int, ...]:
+        """Cumulative sample boundaries, one entry per sequence."""
+
+        return tuple(self._boundaries)
 
     # ------------------------------------------------------------------
     # Metadata
@@ -179,6 +190,7 @@ class PackedShutrackDataset(Dataset):
             "scalar_dim": LEGACY_SCALAR_DIM,
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "label_source": "packed_train_data_safe_gate_target",
+            "margin_enabled": self.margin_enabled,
             "margin_source": self.margin_source,
             "margin_valid_rate": self.margin_valid_rate,
             "margin_stats": self.margin_stats,
@@ -201,6 +213,7 @@ class PackedShutrackDataset(Dataset):
         data_path = sequence_dir / "data.pt"
         if not data_path.is_file():
             raise FileNotFoundError(f"packed sequence data not found: {data_path}")
+        self.sequence_load_count += 1
         packed = torch.load(data_path, map_location="cpu", weights_only=False)
         if not isinstance(packed, dict) or not isinstance(packed.get("arrays"), dict):
             raise ValueError(f"invalid packed sequence payload: {data_path}")

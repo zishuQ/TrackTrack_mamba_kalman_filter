@@ -14,6 +14,9 @@ class ShutrackRuntimeStatistics:
         self.matched_events = 0
         self.unmatched_events = 0
         self.no_detection_events = 0
+        self.gate_updates = 0
+        self.buffer_resets = 0
+        self.recovered_tracks = 0
         self.gate_sum = np.zeros(2, dtype=np.float64)
         self.gate_min = np.full(2, np.inf, dtype=np.float64)
         self.gate_max = np.full(2, -np.inf, dtype=np.float64)
@@ -21,6 +24,15 @@ class ShutrackRuntimeStatistics:
 
     def record_event(self) -> None:
         self.total_events += 1
+
+    def record_gate_update(self) -> None:
+        self.gate_updates += 1
+
+    def record_buffer_reset(self) -> None:
+        self.buffer_resets += 1
+
+    def record_recovery(self) -> None:
+        self.recovered_tracks += 1
 
     def record_gates(
         self,
@@ -65,6 +77,9 @@ class ShutrackRuntimeStatistics:
             "matched_events": float(self.matched_events),
             "unmatched_events": float(self.unmatched_events),
             "no_detection_events": float(self.no_detection_events),
+            "gate_update_count": float(self.gate_updates),
+            "buffer_reset_count": float(self.buffer_resets),
+            "recovered_track_count": float(self.recovered_tracks),
             "avg_motion_gate": float(self.gate_sum[0] / count),
             "avg_appearance_gate": float(self.gate_sum[1] / count),
             "min_motion_gate": motion_min,

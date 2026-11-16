@@ -40,9 +40,11 @@ Training reads the existing packed `outputs/agentguard/train_data/*` in place:
 
 No cache, index, label, rollout, window array or dataset is generated.  The
 source directory is never written.  At most two `data.pt` sequences are held in
-an LRU; ReID files are always memory-mapped.
+an LRU; ReID files are always memory-mapped.  Training batches are organized
+per sequence (sequence order shuffled once per epoch, local samples shuffled
+inside each sequence), so each sequence file is loaded at most once per epoch.
 
-### Margin data limitation (explicit)
+### Margin data limitation and input contract (explicit)
 
 The packed format does **not** contain association cost matrices,
 `accepted_detection_index` or `association_track_row`; the source compact event
@@ -52,14 +54,21 @@ trains with:
 
 * row/column margins = 0;
 * `row_margin_valid = col_margin_valid = 0` for every event;
-* `margin_source = "unavailable_packed_train_data"` in dataset metadata,
-  checkpoints and logs (`margin_valid_rate = 0.0`).
+* `margin_enabled = false`, `margin_source = "unavailable_packed_train_data"`
+  in dataset metadata, checkpoints and logs (`margin_valid_rate = 0.0`).
+
+The checkpoint records the effective contract.  Online inference reads
+`margin.enabled` from the checkpoint and, when it is false, forces both margins
+and both validity bits to zero even if a full association matrix is available.
+A no-margin checkpoint therefore cannot silently receive different inputs than
+training did.  Use `--margin-mode required` to make missing margin data a hard
+startup error; a margin-enabled checkpoint requires explicit margin statistics
+and is rejected otherwise.
 
 This is a reported degradation, not an assertion that no competitor existed.
 The full margin definition (`min(other feasible raw cost) - accepted raw cost`,
 excluding self, non-finite values and `IoU <= 0.10` infeasible entries) is
-implemented and tested against synthetic recorded candidate pools.  Use
-`--margin-mode required` to make missing margin data a hard startup error.
+implemented and tested against synthetic recorded candidate pools.
 
 ## Input schema (`shutrack_v2_event18`)
 
@@ -146,7 +155,18 @@ directly.
 
 Training writes only `last.pt`, `best.pt`, `metrics.jsonl`, `training.log` and
 `training_summary.json` inside the new run directory.  A run refuses to reuse an
-existing checkpoint directory unless `--resume <last.pt>` is given.
+existing checkpoint directory unless `--resume <last.pt>` is given.  Resuming
+appends to `training.log` and `metrics.jsonl`, validates model config,
+normalization statistics, margin contract and dataset contract before loading
+optimizer state, and refuses mismatches.  `best.pt` tracks the lowest average
+**training loss** (`best_metric_name = "training_loss"`), not tracker HOTA.
+`last.pt` always stores the updated best metric, so resuming cannot mistake a
+worse epoch for a new best.
+
+Each epoch's `metrics.jsonl` records `samples_per_second`,
+`sequence_load_count` (actual `data.pt` loads, not cache hits) and `rss_mb`
+alongside loss/gate statistics.  These are the acceptance metrics for data
+loading, not just "the GPU step ran".
 
 ### Checkpoint contract check
 
@@ -193,8 +213,10 @@ cd "3. Tracker"
 normalization overrides and attention-diagnostics flags: those concepts do not
 exist in the new architecture.  `--agentguard-disable-kf-gate` /
 `--agentguard-disable-ema-gate` remain available as channel=1 diagnostics.
-`--shutrack-min-observations` defaults to 1 so cold starts enter the model
-rather than being bypassed by the old `observation_count >= 6` rule.
+`--shutrack-min-observations` defaults to 6, matching the legacy event-cache
+maturity (`observation_count >= 6`).  Set it to 1 only when deliberately
+enabling early cold-start gating; padding/null-token support makes that path
+shape-safe but does not prove the model has learned early-track states.
 
 ## Tests
 
@@ -202,12 +224,24 @@ rather than being bypassed by the old `observation_count >= 6` rule.
 ./.venv/bin/python -m pytest shutrack/tests -q
 ```
 
-The suite covers margin semantics, feature order/normalization, cold start and
-missing measurements, offline-vs-online equivalence for sequences longer than
-six events, future-input causality, cross-track/segment/reset isolation, gate
+The suite covers margin semantics and the enabled/disabled input contract,
+feature order/normalization, cold start and missing measurements,
+offline-vs-online equivalence for sequences longer than six events, packed
+adapter vs real online builder feature/mask/gate parity on the same controlled
+event, future-input causality, cross-track/segment/reset isolation, gate
 range/independence, HCE/RSC gradients, checkpoint roundtrip and legacy
-checkpoint rejection, read-only guards (builders stubbed to fail), and a tiny
-end-to-end training run.
+checkpoint rejection, sequence-organized sampling/load counts, resume
+contract/append behavior, read-only guards (builders stubbed to fail), and a
+tiny end-to-end training run.
+
+The real TrackTrack entry smoke is opt-in because it needs local data and a
+checkpoint:
+
+```bash
+SHUTRACK_RUN_TRACKER_SMOKE=1 \
+SHUTRACK_SMOKE_CHECKPOINT=outputs/agentguard/experiments/shutrack_v2_smoke_contract_20261116/checkpoints/last.pt \
+./.venv/bin/python -m pytest shutrack/tests/test_tracktrack_entry_smoke.py -q -s
+```
 
 ## Artifacts
 
@@ -221,11 +255,12 @@ end-to-end training run.
 
 ## Known limitations
 
-1. Real packed training currently has no margin data (see above).
-2. Online inference starts applying the model once a track is `Tracked` or
-   `Lost` (and has at least `--shutrack-min-observations` observations), which
-   is earlier than the legacy cache timeline start (≥6 observations).  Short
-   histories are represented by padding + the null token, but the distribution
-   difference needs validation after a formal training run.
+1. Real packed training currently has no margin data; the checkpoint records
+   `margin.enabled=false` and online inference obeys it (see above).
+2. By default the model is applied only after six observations, matching the
+   legacy event-cache timeline start.  Early cold-start gating is available via
+   `--shutrack-min-observations 1`, but padding/null-token handling only proves
+   shape safety; early-track distribution coverage must be validated after a
+   formal training run before using that option.
 3. This round does not launch the three-dataset formal training and does not
    regenerate any cache, label or dataset.

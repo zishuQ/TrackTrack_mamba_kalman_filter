@@ -127,8 +127,9 @@ def make_parser():
                        help="Path to one combined IWG+RG-CMA checkpoint file (.pt); directories are not accepted")
     parser.add_argument("--shutrack-checkpoint", type=str, default=None,
                        help="Path to one SHUTrack v2 (HCE+RSC) checkpoint file (.pt)")
-    parser.add_argument("--shutrack-min-observations", type=int, default=1,
-                       help="Minimum cumulative observations before the SHUTrack v2 model is applied")
+    parser.add_argument("--shutrack-min-observations", type=int, default=6,
+                       help="Minimum cumulative observations before the SHUTrack v2 model is applied "
+                            "(default 6 matches the legacy event-cache maturity; set 1 for early cold start)")
     parser.add_argument(
                        "--iwg-rg-cma-output", "--rg-cma-output",
                        dest="rg_cma_output", choices=["base", "final"], default="final",

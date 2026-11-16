@@ -213,6 +213,7 @@ class ShutrackTrackerAdapter:
             gate_decision.motion_gate,
             gate_decision.appearance_gate,
         )
+        self.runtime.stats.record_gate_update()
 
     def record_event(
         self,
