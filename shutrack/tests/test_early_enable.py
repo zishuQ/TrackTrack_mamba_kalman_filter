@@ -136,3 +136,60 @@ def test_early_enable_disabled_does_not_handle_new_matches(tmp_path):
         track, detection, 0, 0, meta, np.eye(2, 3), 2
     ) is False
     assert not runtime.event_buffers
+
+
+def test_update_without_detections_cleans_dropped_new_track_history(tmp_path, monkeypatch):
+    """Real Tracker.update_without_detections must clean early-enable buffers."""
+
+    import trackers.tracker as tracker_module
+
+    class _IdentityCMC:
+        def __init__(self, vid_name):
+            self.vid_name = vid_name
+
+        def get_warp_matrix(self):
+            return np.eye(2, 3, dtype=np.float64)
+
+    monkeypatch.setattr(tracker_module, "CMC", _IdentityCMC)
+
+    checkpoint_path = tmp_path / "best.pt"
+    write_tiny_checkpoint(checkpoint_path)
+    args = SimpleNamespace(
+        max_time_lost=30,
+        disable_gmc=True,
+        agentguard_mode="shutrack-v2",
+        shutrack_checkpoint=str(checkpoint_path),
+        agentguard_device="cpu",
+        shutrack_min_observations=6,
+        shutrack_early_enable=True,
+        agentguard_disable_kf_gate=False,
+        agentguard_disable_ema_gate=False,
+        img_w=640,
+        img_h=480,
+        event_sink=None,
+    )
+    tracker = tracker_module.Tracker(args, "MOT17-02-FRCNN")
+    runtime = tracker.agentguard_adapter.runtime
+
+    track = Track(_track_args(), _detection_array([100, 100, 140, 180]))
+    track.initiate(1, TrackCounter())
+    detection = _make_detection(0, [102, 102, 142, 182])
+    tracker.agentguard_adapter.begin_frame(
+        2, 640, 480, detection_pool=[detection]
+    )
+    _, _, _, meta = iterative_assignment(
+        [track], [detection], [], [], 0.5, 0.2, 0.4, 0.05, 2,
+        no_reid=False, return_meta=True,
+    )
+    handled = tracker.agentguard_adapter.process_new_track_match(
+        track, detection, 0, 0, meta, np.eye(2, 3), 2
+    )
+    assert handled is True
+    assert len(runtime.event_buffers[track.track_id]) == 1
+    tracker.tracks = [track]
+    assert track.state == 0  # New
+
+    tracker.update_without_detections()
+
+    assert track not in tracker.tracks
+    assert track.track_id not in runtime.event_buffers

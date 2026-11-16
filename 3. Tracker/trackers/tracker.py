@@ -459,6 +459,11 @@ class Tracker(object):
 
         dropped_new = [t for t in self.tracks if t.state == TrackState.New]
         self.tracks = [t for t in self.tracks if t.state != TrackState.New]
+        if self.agentguard_adapter is not None:
+            for t in dropped_new:
+                # A New track dropped on a no-detection frame must not leave
+                # its early-enable evidence buffer behind.
+                self.agentguard_adapter.remove_track(t.track_id)
 
         # AgentGuard: save frame_start snapshots for mature tracks (pre-CMC)
         frame_start_snapshots = {}
