@@ -19,7 +19,7 @@ from utils.det_feat_storage import load_detection_pair
 from utils.gbi import gb_interpolation, linear_interpolation_only
 
 
-def inject_detection_noise(detections_frame, noise_pos_std=0.0, noise_size_std=0.0, drop_rate=0.0):
+def inject_detection_noise(detections_frame, noise_pos_std=0.0, noise_size_std=0.0, drop_rate=0.0, return_keep_mask=False):
     """Inject noise into single-frame detections for robustness testing.
 
     Args:
@@ -28,11 +28,15 @@ def inject_detection_noise(detections_frame, noise_pos_std=0.0, noise_size_std=0
         noise_size_std: std of Gaussian noise added to (w,h) size (pixels),
                         applied symmetrically around bbox center
         drop_rate: probability of dropping each detection
+        return_keep_mask: also return the row mask applied by dropout
     Returns:
-        Modified detection array (may have fewer rows if drop_rate > 0)
+        Modified detection array (may have fewer rows if drop_rate > 0).
+        With return_keep_mask=True, returns (array, keep_mask) where keep_mask
+        refers to the original rows.
     """
     if detections_frame is None or len(detections_frame) == 0:
-        return detections_frame
+        empty = np.zeros((0,), dtype=bool)
+        return (detections_frame, empty) if return_keep_mask else detections_frame
 
     det = detections_frame.copy()
 
@@ -56,6 +60,7 @@ def inject_detection_noise(detections_frame, noise_pos_std=0.0, noise_size_std=0
         det[:, 1] -= dh / 2  # y1 shrinks/grows up
         det[:, 3] += dh / 2  # y2 shrinks/grows down
 
+    keep_mask = np.ones(len(det), dtype=bool)
     # Detection dropout
     if drop_rate > 0 and len(det) > 0:
         keep_mask = np.random.random(len(det)) >= drop_rate
@@ -63,7 +68,40 @@ def inject_detection_noise(detections_frame, noise_pos_std=0.0, noise_size_std=0
             keep_mask[np.random.randint(len(det))] = True
         det = det[keep_mask]
 
+    if return_keep_mask:
+        return det, keep_mask
     return det
+
+
+def inject_noise_with_detection_indices(
+    detections_frame,
+    detection_indices,
+    *,
+    noise_pos_std=0.0,
+    noise_size_std=0.0,
+    drop_rate=0.0,
+):
+    """Apply dropout to a detection view and its stable ID array together.
+
+    The returned rows and IDs share the same keep mask, so a dropped
+    detection can never leave a stale ID assigned to another box.
+    """
+    det, keep_mask = inject_detection_noise(
+        detections_frame,
+        noise_pos_std=noise_pos_std,
+        noise_size_std=noise_size_std,
+        drop_rate=drop_rate,
+        return_keep_mask=True,
+    )
+    if detection_indices is None:
+        return det, None, keep_mask
+    indices = np.asarray(detection_indices, dtype=np.int64).reshape(-1)
+    if indices.shape[0] != keep_mask.shape[0]:
+        raise ValueError(
+            "detection indices and detection rows must share a length: "
+            f"{indices.shape[0]} != {keep_mask.shape[0]}"
+        )
+    return det, indices[keep_mask], keep_mask
 
 
 def make_parser():
@@ -367,19 +405,29 @@ def track_mmap_sequences(data_path, result_folder, mode):
                 frame_id = frame_index + 1
                 target = det_cache.get_frame(frame_index, view='target')
                 source = det_cache.get_frame(frame_index, view='source')
-                args.agentguard_target_detection_indices = target['detection_indices']
-                args.agentguard_source_detection_indices = source['detection_indices']
+                target_detection_indices = target['detection_indices']
+                source_detection_indices = source['detection_indices']
                 det_frame = det_cache.get_frame_array(frame_index, view='target')
                 det_frame_95 = det_cache.get_frame_array(frame_index, view='source')
 
                 start = time.time()
                 if det_frame is not None and len(det_frame) > 0:
-                    det_frame = inject_detection_noise(
-                        det_frame,
-                        noise_pos_std=args.noise_pos_std,
-                        noise_size_std=args.noise_size_std,
-                        drop_rate=args.drop_rate,
+                    # Dropout must filter the row array and its stable IDs in
+                    # lockstep.  The source view is left intact, so its rows
+                    # and source_detection_indices remain aligned for the
+                    # existing deleted-candidate recovery rule.
+                    det_frame, target_detection_indices, _keep_mask = (
+                        inject_noise_with_detection_indices(
+                            det_frame,
+                            target_detection_indices,
+                            noise_pos_std=args.noise_pos_std,
+                            noise_size_std=args.noise_size_std,
+                            drop_rate=args.drop_rate,
+                        )
                     )
+                args.agentguard_target_detection_indices = target_detection_indices
+                args.agentguard_source_detection_indices = source_detection_indices
+                if det_frame is not None and len(det_frame) > 0:
                     track_results = tracker.update(det_frame, det_frame_95)
                 else:
                     track_results = tracker.update_without_detections()
