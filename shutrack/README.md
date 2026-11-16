@@ -120,8 +120,8 @@ MOT20:
 ```bash
 ./.venv/bin/python -m shutrack.cli train \
   --dataset-dir outputs/agentguard/train_data/MOT20 \
-  --checkpoint-dir outputs/agentguard/experiments/shutrack_v2_mot20_seed42_bs1024_100e/checkpoints \
-  --device cuda --epochs 100 --batch-size 1024 --num-workers 0 \
+  --checkpoint-dir outputs/agentguard/experiments/shutrack_v2_mot20_seed42_bs1024_20e_full/checkpoints \
+  --device cuda --epochs 20 --batch-size 1024 --num-workers 0 \
   --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 \
   --grad-clip 1.0 --seed 42 --margin-mode auto
 ```
@@ -131,11 +131,18 @@ SportsMOT train+val:
 ```bash
 ./.venv/bin/python -m shutrack.cli train \
   --dataset-dir outputs/agentguard/train_data/SportsMOT \
-  --checkpoint-dir outputs/agentguard/experiments/shutrack_v2_sportsmot_trainval_seed42_bs1024_200e/checkpoints \
-  --device cuda --epochs 200 --batch-size 1024 --num-workers 0 \
+  --checkpoint-dir outputs/agentguard/experiments/shutrack_v2_sportsmot_trainval_seed42_bs1024_20e_full/checkpoints \
+  --device cuda --epochs 20 --batch-size 1024 --num-workers 0 \
   --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 \
   --grad-clip 1.0 --seed 42 --margin-mode auto
 ```
+
+`--epochs` here counts **full dataset passes**.  The old nominal shard
+schedules `5×1×20` (MOT20) and `10×1×20` (SportsMOT train+val) equal 20
+effective full passes, so `--epochs 20` matches their data budget.  MOT17's
+legacy packed-data schedule was 100 full passes, hence `--epochs 100`.  The new
+trainer has no memory-shard phases; do not map the old nominal epoch numbers
+directly.
 
 Training writes only `last.pt`, `best.pt`, `metrics.jsonl`, `training.log` and
 `training_summary.json` inside the new run directory.  A run refuses to reuse an
