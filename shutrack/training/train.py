@@ -146,6 +146,26 @@ def _rss_mb() -> float:
     return 0.0
 
 
+def _rss_peak_mb() -> float:
+    try:
+        with open("/proc/self/status", "r") as handle:
+            for line in handle:
+                if line.startswith("VmHWM:"):
+                    return float(int(line.split()[1]) / 1024.0)
+    except OSError:
+        pass
+    return 0.0
+
+
+def _cuda_peak_mb() -> tuple[float, float]:
+    if not torch.cuda.is_available():
+        return 0.0, 0.0
+    return (
+        float(torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)),
+        float(torch.cuda.max_memory_reserved() / (1024.0 * 1024.0)),
+    )
+
+
 def _validate_resume_contract(
     checkpoint: Mapping[str, Any],
     model: ShutrackV2Model,
@@ -252,6 +272,8 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
 
     _seed_everything(int(resolved["seed"]))
     device = torch.device(str(resolved["device"]))
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
     dataset = build_dataset(resolved)
     try:
         model = build_model(dataset, resolved).to(device)
@@ -355,7 +377,21 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                 epoch_started = time.time()
                 epoch_start_loads = dataset.sequence_load_count
                 epoch_samples = 0
-                for batch_index, batch in enumerate(loader):
+                data_seconds = 0.0
+                compute_seconds = 0.0
+                epoch_batches = 0
+                loader_iter = iter(loader)
+                while True:
+                    data_started = time.perf_counter()
+                    try:
+                        batch = next(loader_iter)
+                    except StopIteration:
+                        break
+                    if device.type == "cuda":
+                        torch.cuda.synchronize(device)
+                    data_seconds += time.perf_counter() - data_started
+                    compute_started = time.perf_counter()
+                    epoch_batches += 1
                     epoch_samples += int(batch["safe_gate_target"].shape[0])
                     batch = _move_batch(batch, device)
                     outputs = model(**_model_inputs(batch))
@@ -373,6 +409,9 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                     optimizer.step()
                     scheduler.step()
                     global_step += 1
+                    if device.type == "cuda":
+                        torch.cuda.synchronize(device)
+                    compute_seconds += time.perf_counter() - compute_started
 
                     weight = float(components["weight_sum"].detach().cpu())
                     accumulator.add("loss", loss, weight if weight > 0 else 1.0)
@@ -408,6 +447,7 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                 metrics = accumulator.summary()
                 last_epoch = epoch
                 epoch_seconds = time.time() - epoch_started
+                cuda_allocated_peak, cuda_reserved_peak = _cuda_peak_mb()
                 metrics.update(
                     {
                         "epoch": int(epoch),
@@ -417,10 +457,16 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                         "samples_per_second": float(
                             epoch_samples / max(epoch_seconds, 1e-9)
                         ),
+                        "data_read_seconds": float(data_seconds),
+                        "compute_seconds": float(compute_seconds),
+                        "batches": int(epoch_batches),
                         "sequence_load_count": int(
                             dataset.sequence_load_count - epoch_start_loads
                         ),
                         "rss_mb": _rss_mb(),
+                        "rss_peak_mb": _rss_peak_mb(),
+                        "cuda_peak_allocated_mb": cuda_allocated_peak,
+                        "cuda_peak_reserved_mb": cuda_reserved_peak,
                         "competition_enabled": bool(
                             dataset.competition_enabled
                         ),
@@ -493,6 +539,9 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
             "sequence_load_count": int(dataset.sequence_load_count),
             "parameter_counts": model.parameter_report(),
             "competition_enabled": bool(dataset.competition_enabled),
+            "rss_peak_mb": _rss_peak_mb(),
+            "cuda_peak_allocated_mb": _cuda_peak_mb()[0],
+            "cuda_peak_reserved_mb": _cuda_peak_mb()[1],
             "training_config": dict(resolved),
         }
         summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
