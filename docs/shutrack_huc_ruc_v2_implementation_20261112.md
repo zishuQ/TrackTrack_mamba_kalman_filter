@@ -1,9 +1,16 @@
-# SHUTrack HUC/RUC 重构实施说明（2026-11-12）
+# SHUTrack v2（HCE + RSC）重构实施说明（2026-11-12，2026-11-16 更新）
 
 ## 0. 任务目标与本轮交付
 
 项目：/home/shang/workspace/TrackTrack。
-当前讨论确认的方向：SHUTrack = Suppress Harmful Updates。接受匹配不意味着运动状态与外观模板都应该完整更新。采用“结构化证据 -> HUC历史上下文 -> RUC当前跨模态融合 -> 双连续Gate”。
+当前讨论确认的方向：SHUTrack = Suppress Harmful Updates。接受匹配不意味着运动状态与外观模板都应该完整更新。采用“结构化证据 -> HCE历史上下文 -> RSC当前跨模态融合 -> 双连续Gate”。
+
+### 0.0 最终命名与边界（2026-11-16，覆盖旧 HUC/RUC 名称）
+
+- **HCE — Historical Context Encoder（历史上下文编码器）**：只编码当前之前的 5 个历史事件；共享时序编码器（d_model=128、2 层 Transformer、4 heads）编码为历史事件序列，两个可学习 query 分别读出运动与外观历史上下文 `h_m, h_a`。HCE 不输出 gate，不预测离散策略。
+- **RSC — Reliability-aware Suppression Controller（可靠性感知抑制控制器）**：以 `h_m, h_a` 为 query，以当前运动、外观、匹配上下文 token 为 key/value，做跨模态注意力与表示空间残差融合，由两个独立 sigmoid 头输出 motion gate 与 appearance gate。RSC 是控制器整体，跨模态注意力、表示级残差融合与双 gate 输出头都是其内部组成，不是第三个组件。
+- 两个 gate 不使用 softmax，不要求和为 1；不再存在 base gate、refined gate、correction、policy、cue、risk 或五策略原型。
+- 旧实现中的 `HUC`/`RUC`/`IWGRGCMA` 历史命名保持原样，不进行全仓库替换；新代码、配置、日志、测试和本文档统一使用 HCE/RSC。下文中旧 HUC/RUC 表述仅作为历史映射说明保留。
 
 本轮实施：新增独立架构与只读数据适配路径，完成训练/在线接线、必要测试、少量真实数据smoke，交付可运行训练命令。
 不要自动启动三数据集正式长训练，不执行检测/ReID提取、轨迹再采集或rollout标签再生成。
@@ -42,7 +49,7 @@ Git分支隔离与代码依赖隔离必须同时做到。使用同一checkout节
 ### 2.1 时间边界
 
 上下文仍是6个事件（不是必须连续6帧）：
-HUC只接收[t-5,...,t-1]的5个过去事件；RUC接收当前事件t。
+HCE只接收[t-5,...,t-1]的5个过去事件；RSC接收当前事件t。
 保留缺测事件、真实frame gap、padding、分段reset。不能跨track、跨sequence或跨reset取历史。
 所有当前输入均在当前写入前采集；当前检测和关联结果可以使用。标签中的未来GT/oracle不可进入输入。
 冷启动使用显式null-history token/表示，并配正确mask，避免全masked attention产生NaN。无历史但有检测仍允许用当前证据生成gate。
@@ -56,21 +63,21 @@ HUC只接收[t-5,...,t-1]的5个过去事件；RUC接收当前事件t。
 历史事件也使用同一原始证据编码规则，融合成历史event token。历史token不包含模型policy、cue/risk或旧gate预测。
 缺测时保留可用预测状态，用mask标记检测/外观不可用；padding和真实缺测不是同一种情况。无检测的det ReID零占位必须配mask。
 
-### 2.3 HUC
+### 2.3 HCE
 
 默认d_model=128，2层Transformer，4 heads；其他合理小网络超参数在配置显式记录，不扩展为架构搜索。
 对5个过去event编码为H。
 使用两个可学习query从同一个H读取：
 h_m = Read(q_m,H), h_a = Read(q_a,H)。
 共享历史主干，不复制两套完整时序网络。
-HUC不输出base gate，不预测五策略。
+HCE不输出base gate，不预测五策略。
 
-### 2.4 RUC
+### 2.4 RSC
 
 当前token为o_m,o_a,r。
 以[h_m,h_a]为两个query，当前[o_m,o_a,r]为key/value，进行一层跨注意力及必要FFN/归一化，输出delta_m,delta_a。
 允许每个query访问两个模态与context，显式modality embedding区分token。
-不再在RUC内建立第二套6事件时序摘要。
+不再在RSC内建立第二套6事件时序摘要。
 在表示空间融合：
 z_m = h_m + W_m delta_m
 z_a = h_a + W_a delta_a
@@ -79,7 +86,7 @@ m = sigmoid(D_m(z_m))
 a = sigmoid(D_a(z_a))
 不使用softmax耦合两个gate。
 第一版不额外增加pre-gate风险头、SNN、乘性第二道gate或更多架构变体。
-初始化可采用普通/小幅残差投影；不要设置两个串乘因子同时为零阻断训练。不能宣称新架构初始化等于旧HUC，历史/当前划分已经改变。
+初始化可采用普通/小幅残差投影；不要设置两个串乘因子同时为零阻断训练。不能宣称新架构初始化等于旧HUC，历史/当前划分已经改变。RSC 的跨模态注意力、表示级残差融合和双 gate 输出头共同构成一个组件，不拆分为第三个组件。
 
 ### 2.5 更新执行
 
@@ -133,6 +140,12 @@ history里的每个事件保持当时自己的template与det，不用当前模�
 两侧共用schema、顺序、默认值、normalizer；不得一侧使用旧已归一化scalar，一侧直接拼原始scalar。
 新分组LayerNorm/MLP不能依赖被删除的63维字段。不能通过先过旧63维LayerNorm再取子集而让已删除特征继续影响模型。
 
+### 3.5 实施时的真实数据核查（2026-11-16）
+
+- 实际可用的训练源只有 packed `outputs/agentguard/train_data/{MOT17,MOT20,SportsMOT}`：`data.pt` 含 `event_indices [N,6]`、`safe_gate_target`、`valid_channels`、`sample_weight`、已归一化的 `timeline_scalar_feats [T,63]`、`timeline_has_detection`；`reid_features.npy [T,2,2048]` 含更新前 track 模板与 det ReID。三者均 `context_size=6`、`reid_dim=2048`。
+- `outputs/agentguard/detection_cache` 在线可用。
+- 源 compact event cache（`events_*.pt`/`associations_*.pt`/`states_*.pt`）、compact labels 与关联矩阵在当前 checkout 中不存在；packed 数据也不含 `raw_cost`、`accepted_detection_index`、`association_track_row`。因此真实 packed 训练中 row/col margin 与两个 valid bit 恒为 0，`margin_source="unavailable_packed_train_data"`、`margin_valid_rate=0.0` 显式写入数据集元数据、checkpoint 与日志；`--margin-mode required` 会在启动时报告缺失字段。margin 计算、源缓存只读适配器与合成候选池测试均已实现，待只读缓存恢复即可启用。
+
 ## 4. 只读数据适配路径
 
 优先复用既有IWG_RG_CMA timeline/index与compact labels，在读取后做in-memory adapter。
@@ -162,7 +175,7 @@ history里的每个事件保持当时自己的template与det，不用当前模�
 不更改rollout时域、收益函数、safe target映射、样本权重和数据划分。
 不要直接调用旧compute_iwg_without_cma_loss而保留其policy/cue/risk字段依赖；新增独立、简洁的loss接口。
 全无有效label的batch处理需稳定且明确。
-新架构端到端训练，不能沿用旧RUC输入.detach()的梯度隔离。监督应能回传到HUC、RUC及有效编码器。
+新架构端到端训练，不能沿用旧RUC输入.detach()的梯度隔离。监督应能回传到HCE、RSC及有效编码器。
 
 ## 6. 模型/运行时/CLI兼容
 
@@ -192,7 +205,7 @@ history里的每个事件保持当时自己的template与det，不用当前模�
 1. 原始事件与离线adapter/在线builder对同一事件产生相同特征，包括selected不是row/col最优、无其他候选、无检测、缺失历史、reset。
 2. 当前写入前状态与标签严格对应；未来输入变化不影响当前gate；跨轨迹/跨reset无历史污染。
 3. 长于6事件的forward_sequence与逐事件在线forward在eval下等价；padding、缺测、冷启动和重激活均无NaN。
-4. gate范围和通道含义正确；无检测输出[0,0]；HUC/RUC在有效非退化样本上都有梯度；无policy/cue/risk/correction参数和监督。
+4. gate范围和通道含义正确；无检测输出[0,0]；HCE/RSC在有效非退化样本上都有梯度；无policy/cue/risk/correction参数和监督。
 5. checkpoint roundtrip输出一致；旧checkpoint加载路径不回归；新架构对不适用旧参数给出明确错误。
 6. 只读数据路径的保护测试：把build/reindex/label-generation入口替换为失败桩，确认读取与训练小样本不会调用；小fixture源目录只读仍可使用。真实小批读取前后核对source文件未新增/修改，不能对全数据做昂贵hash扫描。
 7. 单个极小真实训练smoke（例如10-20 steps、受限workers）和一小段在线推理，报告有限loss/梯度/输出及实际磁盘新增量。若数据/GPU/依赖缺失，准确报告阻塞，不伪造通过。
