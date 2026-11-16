@@ -1,3 +1,5 @@
+import sys
+from pathlib import Path
 from typing import Optional
 
 from trackers.cmc import *
@@ -35,7 +37,49 @@ class Tracker(object):
         # AgentGuard integration
         self.agentguard_adapter = None
         ag_mode = getattr(args, 'agentguard_mode', 'off')
-        if _AGENTGUARD_AVAILABLE and ag_mode in ('capture', 'iwg-rg-cma'):
+        if ag_mode == 'shutrack-v2':
+            # Isolated SHUTrack v2 dispatch: only this branch knows the new
+            # package. The rest of the tracker update loop keeps using the
+            # existing adapter protocol and update_with_gates.
+            repo_root = Path(__file__).resolve().parents[2]
+            if str(repo_root) not in sys.path:
+                sys.path.insert(0, str(repo_root))
+            from shutrack.integration.tracktrack import ShutrackTrackerAdapter
+            from shutrack.runtime.adapter import (
+                ShutrackRuntime,
+                ShutrackRuntimeConfig,
+            )
+            from shutrack.runtime.checkpoint_loader import load_runtime_model
+
+            checkpoint_path = getattr(args, 'shutrack_checkpoint', None)
+            if not checkpoint_path:
+                raise RuntimeError(
+                    "--shutrack-checkpoint is required when "
+                    "--agentguard-mode=shutrack-v2"
+                )
+            device = getattr(args, 'agentguard_device', 'cpu')
+            model, checkpoint = load_runtime_model(checkpoint_path, device=device)
+            dataset_meta = checkpoint.get('dataset', {})
+            runtime_config = ShutrackRuntimeConfig(
+                max_frame_gap=int(dataset_meta.get('max_frame_gap', 30)),
+                min_observations=int(getattr(args, 'shutrack_min_observations', 1)),
+                disable_kf_gate=bool(
+                    getattr(args, 'agentguard_disable_kf_gate', False)
+                ),
+                disable_ema_gate=bool(
+                    getattr(args, 'agentguard_disable_ema_gate', False)
+                ),
+            )
+            runtime = ShutrackRuntime(
+                model=model,
+                checkpoint=checkpoint,
+                device=device,
+                config=runtime_config,
+            )
+            self.agentguard_adapter = ShutrackTrackerAdapter(
+                args, vid_name, runtime=runtime
+            )
+        elif _AGENTGUARD_AVAILABLE and ag_mode in ('capture', 'iwg-rg-cma'):
             from agentguard.runtime.manager import AgentGuardRuntime
 
             event_sink = getattr(args, 'event_sink', None)

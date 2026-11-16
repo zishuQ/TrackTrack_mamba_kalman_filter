@@ -121,10 +121,14 @@ def make_parser():
 
     # AgentGuard parameters
     parser.add_argument("--agentguard-mode", type=str, default="off",
-                       choices=["off", "capture", "iwg-rg-cma"],
-                       help="AgentGuard mode: off, capture, or IWG+RG-CMA")
+                       choices=["off", "capture", "iwg-rg-cma", "shutrack-v2"],
+                       help="AgentGuard mode: off, capture, IWG+RG-CMA, or SHUTrack v2 (HCE+RSC)")
     parser.add_argument("--agentguard-checkpoint", type=str, default=None,
                        help="Path to one combined IWG+RG-CMA checkpoint file (.pt); directories are not accepted")
+    parser.add_argument("--shutrack-checkpoint", type=str, default=None,
+                       help="Path to one SHUTrack v2 (HCE+RSC) checkpoint file (.pt)")
+    parser.add_argument("--shutrack-min-observations", type=int, default=1,
+                       help="Minimum cumulative observations before the SHUTrack v2 model is applied")
     parser.add_argument(
                        "--iwg-rg-cma-output", "--rg-cma-output",
                        dest="rg_cma_output", choices=["base", "final"], default="final",
@@ -255,7 +259,8 @@ def _agentguard_stats(tracker):
     stats = getattr(runtime, 'stats', None) if runtime is not None else None
     if stats is None:
         return {}
-    return {f"agentguard_{key}": value for key, value in stats.summary().items()}
+    prefix = getattr(adapter, 'stats_prefix', 'agentguard')
+    return {f"{prefix}_{key}": value for key, value in stats.summary().items()}
 
 
 def _write_agentguard_sequence_stats(args, tracker, sequence, elapsed_sec):
@@ -269,6 +274,7 @@ def _write_agentguard_sequence_stats(args, tracker, sequence, elapsed_sec):
         'dataset': args.dataset,
         'split': args.mode,
         'checkpoint': getattr(args, 'agentguard_checkpoint', None),
+        'shutrack_checkpoint': getattr(args, 'shutrack_checkpoint', None),
         'normalization_stats': getattr(args, 'agentguard_normalization_stats', ''),
         'fallback_threshold': getattr(args, 'agentguard_fallback_threshold', 0.0),
         'elapsed_sec': elapsed_sec,
@@ -491,6 +497,8 @@ def run():
         trackers_to_eval += '_agentguard_capture'
     elif args.agentguard_mode == 'iwg-rg-cma':
         trackers_to_eval += f'_iwg_rg_cma_{args.rg_cma_output}'
+    elif args.agentguard_mode == 'shutrack-v2':
+        trackers_to_eval += '_shutrack_v2'
     result_folder_base = os.path.join(args.output_dir, trackers_to_eval)
     if 'dance' in args.dataset.lower() and args.mode == 'test':
         result_folder = os.path.join(result_folder_base, 'tracker')
@@ -576,6 +584,41 @@ if __name__ == "__main__":
     # AgentGuard validation
     if args.agentguard_mode == 'iwg-rg-cma' and args.agentguard_checkpoint is None:
         parser.error("--agentguard-checkpoint is required when --agentguard-mode=iwg-rg-cma")
+    if args.agentguard_mode == 'shutrack-v2':
+        if args.shutrack_checkpoint is None:
+            parser.error(
+                "--shutrack-checkpoint is required when "
+                "--agentguard-mode=shutrack-v2"
+            )
+        if args.agentguard_checkpoint is not None:
+            parser.error(
+                "--agentguard-checkpoint is not applicable to SHUTrack v2; "
+                "use --shutrack-checkpoint"
+            )
+        if args.rg_cma_output != 'final':
+            parser.error(
+                "--iwg-rg-cma-output is not supported by SHUTrack v2; the model "
+                "has no base/final outputs"
+            )
+        if float(args.rg_cma_alpha) != 1.0:
+            parser.error(
+                "--rg-cma-alpha is not supported by SHUTrack v2; the model has "
+                "no correction branch"
+            )
+        if float(args.agentguard_fallback_threshold) > 0.0:
+            parser.error(
+                "--agentguard-fallback-threshold is not supported by SHUTrack v2; "
+                "the model has no policy probabilities to fall back on"
+            )
+        if args.agentguard_normalization_stats:
+            parser.error(
+                "--agentguard-normalization-stats is not supported by SHUTrack v2; "
+                "normalization statistics are embedded in the SHUTrack checkpoint"
+            )
+        if args.agentguard_attention_diagnostics:
+            parser.error(
+                "--agentguard-attention-diagnostics is not supported by SHUTrack v2"
+            )
 
     # Set random seed
     random.seed(args.seed)
