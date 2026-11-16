@@ -1,4 +1,4 @@
-"""End-to-end SHUTrack v2 model: shared encoders + HCE + RSC."""
+"""End-to-end SHUTrack v3 model: shared encoders + HCE + RSC."""
 
 from __future__ import annotations
 
@@ -10,18 +10,18 @@ import torch.nn as nn
 
 from shutrack.models.encoders import (
     AppearanceEncoder,
-    ContextEncoder,
-    MotionEncoder,
+    CompetitionEncoder,
+    EvidenceEncoder,
 )
 from shutrack.models.hce import HCE
 from shutrack.models.rsc import RSC
 from shutrack.schema import (
     ARCHITECTURE_NAME,
     ARCHITECTURE_VERSION,
-    CONTEXT_DIM,
+    COMPETITION_DIM,
     CONTEXT_SIZE,
+    EVIDENCE_DIM,
     HISTORY_SIZE,
-    MOTION_DIM,
 )
 
 
@@ -35,6 +35,7 @@ class ShutrackV2Config:
     dropout: float = 0.0
     appearance_proj_dim: int = 64
     context_size: int = CONTEXT_SIZE
+    competition_enabled: bool = True
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -47,14 +48,11 @@ class ShutrackV2Model(nn.Module):
         super().__init__()
         if int(config.context_size) != CONTEXT_SIZE:
             raise ValueError(
-                f"SHUTrack v2 requires context_size={CONTEXT_SIZE}, got "
+                f"SHUTrack requires context_size={CONTEXT_SIZE}, got "
                 f"{config.context_size}"
             )
         self.config = config
-        self.motion_encoder = MotionEncoder(
-            d_model=config.d_model, ff_dim=config.ff_dim
-        )
-        self.context_encoder = ContextEncoder(
+        self.evidence_encoder = EvidenceEncoder(
             d_model=config.d_model, ff_dim=config.ff_dim
         )
         self.appearance_encoder = AppearanceEncoder(
@@ -62,6 +60,11 @@ class ShutrackV2Model(nn.Module):
             proj_dim=config.appearance_proj_dim,
             d_model=config.d_model,
             ff_dim=config.ff_dim,
+        )
+        self.competition_encoder = (
+            CompetitionEncoder(d_model=config.d_model, ff_dim=config.ff_dim)
+            if config.competition_enabled
+            else None
         )
         self.event_norm = nn.LayerNorm(config.d_model)
         self.hce = HCE(
@@ -76,6 +79,7 @@ class ShutrackV2Model(nn.Module):
             n_heads=config.n_heads,
             ff_dim=config.ff_dim,
             dropout=config.dropout,
+            competition_enabled=config.competition_enabled,
         )
 
     @property
@@ -90,45 +94,46 @@ class ShutrackV2Model(nn.Module):
     def reid_dim(self) -> int:
         return int(self.config.reid_dim)
 
+    @property
+    def competition_enabled(self) -> bool:
+        return bool(self.config.competition_enabled)
+
     def forward(
         self,
-        history_motion: torch.Tensor,
+        history_evidence: torch.Tensor,
         history_track: torch.Tensor,
         history_detection: torch.Tensor,
-        history_context: torch.Tensor,
         history_mask: torch.Tensor,
         history_has_detection: torch.Tensor,
-        current_motion: torch.Tensor,
+        current_evidence: torch.Tensor,
         current_track: torch.Tensor,
         current_detection: torch.Tensor,
-        current_context: torch.Tensor,
+        current_competition: torch.Tensor,
         current_has_detection: torch.Tensor,
         history_reset: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        batch_size = history_motion.shape[0]
+        batch_size = history_evidence.shape[0]
         expected = {
-            "history_motion": (batch_size, HISTORY_SIZE, MOTION_DIM),
+            "history_evidence": (batch_size, HISTORY_SIZE, EVIDENCE_DIM),
             "history_track": (batch_size, HISTORY_SIZE, self.reid_dim),
             "history_detection": (batch_size, HISTORY_SIZE, self.reid_dim),
-            "history_context": (batch_size, HISTORY_SIZE, CONTEXT_DIM),
             "history_mask": (batch_size, HISTORY_SIZE),
             "history_has_detection": (batch_size, HISTORY_SIZE),
-            "current_motion": (batch_size, MOTION_DIM),
+            "current_evidence": (batch_size, EVIDENCE_DIM),
             "current_track": (batch_size, self.reid_dim),
             "current_detection": (batch_size, self.reid_dim),
-            "current_context": (batch_size, CONTEXT_DIM),
+            "current_competition": (batch_size, COMPETITION_DIM),
         }
         given = {
-            "history_motion": history_motion,
+            "history_evidence": history_evidence,
             "history_track": history_track,
             "history_detection": history_detection,
-            "history_context": history_context,
             "history_mask": history_mask,
             "history_has_detection": history_has_detection,
-            "current_motion": current_motion,
+            "current_evidence": current_evidence,
             "current_track": current_track,
             "current_detection": current_detection,
-            "current_context": current_context,
+            "current_competition": current_competition,
         }
         for name, shape in expected.items():
             if tuple(given[name].shape) != shape:
@@ -146,28 +151,32 @@ class ShutrackV2Model(nn.Module):
                 history_detection.reshape(-1, self.reid_dim),
                 history_has_detection.reshape(-1),
             ).reshape(batch_size, HISTORY_SIZE, self.config.d_model)
-            + self.motion_encoder(history_motion)
-            + self.context_encoder(history_context)
+            + self.evidence_encoder(history_evidence)
         )
-        history_motion_context, history_appearance_context = self.hce(
+        history_evidence_context, history_appearance_context = self.hce(
             history_tokens,
             history_mask,
             history_reset,
         )
 
-        current_motion_token = self.motion_encoder(current_motion)
+        current_evidence_token = self.evidence_encoder(current_evidence)
         current_appearance_token = self.appearance_encoder(
             current_track,
             current_detection,
             current_has_detection.bool(),
         )
-        current_context_token = self.context_encoder(current_context)
+        current_competition_token = None
+        if self.competition_enabled:
+            assert self.competition_encoder is not None
+            current_competition_token = self.competition_encoder(
+                current_competition
+            )
         return self.rsc(
-            history_motion_context,
+            history_evidence_context,
             history_appearance_context,
-            current_motion_token,
+            current_evidence_token,
             current_appearance_token,
-            current_context_token,
+            current_competition_token,
             current_has_detection,
         )
 
@@ -176,16 +185,24 @@ class ShutrackV2Model(nn.Module):
             "total": sum(p.numel() for p in self.parameters()),
             "hce": sum(p.numel() for p in self.hce.parameters()),
             "rsc": sum(p.numel() for p in self.rsc.parameters()),
-            "encoders": sum(
-                p.numel()
-                for module in (
-                    self.motion_encoder,
-                    self.context_encoder,
-                    self.appearance_encoder,
-                )
-                for p in module.parameters()
+            "evidence_encoder": sum(
+                p.numel() for p in self.evidence_encoder.parameters()
+            ),
+            "appearance_encoder": sum(
+                p.numel() for p in self.appearance_encoder.parameters()
             ),
         }
+        if self.competition_encoder is not None:
+            counts["competition_encoder"] = sum(
+                p.numel() for p in self.competition_encoder.parameters()
+            )
+        else:
+            counts["competition_encoder"] = 0
+        counts["encoders"] = (
+            counts["evidence_encoder"]
+            + counts["appearance_encoder"]
+            + counts["competition_encoder"]
+        )
         return {key: int(value) for key, value in counts.items()}
 
     def contract(self) -> dict[str, Any]:
@@ -193,6 +210,7 @@ class ShutrackV2Model(nn.Module):
             "architecture": ARCHITECTURE_NAME,
             "architecture_version": ARCHITECTURE_VERSION,
             "model_config": self.config.as_dict(),
+            "competition_enabled": self.competition_enabled,
             "parameter_counts": self.parameter_report(),
         }
 

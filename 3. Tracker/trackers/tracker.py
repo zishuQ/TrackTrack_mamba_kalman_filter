@@ -60,9 +60,18 @@ class Tracker(object):
             device = getattr(args, 'agentguard_device', 'cpu')
             model, checkpoint = load_runtime_model(checkpoint_path, device=device)
             dataset_meta = checkpoint.get('dataset', {})
+            early_enable = bool(getattr(args, 'shutrack_early_enable', False))
+            min_observations = int(
+                getattr(args, 'shutrack_min_observations', 1)
+            )
+            if early_enable:
+                # Early mode gates from the 3rd match onward; keep the
+                # tracked/lost path consistent with that threshold instead of
+                # leaving a gap until the legacy maturity count.
+                min_observations = min(min_observations, 3)
             runtime_config = ShutrackRuntimeConfig(
                 max_frame_gap=int(dataset_meta.get('max_frame_gap', 30)),
-                min_observations=int(getattr(args, 'shutrack_min_observations', 1)),
+                min_observations=min_observations,
                 disable_kf_gate=bool(
                     getattr(args, 'agentguard_disable_kf_gate', False)
                 ),
@@ -375,18 +384,51 @@ class Tracker(object):
         dets_high_left = [dets_all[i] for i in u_dets if i < len(dets_high)]
 
         # Association between (new tracks) & (left high confidence detections)
-        matches, u_tracks, u_dets = iterative_assignment(new, dets_high_left, [], [], self.args.match_thr,
-                                                         self.args.penalty_p, self.args.penalty_q,
-                                                         self.args.reduce_step, self.frame_id,
-                                                         no_reid=getattr(self.args, 'no_reid', False))
+        use_new_shutrack = bool(
+            self.agentguard_adapter is not None
+            and getattr(self.agentguard_adapter, "runtime", None) is not None
+            and getattr(self.agentguard_adapter, "early_enable", False)
+        )
+        if use_new_shutrack:
+            matches, u_tracks, u_dets, new_association_meta = iterative_assignment(
+                new, dets_high_left, [], [], self.args.match_thr,
+                self.args.penalty_p, self.args.penalty_q,
+                self.args.reduce_step, self.frame_id,
+                no_reid=getattr(self.args, 'no_reid', False),
+                return_meta=True,
+            )
+        else:
+            new_association_meta = None
+            matches, u_tracks, u_dets = iterative_assignment(
+                new, dets_high_left, [], [], self.args.match_thr,
+                self.args.penalty_p, self.args.penalty_q,
+                self.args.reduce_step, self.frame_id,
+                no_reid=getattr(self.args, 'no_reid', False),
+            )
 
         # Update matched tracks
         for t, d in matches:
-            new[t].update(self.frame_id, dets_high_left[d])
+            track = new[t]
+            detection = dets_high_left[d]
+            handled = False
+            if use_new_shutrack:
+                handled = self.agentguard_adapter.process_new_track_match(
+                    track,
+                    detection,
+                    t,
+                    d,
+                    new_association_meta,
+                    effective_warp,
+                    self.frame_id,
+                )
+            if not handled:
+                track.update(self.frame_id, detection)
 
         # Mark "remove" to unmatched tracks
         for t in u_tracks:
             new[t].mark_removed()
+            if use_new_shutrack:
+                self.agentguard_adapter.remove_track(new[t].track_id)
 
         # ==============================================================================================================
         # Mark "remove" lost tracks which are too old and add to finished

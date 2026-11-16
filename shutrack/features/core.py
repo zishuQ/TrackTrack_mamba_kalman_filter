@@ -1,10 +1,10 @@
-"""Shared structured-evidence construction for training and online inference.
+"""Shared evidence construction for training and online inference.
 
-Both sides feed the same 18 scalar values into the same positions:
+Both sides feed the same values into the same positions:
 
-* motion: 12 values from legacy 63-dim indices (27:31, 39:43, 43:47);
-* context: 8 values = det_score, row_margin, col_margin, history_length,
-  observation_gap, has_detection, row_margin_valid, col_margin_valid.
+* evidence (13): 12 normalized legacy scalar columns (27:31, 39:43, 43:45,
+  9, 59) plus a raw 0/1 has-detection flag;
+* competition (3, optional branch): normalized legacy columns 15, 21, 25.
 
 The legacy packed training tensors already contain z-scored scalar values.
 Online inference must apply the same 63-dim statistics first; this module is
@@ -13,16 +13,14 @@ the single place where that convention is encoded.
 
 from __future__ import annotations
 
-from typing import Mapping
-
 import numpy as np
 
-from shutrack.features.margins import MarginResult, normalize_margins
 from shutrack.schema import (
-    CONTEXT_DIM,
+    COMPETITION_DIM,
+    COMPETITION_SCALAR_INDICES,
+    EVIDENCE_DIM,
+    EVIDENCE_SCALAR_INDICES,
     LEGACY_SCALAR_DIM,
-    MOTION_DIM,
-    MOTION_SCALAR_INDICES,
 )
 
 
@@ -49,27 +47,11 @@ def normalize_scalar63(
     return (values - mean_array) / safe_std
 
 
-def extract_motion(normalized_scalar63: np.ndarray) -> np.ndarray:
-    """Select the 12 motion values from an already-normalized scalar vector."""
-
-    values = np.asarray(normalized_scalar63, dtype=np.float64).reshape(-1)
-    if values.shape != (LEGACY_SCALAR_DIM,):
-        raise ValueError(
-            f"normalized scalar features must have shape ({LEGACY_SCALAR_DIM},), "
-            f"got {values.shape}"
-        )
-    motion = values[list(MOTION_SCALAR_INDICES)].astype(np.float32)
-    if motion.shape != (MOTION_DIM,):
-        raise AssertionError("motion extraction produced the wrong dimension")
-    return motion
-
-
-def build_context(
+def build_evidence(
     normalized_scalar63: np.ndarray,
-    margins: MarginResult,
-    margin_stats: Mapping[str, object] | None = None,
+    has_detection: bool,
 ) -> np.ndarray:
-    """Build the 8-dim context vector in the fixed schema order."""
+    """Build the 13-dim evidence vector from a normalized 63-dim scalar."""
 
     values = np.asarray(normalized_scalar63, dtype=np.float64).reshape(-1)
     if values.shape != (LEGACY_SCALAR_DIM,):
@@ -77,44 +59,36 @@ def build_context(
             f"normalized scalar features must have shape ({LEGACY_SCALAR_DIM},), "
             f"got {values.shape}"
         )
-    row_margin, col_margin = normalize_margins(margins, margin_stats)
-    context = np.asarray(
-        [
-            values[9],    # detection score
-            row_margin,
-            col_margin,
-            values[58],   # normalized history length
-            values[59],   # normalized observation gap
-            values[26],   # has_detection (legacy scalar value)
-            1.0 if margins.row_valid else 0.0,
-            1.0 if margins.col_valid else 0.0,
-        ],
+    evidence = np.asarray(
+        [values[index] for index in EVIDENCE_SCALAR_INDICES]
+        + [1.0 if has_detection else 0.0],
         dtype=np.float32,
     )
-    if context.shape != (CONTEXT_DIM,):
-        raise AssertionError("context construction produced the wrong dimension")
-    return context
+    if evidence.shape != (EVIDENCE_DIM,):
+        raise AssertionError("evidence construction produced the wrong dimension")
+    return evidence
 
 
-def build_core_features(
-    normalized_scalar63: np.ndarray,
-    margins: MarginResult,
-    margin_stats: Mapping[str, object] | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return ``(motion12, context8)`` from one already-normalized scalar."""
+def build_competition(normalized_scalar63: np.ndarray) -> np.ndarray:
+    """Build the 3-dim competition vector from a normalized 63-dim scalar."""
 
-    return (
-        extract_motion(normalized_scalar63),
-        build_context(normalized_scalar63, margins, margin_stats),
+    values = np.asarray(normalized_scalar63, dtype=np.float64).reshape(-1)
+    if values.shape != (LEGACY_SCALAR_DIM,):
+        raise ValueError(
+            f"normalized scalar features must have shape ({LEGACY_SCALAR_DIM},), "
+            f"got {values.shape}"
+        )
+    competition = np.asarray(
+        [values[index] for index in COMPETITION_SCALAR_INDICES],
+        dtype=np.float32,
     )
+    if competition.shape != (COMPETITION_DIM,):
+        raise AssertionError("competition construction produced the wrong dimension")
+    return competition
 
 
 def sanitize_float32(array: np.ndarray) -> np.ndarray:
-    """Replace non-finite values with zero and force float32.
-
-    Training data is validated strictly elsewhere; the online path uses this
-    helper so a single corrupted live feature cannot produce NaN gates.
-    """
+    """Replace non-finite values with zero and force float32."""
 
     return np.nan_to_num(
         np.asarray(array, dtype=np.float32),
@@ -126,8 +100,7 @@ def sanitize_float32(array: np.ndarray) -> np.ndarray:
 
 __all__ = [
     "normalize_scalar63",
-    "extract_motion",
-    "build_context",
-    "build_core_features",
+    "build_evidence",
+    "build_competition",
     "sanitize_float32",
 ]

@@ -1,4 +1,4 @@
-"""Independent SHUTrack v2 checkpoint schema, strict loader and atomic saves.
+"""Independent SHUTrack v3 checkpoint schema, strict loader and atomic saves.
 
 The loader never falls back to ``strict=False`` and explicitly rejects legacy
 IWG / RG-CMA checkpoints: the new architecture must be retrained.
@@ -16,14 +16,14 @@ from shutrack.models.shutrack import ShutrackV2Config, ShutrackV2Model
 from shutrack.schema import (
     ARCHITECTURE_NAME,
     ARCHITECTURE_VERSION,
-    CONTEXT_DIM,
+    COMPETITION_DIM,
     CONTEXT_SIZE,
+    EVIDENCE_DIM,
     FEATURE_SCHEMA,
     FEATURE_SCHEMA_SHA256,
     FEATURE_SCHEMA_VERSION,
     HISTORY_SIZE,
     LEGACY_SCALAR_DIM,
-    MOTION_DIM,
     feature_schema_descriptor,
 )
 
@@ -81,6 +81,7 @@ def model_from_config(model_config: Mapping[str, Any]) -> ShutrackV2Model:
         "dropout",
         "appearance_proj_dim",
         "context_size",
+        "competition_enabled",
     }
     unknown = sorted(set(model_config).difference(allowed))
     if unknown:
@@ -139,10 +140,10 @@ def validate_checkpoint(checkpoint: Mapping[str, Any]) -> None:
             f"SHUTrack checkpoint history_size must be {HISTORY_SIZE}, got "
             f"{checkpoint.get('history_size')!r}"
         )
-    if int(checkpoint.get("motion_dim", -1)) != MOTION_DIM:
-        raise ValueError("SHUTrack checkpoint motion dimension mismatch")
-    if int(checkpoint.get("context_dim", -1)) != CONTEXT_DIM:
-        raise ValueError("SHUTrack checkpoint context dimension mismatch")
+    if int(checkpoint.get("evidence_dim", -1)) != EVIDENCE_DIM:
+        raise ValueError("SHUTrack checkpoint evidence dimension mismatch")
+    if int(checkpoint.get("competition_dim", -1)) != COMPETITION_DIM:
+        raise ValueError("SHUTrack checkpoint competition dimension mismatch")
     if int(checkpoint.get("scalar_dim", -1)) != LEGACY_SCALAR_DIM:
         raise ValueError("SHUTrack checkpoint legacy scalar dimension mismatch")
     model_config = checkpoint.get("model_config")
@@ -152,23 +153,16 @@ def validate_checkpoint(checkpoint: Mapping[str, Any]) -> None:
         raise ValueError("SHUTrack checkpoint model_config context_size mismatch")
     if int(model_config.get("reid_dim", -1)) != int(checkpoint.get("reid_dim", -2)):
         raise ValueError("SHUTrack checkpoint reid_dim does not match model_config")
-    margin = checkpoint.get("margin")
-    if not isinstance(margin, Mapping):
-        raise ValueError("SHUTrack checkpoint is missing the margin input contract")
-    if not isinstance(margin.get("enabled"), bool):
+    competition_enabled = checkpoint.get("competition_enabled")
+    if not isinstance(competition_enabled, bool):
         raise ValueError(
-            "SHUTrack checkpoint margin.enabled must be an explicit boolean; "
-            "retrain with the current code so the effective input contract is "
-            "recorded"
+            "SHUTrack checkpoint competition_enabled must be an explicit boolean; "
+            "retrain with the current code so the branch configuration is recorded"
         )
-    if not str(margin.get("source", "")):
-        raise ValueError("SHUTrack checkpoint margin.source is missing")
-    if margin["enabled"]:
-        stats = margin.get("stats")
-        if not isinstance(stats, Mapping) or "mean" not in stats or "std" not in stats:
-            raise ValueError(
-                "margin-enabled SHUTrack checkpoint must contain margin stats"
-            )
+    if bool(model_config.get("competition_enabled")) != competition_enabled:
+        raise ValueError(
+            "SHUTrack checkpoint competition_enabled does not match model_config"
+        )
     missing = [key for key in _REQUIRED_CHECKPOINT_KEYS if key not in checkpoint]
     if missing:
         raise ValueError(f"SHUTrack checkpoint is missing fields: {missing}")
@@ -186,7 +180,6 @@ def build_checkpoint_payload(
     scheduler: Any = None,
     normalization_mean,
     normalization_std,
-    margin: Mapping[str, Any],
     include_optimizer: bool,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -198,8 +191,9 @@ def build_checkpoint_payload(
         "feature_schema_sha256": FEATURE_SCHEMA_SHA256,
         "context_size": CONTEXT_SIZE,
         "history_size": HISTORY_SIZE,
-        "motion_dim": MOTION_DIM,
-        "context_dim": CONTEXT_DIM,
+        "evidence_dim": EVIDENCE_DIM,
+        "competition_dim": COMPETITION_DIM,
+        "competition_enabled": bool(model.competition_enabled),
         "scalar_dim": LEGACY_SCALAR_DIM,
         "reid_dim": int(model.reid_dim),
         "model_config": model.config.as_dict(),
@@ -213,7 +207,6 @@ def build_checkpoint_payload(
         "dataset": dict(dataset_descriptor),
         "normalization_mean": list(map(float, normalization_mean)),
         "normalization_std": list(map(float, normalization_std)),
-        "margin": dict(margin),
         "training_commit": _git_value(["git", "rev-parse", "HEAD"], "unknown"),
         "training_git_status": _git_value(
             ["git", "status", "--porcelain"], "unavailable"
@@ -270,11 +263,17 @@ def checkpoint_summary(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
         "best_metric": checkpoint.get("best_metric"),
         "reid_dim": checkpoint.get("reid_dim"),
         "model_config": checkpoint.get("model_config"),
+        "competition_enabled": checkpoint.get("competition_enabled"),
         "parameter_counts": checkpoint.get("parameter_counts"),
-        "margin": checkpoint.get("margin"),
         "dataset": {
             key: checkpoint.get("dataset", {}).get(key)
-            for key in ("dataset", "split", "dataset_dir", "margin_source", "margin_valid_rate")
+            for key in (
+                "dataset",
+                "split",
+                "dataset_dir",
+                "competition_enabled",
+                "feature_schema_version",
+            )
         },
     }
 

@@ -1,6 +1,6 @@
 """Read-only adapter over the existing packed AgentGuard ``train_data``.
 
-The packed directory is the only large training source used by SHUTrack v2:
+The packed directory is the only large training source used by SHUTrack:
 
     metadata.json
     <sequence>/data.pt          # small per-sample/label/timeline arrays
@@ -10,14 +10,11 @@ Nothing here builds caches, indexes, labels, windows on disk, or copies
 feature arrays.  Arrays are either loaded lazily (``data.pt`` is small) or
 memory-mapped (``reid_features.npy``); the source directory is never written.
 
-Margin availability is explicit.  The packed format does not contain the
-association cost matrices, accepted detection indices or ``association_track_row``
-needed for the row/column margins, so the real packed path reports
-``margin_source="unavailable_packed_train_data"`` and leaves the two margin
-values and their validity bits at zero.  ``margin_mode="required"`` turns that
-into an immediate, descriptive error instead.  The full margin path is
-implemented in ``shutrack.features.margins`` and the legacy cache adapter and
-is exercised by tests with synthetic recorded candidate pools.
+The competition branch reads normalized legacy scalar columns 15/21/25.  When
+``competition_enabled=False`` the dataset still returns the same tensor layout
+but fills the branch with zeros, so the lean and full variants share one
+window interface.  The effective branch configuration is recorded in the
+dataset descriptor and must match the model/checkpoint.
 """
 
 from __future__ import annotations
@@ -25,7 +22,6 @@ from __future__ import annotations
 import bisect
 import json
 import mmap
-import warnings
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Mapping
@@ -36,10 +32,15 @@ from torch.utils.data import Dataset
 
 from shutrack.data.evidence import EventEvidence
 from shutrack.data.legacy_adapter import normalizer_from_metadata
-from shutrack.features.core import build_core_features
-from shutrack.features.margins import DEFAULT_MARGIN_STATS, INVALID_MARGIN
+from shutrack.features.core import build_competition, build_evidence
 from shutrack.features.windows import WindowArrays, build_window
-from shutrack.schema import CONTEXT_SIZE, FEATURE_SCHEMA_VERSION, LEGACY_SCALAR_DIM
+from shutrack.schema import (
+    COMPETITION_DIM,
+    CONTEXT_SIZE,
+    EVIDENCE_DIM,
+    FEATURE_SCHEMA_VERSION,
+    LEGACY_SCALAR_DIM,
+)
 
 PACKED_FORMAT = "train_data"
 _REQUIRED_PACKED_ARRAYS = (
@@ -62,8 +63,7 @@ class PackedShutrackDataset(Dataset):
         dataset_dir: str | Path,
         *,
         max_samples: int = 0,
-        margin_mode: str = "auto",
-        margin_stats: Mapping[str, Any] | None = None,
+        competition_enabled: bool = True,
         sequence_cache_size: int = 2,
     ) -> None:
         self.dataset_dir = Path(dataset_dir).resolve()
@@ -80,53 +80,19 @@ class PackedShutrackDataset(Dataset):
             )
         if int(self.metadata.get("context_size", -1)) != CONTEXT_SIZE:
             raise ValueError(
-                "SHUTrack v2 requires context_size=6 packed windows, got "
+                "SHUTrack requires context_size=6 packed windows, got "
                 f"{self.metadata.get('context_size')!r} in {metadata_path}"
             )
         if int(self.metadata.get("scalar_dim", -1)) != LEGACY_SCALAR_DIM:
             raise ValueError(
-                "SHUTrack v2 requires the legacy 63-dim scalar cache, got "
+                "SHUTrack requires the legacy 63-dim scalar cache, got "
                 f"scalar_dim={self.metadata.get('scalar_dim')!r}"
             )
         self.reid_dim = int(self.metadata.get("reid_dim", 0))
         if self.reid_dim <= 0:
             raise ValueError("packed metadata must declare a positive reid_dim")
         self.scalar_mean, self.scalar_std = normalizer_from_metadata(self.metadata)
-        self.margin_stats: dict[str, Any] = dict(margin_stats or DEFAULT_MARGIN_STATS)
-
-        margin_mode = str(margin_mode).lower()
-        if margin_mode not in {"auto", "required", "disabled"}:
-            raise ValueError(
-                "margin_mode must be one of 'auto', 'required', 'disabled', "
-                f"got {margin_mode!r}"
-            )
-        self.margin_mode = margin_mode
-        if margin_mode == "required":
-            raise ValueError(
-                "margin_mode='required' but the packed train_data contains no "
-                "association candidate pools. Missing fields: raw_cost matrix, "
-                "iou_similarity matrix, accepted_detection_index and "
-                "association_track_row (per event). The source compact event "
-                "cache (events_*.pt/associations_*.pt/states_*.pt) and compact "
-                "label directories are absent from this checkout. Restore those "
-                "read-only caches or use margin_mode='auto'/'disabled' to train "
-                "with the two margin validity bits explicitly set to 0."
-            )
-        self.margin_source = (
-            "disabled" if margin_mode == "disabled" else "unavailable_packed_train_data"
-        )
-        # The packed format has no association candidate pools.  The effective
-        # model-input contract is therefore "margins disabled": training and
-        # online inference must both feed zeros and zero validity bits.
-        self.margin_enabled = False
-        if margin_mode == "auto":
-            warnings.warn(
-                "SHUTrack packed data has no association cost matrices; row/col "
-                "margins will be 0 with validity bits 0 for every sample "
-                "(margin_source=unavailable_packed_train_data).",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+        self.competition_enabled = bool(competition_enabled)
 
         sequences = list(self.metadata.get("train_sequences", []))
         if not sequences:
@@ -174,10 +140,6 @@ class PackedShutrackDataset(Dataset):
     def split(self) -> str:
         return str(self.metadata.get("split", "unknown"))
 
-    @property
-    def margin_valid_rate(self) -> float:
-        return 0.0
-
     def descriptor(self) -> dict[str, Any]:
         return {
             "format": PACKED_FORMAT,
@@ -188,12 +150,11 @@ class PackedShutrackDataset(Dataset):
             "context_size": CONTEXT_SIZE,
             "reid_dim": self.reid_dim,
             "scalar_dim": LEGACY_SCALAR_DIM,
+            "evidence_dim": EVIDENCE_DIM,
+            "competition_dim": COMPETITION_DIM,
+            "competition_enabled": self.competition_enabled,
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "label_source": "packed_train_data_safe_gate_target",
-            "margin_enabled": self.margin_enabled,
-            "margin_source": self.margin_source,
-            "margin_valid_rate": self.margin_valid_rate,
-            "margin_stats": self.margin_stats,
             "normalization_mean": self.scalar_mean.tolist(),
             "normalization_std": self.scalar_std.tolist(),
             "max_frame_gap": int(self.metadata.get("max_frame_gap", 30)),
@@ -318,8 +279,12 @@ class PackedShutrackDataset(Dataset):
                 f"non-finite or wrong-shape packed scalar at timeline index "
                 f"{timeline_index}"
             )
-        motion, context = build_core_features(
-            scalar, INVALID_MARGIN, self.margin_stats
+        has_detection = bool(arrays["timeline_has_detection"][timeline_index])
+        evidence = build_evidence(scalar, has_detection)
+        competition = (
+            build_competition(scalar)
+            if self.competition_enabled
+            else np.zeros(COMPETITION_DIM, dtype=np.float32)
         )
         track_feature = np.array(
             reid_features[timeline_index, 0, :], dtype=np.float32, copy=True
@@ -327,12 +292,11 @@ class PackedShutrackDataset(Dataset):
         detection_feature = np.array(
             reid_features[timeline_index, 1, :], dtype=np.float32, copy=True
         )
-        has_detection = bool(arrays["timeline_has_detection"][timeline_index])
         if not has_detection:
             detection_feature = np.zeros_like(track_feature)
         return EventEvidence(
-            motion=motion,
-            context=context,
+            evidence=evidence,
+            competition=competition,
             track_feature=track_feature,
             detection_feature=detection_feature,
             has_detection=has_detection,
@@ -399,22 +363,20 @@ class PackedShutrackDataset(Dataset):
         weight = np.asarray(arrays["sample_weight"][local_index], dtype=np.float32).reshape(())
 
         return {
-            "history_motion": torch.from_numpy(window.history_motion),
+            "history_evidence": torch.from_numpy(window.history_evidence),
             "history_track": torch.from_numpy(window.history_track),
             "history_detection": torch.from_numpy(window.history_detection),
-            "history_context": torch.from_numpy(window.history_context),
             "history_mask": torch.from_numpy(window.history_mask),
             "history_has_detection": torch.from_numpy(window.history_has_detection),
             "history_reset": torch.from_numpy(window.history_reset),
-            "current_motion": torch.from_numpy(window.current_motion),
+            "current_evidence": torch.from_numpy(window.current_evidence),
+            "current_competition": torch.from_numpy(window.current_competition),
             "current_track": torch.from_numpy(window.current_track),
             "current_detection": torch.from_numpy(window.current_detection),
-            "current_context": torch.from_numpy(window.current_context),
             "current_has_detection": torch.tensor(window.current_has_detection),
             "safe_gate_target": torch.from_numpy(safe_gate),
             "valid_channels": torch.from_numpy(valid),
             "sample_weight": torch.from_numpy(weight),
-            "margin_valid": torch.tensor(False),
             "sequence": sequence,
             "track_id": track_id,
             "segment_id": segment_id,

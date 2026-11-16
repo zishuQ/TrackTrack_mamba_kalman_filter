@@ -1,4 +1,14 @@
-"""Feature and model schema for SHUTrack v2 (HCE + RSC).
+"""Feature and model schema for SHUTrack v3 (HCE + RSC).
+
+Inputs are split into two explicit branches:
+
+* **evidence (13 dims)** — fused motion and observation context:
+  4 box residuals, 4 KF velocities, 2 center prediction variances,
+  detection confidence, observation gap, has-detection flag.
+* **appearance** — pre-update track ReID and the event's detection ReID.
+* **competition (3 dims, optional branch)** — legacy 63-dim columns
+  15/21/25: row top-2 cost gap, column top-2 cost gap, and the maximum IoU
+  between the accepted detection and the other detections in the same pool.
 
 The values here describe the *new* model input schema.  They are deliberately
 independent from the legacy AgentGuard cache/label schema: nothing in this
@@ -12,67 +22,68 @@ import json
 from typing import Any
 
 ARCHITECTURE_NAME = "shutrack_hce_rsc"
-ARCHITECTURE_VERSION = "shutrack_v2"
-FEATURE_SCHEMA_VERSION = "shutrack_v2_event18"
+ARCHITECTURE_VERSION = "shutrack_v3"
+FEATURE_SCHEMA_VERSION = "shutrack_v3_evidence13_competition3"
 
 # Six events = five past events + the current event.
 CONTEXT_SIZE = 6
 HISTORY_SIZE = CONTEXT_SIZE - 1
 
-# Motion evidence: legacy 63-dim scalar indices 27:31, 39:43, 43:47.
-MOTION_SCALAR_INDICES = (
-    27, 28, 29, 30,          # detection center offset (2) + log w/h ratio (2)
-    39, 40, 41, 42,          # normalized KF velocity (4)
-    43, 44, 45, 46,          # normalized log covariance diagonal (4)
+# Evidence branch: 12 normalized legacy scalar columns + a raw 0/1 flag.
+EVIDENCE_SCALAR_INDICES = (
+    27, 28, 29, 30,   # box residual: center offset (2) + log w/h ratio (2)
+    39, 40, 41, 42,   # normalized KF velocity (4)
+    43, 44,           # center prediction variance: log var(cx), log var(cy)
+    9,                # detection confidence
+    59,               # normalized observation gap
 )
-MOTION_DIM = len(MOTION_SCALAR_INDICES)
-
-# Context evidence: four legacy scalars plus two selected-margin values and
-# two margin-validity bits.  Order is part of the schema.
-SCALAR_CONTEXT_INDICES = (
-    9,    # detection score
-    58,   # normalized history length
-    59,   # normalized observation gap
-    26,   # has_detection (legacy scalar value, in normalized space)
-)
-CONTEXT_ORDER = (
-    "det_score",
-    "row_margin",
-    "col_margin",
-    "history_length",
+EVIDENCE_FIELDS = (
+    "box_residual_cx",
+    "box_residual_cy",
+    "box_log_ratio_w",
+    "box_log_ratio_h",
+    "kf_velocity_cx",
+    "kf_velocity_cy",
+    "kf_velocity_w",
+    "kf_velocity_h",
+    "center_variance_cx_log",
+    "center_variance_cy_log",
+    "detection_confidence",
     "observation_gap",
     "has_detection",
-    "row_margin_valid",
-    "col_margin_valid",
 )
-CONTEXT_DIM = len(CONTEXT_ORDER)
+EVIDENCE_DIM = len(EVIDENCE_FIELDS)  # 13
+
+# Competition branch: legacy 63-dim columns 15, 21, 25.
+COMPETITION_SCALAR_INDICES = (15, 21, 25)
+COMPETITION_FIELDS = (
+    "row_top2_cost_gap",
+    "col_top2_cost_gap",
+    "max_iou_with_other",
+)
+COMPETITION_DIM = len(COMPETITION_FIELDS)  # 3
+
+# The legacy has-detection column is kept as a separate explicit flag for
+# appearance masking and for the final evidence dimension.
+HAS_DETECTION_SCALAR_INDEX = 26
 
 LEGACY_SCALAR_DIM = 63
 DEFAULT_REID_DIM = 2048
 
-# Margin definition: the accepted pair is compared against the recorded
-# candidate pool of the same raw-cost matrix.  Candidate columns whose IoU
-# similarity is at or below this floor are infeasible by construction of the
-# legacy association step and are excluded from the margin pool.
-MARGIN_INFEASIBLE_IOU = 0.10
-
 MAX_FRAME_GAP = 30
 
 FEATURE_SCHEMA: dict[str, Any] = {
-    "name": "shutrack_v2_structured_event_features",
+    "name": "shutrack_v3_evidence_competition_features",
     "version": FEATURE_SCHEMA_VERSION,
     "context_size": CONTEXT_SIZE,
     "history_size": HISTORY_SIZE,
-    "motion_scalar_indices": list(MOTION_SCALAR_INDICES),
-    "motion_dim": MOTION_DIM,
-    "scalar_context_indices": list(SCALAR_CONTEXT_INDICES),
-    "context_order": list(CONTEXT_ORDER),
-    "context_dim": CONTEXT_DIM,
-    "margin_definition": (
-        "min(other feasible raw-cost candidates) - accepted raw cost"
-    ),
-    "margin_infeasible_iou": MARGIN_INFEASIBLE_IOU,
-    "margin_validity_bits": ["row_margin_valid", "col_margin_valid"],
+    "evidence_scalar_indices": list(EVIDENCE_SCALAR_INDICES),
+    "evidence_fields": list(EVIDENCE_FIELDS),
+    "evidence_dim": EVIDENCE_DIM,
+    "competition_scalar_indices": list(COMPETITION_SCALAR_INDICES),
+    "competition_fields": list(COMPETITION_FIELDS),
+    "competition_dim": COMPETITION_DIM,
+    "has_detection_flag": "raw 0/1; appended as the 13th evidence value",
     "appearance": "pre_update_track_reid_and_event_detection_reid",
     "scalar_normalization": (
         "legacy 63-dim train-split z-score; packed scalars are already "
@@ -99,14 +110,15 @@ __all__ = [
     "FEATURE_SCHEMA_SHA256",
     "CONTEXT_SIZE",
     "HISTORY_SIZE",
-    "MOTION_SCALAR_INDICES",
-    "MOTION_DIM",
-    "SCALAR_CONTEXT_INDICES",
-    "CONTEXT_ORDER",
-    "CONTEXT_DIM",
+    "EVIDENCE_SCALAR_INDICES",
+    "EVIDENCE_FIELDS",
+    "EVIDENCE_DIM",
+    "COMPETITION_SCALAR_INDICES",
+    "COMPETITION_FIELDS",
+    "COMPETITION_DIM",
+    "HAS_DETECTION_SCALAR_INDEX",
     "LEGACY_SCALAR_DIM",
     "DEFAULT_REID_DIM",
-    "MARGIN_INFEASIBLE_IOU",
     "MAX_FRAME_GAP",
     "feature_schema_descriptor",
 ]

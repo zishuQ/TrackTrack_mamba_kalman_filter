@@ -1,183 +1,173 @@
-# SHUTrack v2 — HCE + RSC
+# SHUTrack v3 — HCE + RSC
 
 SHUTrack = **Suppress Harmful Updates**.  After a match is accepted, the motion
 state and the appearance template should not always be written with full
-strength.  This package implements the isolated v2 architecture:
+strength.  This package implements the isolated v3 architecture:
 
-* **HCE — Historical Context Encoder** encodes only the five events *before*
-  the current one with a shared temporal Transformer (d_model=128, 2 layers,
-  4 heads) and two learned queries that read the motion and appearance history
-  contexts `h_m`, `h_a`.
-* **RSC — Reliability-aware Suppression Controller** uses `h_m`, `h_a` as
-  queries and the current motion / appearance / match-context tokens as
-  key/value.  One cross-modal attention layer + FFN produces two representation
-  deltas, which are fused residually in representation space and decoded by two
-  independent sigmoid heads into the motion and appearance gates.
+* **HCE — Historical Context Encoder** reads at most the five events before the
+  current one.  Each history event is encoded from two paths — motion+observation
+  evidence and ReID appearance — and fused into one history token.  A shared
+  temporal Transformer (d_model=128, 2 layers, 4 heads) encodes the tokens; two
+  learned queries read the motion/observation and appearance history contexts.
+* **RSC — Reliability-aware Suppression Controller** uses those two readouts as
+  queries and reads the current motion+observation token, the ReID appearance
+  token, and (optionally) the association-competition token as key/value.  One
+  cross-modal attention layer plus FFN produces two representation deltas, which
+  are fused residually in representation space and decoded by two independent
+  sigmoid heads into the motion and appearance gates.
 
 There is no policy head, cue/risk head, five-strategy prototype, base/refined
-gate, correction/bound, or detached gradient path.  The two gates do not use
-softmax and are not required to sum to one.
+gate, correction/bound, or detached gradient path.  The gates do not use softmax
+and are not required to sum to one.  Online writes keep TrackTrack's existing
+`Track.update_with_gates`: the motion gate scales the original NSA measurement
+correction and the appearance gate scales the original EMA write.
 
-The online path keeps TrackTrack's existing `Track.update_with_gates`; only the
-gate source changes.  Association, Kalman filters, EMA, thresholds and track
-management are untouched.
-
-## Isolation and read-only data
-
-The package is independent from the legacy `agentguard` model/trainer/runtime.
-The only AgentGuard imports live in `shutrack/data/legacy_adapter.py` and reuse
-the stable read-only pieces (63-dim scalar definition, compact cache reader,
-compact label loader).
-
-Training reads the existing packed `outputs/agentguard/train_data/*` in place:
-
-* `metadata.json` — dataset/split, context=6, ReID dim, 63-dim normalization;
-* `<sequence>/data.pt` — `event_indices [N,6]`, `track_ids`, `segment_ids`,
-  `safe_gate_target [N,2]`, `valid_channels [N,2]`, `sample_weight [N]`,
-  normalized `timeline_scalar_feats [T,63]`, `timeline_has_detection [T]`;
-* `<sequence>/reid_features.npy` — `[T,2,2048]` pre-update track template and
-  detection ReID, memory-mapped read-only.
-
-No cache, index, label, rollout, window array or dataset is generated.  The
-source directory is never written.  At most two `data.pt` sequences are held in
-an LRU; ReID files are always memory-mapped.  Training batches are organized
-per sequence (sequence order shuffled once per epoch, local samples shuffled
-inside each sequence), so each sequence file is loaded at most once per epoch.
-
-### Margin data limitation and input contract (explicit)
-
-The packed format does **not** contain association cost matrices,
-`accepted_detection_index` or `association_track_row`; the source compact event
-caches (`events_*.pt` / `associations_*.pt` / `states_*.pt`) and compact label
-directories are not present in this checkout.  Therefore the real packed path
-trains with:
-
-* row/column margins = 0;
-* `row_margin_valid = col_margin_valid = 0` for every event;
-* `margin_enabled = false`, `margin_source = "unavailable_packed_train_data"`
-  in dataset metadata, checkpoints and logs (`margin_valid_rate = 0.0`).
-
-The checkpoint records the effective contract.  Online inference reads
-`margin.enabled` from the checkpoint and, when it is false, forces both margins
-and both validity bits to zero even if a full association matrix is available.
-A no-margin checkpoint therefore cannot silently receive different inputs than
-training did.  Use `--margin-mode required` to make missing margin data a hard
-startup error; a margin-enabled checkpoint requires explicit margin statistics
-and is rejected otherwise.
-
-This is a reported degradation, not an assertion that no competitor existed.
-The full margin definition (`min(other feasible raw cost) - accepted raw cost`,
-excluding self, non-finite values and `IoU <= 0.10` infeasible entries) is
-implemented and tested against synthetic recorded candidate pools.
-
-## Input schema (`shutrack_v2_event18`)
+## Input schema (`shutrack_v3_evidence13_competition3`)
 
 Six events = five past events + current event.  Every current input is captured
 before the current write.
 
-* motion (12): legacy scalar indices `27:31`, `39:43`, `43:47` — center offset,
-  log w/h ratio, normalized KF velocity, normalized log covariance diagonal
-  (legacy image-scale definition).
-* context (8), fixed order: `det_score` (index 9), `row_margin`, `col_margin`,
-  `history_length` (index 58), `observation_gap` (index 59),
-  `has_detection` (index 26), `row_margin_valid`, `col_margin_valid`.
-* appearance: per-event pre-update track ReID + detection ReID; projected to 64
-  dims, then `concat(track, det, |diff|, product)` → 128.
-* masks: padding, detection availability, and reset; cold start uses a learned
-  null-history token so an all-masked history never produces NaN.
+### Evidence branch — 13 dims (motion + observation fused)
 
-Packed scalars are already z-scored by the legacy train-split statistics and are
-**not** normalized again.  Online inference applies the same 63-dim mean/std
-stored in the checkpoint before selecting the same indices.
+| position | value | legacy 63-dim column |
+|---|---|---|
+| 1–2 | box residual center offset | 27, 28 |
+| 3–4 | box log w/h ratio | 29, 30 |
+| 5–8 | normalized KF velocity | 39–42 |
+| 9–10 | center prediction variance (log var cx, log var cy) | 43, 44 |
+| 11 | detection confidence | 9 |
+| 12 | observation gap | 59 |
+| 13 | has-detection flag (raw 0/1) | derived from the detection mask |
 
-## Commands
+Removed from the old context vector: duplicated width/height variances, the
+constant snapshot history length, and the unused selected-margin values and
+validity bits.  A separate has-detection mask is still passed for appearance
+masking, together with the history padding/reset mask.
 
-All commands run from the repository root unless noted.
+### Competition branch — 3 dims (optional)
 
-### Inspect the read-only source
+Normalized legacy columns **15, 21, 25**:
+
+1. row top-2 cost gap (best-other vs accepted in the track's final-cost row),
+2. column top-2 cost gap (best-other vs accepted in the detection's final-cost
+   column),
+3. maximum IoU between the accepted detection and the other detections in the
+   same candidate pool (the accepted detection itself excluded; a single
+   candidate yields 0, following the legacy feature definition).
+
+Online inference passes the same recorded candidate pool through as
+`track_cost_row`, `detection_cost_col` and `max_iou_with_other`, using the
+pre-iteration `final_cost` matrix and the legacy 63-dim scalar definition, then
+applies the same 63-dim normalization.  The packed training tensors already
+contain these normalized columns, so both sides use identical values.
+
+Training can disable the branch (`--competition off`) for the lean
+dual-evidence variant.  The checkpoint records the effective input schema and
+`competition_enabled`; the loader rejects a model/checkpoint branch mismatch.
+
+### Appearance branch
+
+Per-event pre-update track ReID + the event's detection ReID; both projected to
+64 dims, then `concat(track, det, |diff|, product)` → 128.  Missing detections
+use a learned placeholder and an explicit mask.
+
+Packed scalars are already z-scored by the legacy train-split statistics and
+are **not** normalized again.  Online inference applies the same 63-dim mean/std
+stored in the checkpoint.
+
+## History window and reset semantics
+
+* HCE reads only the past five events; history never crosses track, segment,
+  sequence or reset boundaries.
+* A single event advances the per-track clock exactly once.  The evidence
+  segment id and the buffered events' segment id are always consistent.
+* Acceptance: with events at frames 1, 50, 51 and `max_frame_gap=30`, frame 50
+  resets once and sees an empty history; frame 51 sees exactly the frame-50
+  event in the model-visible history mask (`[T,T,T,T,F]`).
+* Unmatched frames are recorded as real history events with `has_detection=False`
+  and zero applied gates.  No gate is computed without a match; the gate is
+  computed again on a re-match.
+
+## Enablement modes
+
+* **Default** (`--shutrack-min-observations 6`): a track enters the model in the
+  tracked/lost path once it has six observations, matching the legacy event
+  cache timeline.  Both competition-branch variants use the same default.
+* **Early enable** (`--shutrack-early-enable`): independent option.  Match 1
+  initializes the track; match 2 uses the original `Track.update` and records
+  its pre-update evidence; match 3 first applies the gate inside the New
+  association path.  The competition token comes from the New path's own
+  candidate pool.  TrackTrack's confirmation rule (`observation_count >=
+  min_len`) is unchanged.  Removing an unmatched candidate track clears its
+  runtime buffer.
+* The old packed training data has no supervised windows with 1–2 history
+  events.  Truncated-history training is a separate future option; early-path
+  gains on real early tracks must be measured, not assumed.
+
+## Training
+
+The only objective is the existing weighted gate loss:
+
+```text
+BCEWithLogits + 0.1 * MSE, normalized by valid_channels * sample_weight
+```
+
+No policy KL, cue/risk BCE, base/final duplication or correction terms.
+
+Training reads the existing packed `outputs/agentguard/train_data/*` in place
+(`data.pt`, `reid_features.npy`, `safe_gate_target`, `valid_channels`,
+`sample_weight`); no cache, index, label or dataset is generated.  Batches are
+organized per sequence (sequence order shuffled once per epoch, local samples
+shuffled inside each sequence), so each `data.pt` file loads at most once per
+epoch; `metrics.jsonl` records `samples_per_second`, `sequence_load_count` and
+`rss_mb`.
+
+### Two formal commands (not started by this round)
+
+Lean dual-evidence variant:
+
+```bash
+./.venv/bin/python -m shutrack.cli train \
+  --dataset-dir outputs/agentguard/train_data/MOT17 \
+  --checkpoint-dir outputs/agentguard/experiments/shutrack_v3_mot17_lean_bs1024_100e/checkpoints \
+  --device cuda --epochs 100 --batch-size 1024 --num-workers 0 \
+  --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 --grad-clip 1.0 \
+  --seed 42 --competition off
+```
+
+With competition token:
+
+```bash
+./.venv/bin/python -m shutrack.cli train \
+  --dataset-dir outputs/agentguard/train_data/MOT17 \
+  --checkpoint-dir outputs/agentguard/experiments/shutrack_v3_mot17_competition_bs1024_100e/checkpoints \
+  --device cuda --epochs 100 --batch-size 1024 --num-workers 0 \
+  --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 --grad-clip 1.0 \
+  --seed 42 --competition on
+```
+
+`--epochs` counts **full dataset passes**.  MOT20/SportsMOT formal runs use 20
+full passes to match the old `5×1×20` / `10×1×20` effective budgets.
+
+Training writes only `last.pt`, `best.pt`, `metrics.jsonl`, `training.log` and
+`training_summary.json`.  A run refuses to reuse an existing checkpoint
+directory unless `--resume <last.pt>` is given.  Resume appends logs, validates
+model config, normalization, competition branch and dataset contract before
+loading optimizer state.  `best.pt` tracks the lowest average **training loss**
+(`best_metric_name = "training_loss"`), not tracker HOTA.
+
+### Inspect / validate
 
 ```bash
 ./.venv/bin/python -m shutrack.cli inspect-data \
-  --dataset-dir outputs/agentguard/train_data/MOT17
-```
+  --dataset-dir outputs/agentguard/train_data/MOT17 --competition on
 
-### Short real training smoke (20 steps)
-
-```bash
-./.venv/bin/python -m shutrack.cli train \
-  --dataset-dir outputs/agentguard/train_data/MOT17 \
-  --checkpoint-dir outputs/agentguard/experiments/shutrack_v2_smoke/checkpoints \
-  --device cuda --batch-size 32 --num-workers 0 \
-  --max-steps 20 --warmup-steps 2 --log-interval 5 --seed 42
-```
-
-### Formal training (not started by this round)
-
-MOT17:
-
-```bash
-./.venv/bin/python -m shutrack.cli train \
-  --dataset-dir outputs/agentguard/train_data/MOT17 \
-  --checkpoint-dir outputs/agentguard/experiments/shutrack_v2_mot17_seed42_bs1024_100e/checkpoints \
-  --device cuda --epochs 100 --batch-size 1024 --num-workers 0 \
-  --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 \
-  --grad-clip 1.0 --seed 42 --margin-mode auto
-```
-
-MOT20:
-
-```bash
-./.venv/bin/python -m shutrack.cli train \
-  --dataset-dir outputs/agentguard/train_data/MOT20 \
-  --checkpoint-dir outputs/agentguard/experiments/shutrack_v2_mot20_seed42_bs1024_20e_full/checkpoints \
-  --device cuda --epochs 20 --batch-size 1024 --num-workers 0 \
-  --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 \
-  --grad-clip 1.0 --seed 42 --margin-mode auto
-```
-
-SportsMOT train+val:
-
-```bash
-./.venv/bin/python -m shutrack.cli train \
-  --dataset-dir outputs/agentguard/train_data/SportsMOT \
-  --checkpoint-dir outputs/agentguard/experiments/shutrack_v2_sportsmot_trainval_seed42_bs1024_20e_full/checkpoints \
-  --device cuda --epochs 20 --batch-size 1024 --num-workers 0 \
-  --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 \
-  --grad-clip 1.0 --seed 42 --margin-mode auto
-```
-
-`--epochs` here counts **full dataset passes**.  The old nominal shard
-schedules `5×1×20` (MOT20) and `10×1×20` (SportsMOT train+val) equal 20
-effective full passes, so `--epochs 20` matches their data budget.  MOT17's
-legacy packed-data schedule was 100 full passes, hence `--epochs 100`.  The new
-trainer has no memory-shard phases; do not map the old nominal epoch numbers
-directly.
-
-Training writes only `last.pt`, `best.pt`, `metrics.jsonl`, `training.log` and
-`training_summary.json` inside the new run directory.  A run refuses to reuse an
-existing checkpoint directory unless `--resume <last.pt>` is given.  Resuming
-appends to `training.log` and `metrics.jsonl`, validates model config,
-normalization statistics, margin contract and dataset contract before loading
-optimizer state, and refuses mismatches.  `best.pt` tracks the lowest average
-**training loss** (`best_metric_name = "training_loss"`), not tracker HOTA.
-`last.pt` always stores the updated best metric, so resuming cannot mistake a
-worse epoch for a new best.
-
-Each epoch's `metrics.jsonl` records `samples_per_second`,
-`sequence_load_count` (actual `data.pt` loads, not cache hits) and `rss_mb`
-alongside loss/gate statistics.  These are the acceptance metrics for data
-loading, not just "the GPU step ran".
-
-### Checkpoint contract check
-
-```bash
 ./.venv/bin/python -m shutrack.cli validate-checkpoint \
-  --checkpoint outputs/agentguard/experiments/shutrack_v2_smoke/checkpoints/last.pt \
-  --dataset-dir outputs/agentguard/train_data/MOT17 \
-  --max-batches 4 --device cpu
+  --checkpoint outputs/agentguard/experiments/shutrack_v3_mot17_competition_bs1024_100e/checkpoints/last.pt \
+  --dataset-dir outputs/agentguard/train_data/MOT17 --max-batches 4 --device cpu
 ```
 
-### Online tracking
+## Online tracking
 
 ```bash
 cd "3. Tracker"
@@ -188,35 +178,19 @@ cd "3. Tracker"
               MOT17-09-FRCNN MOT17-10-FRCNN MOT17-11-FRCNN MOT17-13-FRCNN \
   --agentguard-mode shutrack-v2 \
   --shutrack-checkpoint \
-    "../outputs/agentguard/experiments/shutrack_v2_mot17_seed42_bs1024_100e/checkpoints/best.pt" \
+    "../outputs/agentguard/experiments/shutrack_v3_mot17_competition_bs1024_100e/checkpoints/best.pt" \
   --agentguard-device cpu \
-  --tracker-suffix shutrack_v2_mot17_e100 \
+  --tracker-suffix shutrack_v3_mot17_e100 \
   --print-per-sequence-metrics
 ```
 
-Test submission (no local GT):
-
-```bash
-cd "3. Tracker"
-
-"../.venv/bin/python" -u run.py \
-  --dataset MOT17 --mode test \
-  --agentguard-mode shutrack-v2 \
-  --shutrack-checkpoint \
-    "../outputs/agentguard/experiments/shutrack_v2_mot17_seed42_bs1024_100e/checkpoints/best.pt" \
-  --tracker-suffix shutrack_v2_mot17_e100 \
-  --use_post --skip-eval
-```
-
-`--agentguard-mode shutrack-v2` rejects `--iwg-rg-cma-output base`,
-`--rg-cma-alpha != 1`, `--agentguard-fallback-threshold > 0`, legacy
-normalization overrides and attention-diagnostics flags: those concepts do not
-exist in the new architecture.  `--agentguard-disable-kf-gate` /
-`--agentguard-disable-ema-gate` remain available as channel=1 diagnostics.
-`--shutrack-min-observations` defaults to 6, matching the legacy event-cache
-maturity (`observation_count >= 6`).  Set it to 1 only when deliberately
-enabling early cold-start gating; padding/null-token support makes that path
-shape-safe but does not prove the model has learned early-track states.
+`--agentguard-mode shutrack-v2` is kept as the TrackTrack entry name for
+continuity; the checkpoint's architecture version identifies v3.  The mode
+rejects `--iwg-rg-cma-output base`, `--rg-cma-alpha != 1`,
+`--agentguard-fallback-threshold > 0`, legacy normalization overrides and
+attention diagnostics.  `--shutrack-early-enable` enables the optional New-path
+behavior described above.  `--agentguard-disable-kf-gate` /
+`--agentguard-disable-ema-gate` remain channel=1 diagnostics.
 
 ## Tests
 
@@ -224,43 +198,29 @@ shape-safe but does not prove the model has learned early-track states.
 ./.venv/bin/python -m pytest shutrack/tests -q
 ```
 
-The suite covers margin semantics and the enabled/disabled input contract,
-feature order/normalization, cold start and missing measurements,
-offline-vs-online equivalence for sequences longer than six events, packed
-adapter vs real online builder feature/mask/gate parity on the same controlled
-event, future-input causality, cross-track/segment/reset isolation, gate
-range/independence, HCE/RSC gradients, checkpoint roundtrip and legacy
-checkpoint rejection, sequence-organized sampling/load counts, resume
-contract/append behavior, read-only guards (builders stubbed to fail), and a
-tiny end-to-end training run.
+The suite covers evidence/competition column selection, online competition
+values vs the legacy scalar definition (including the single-candidate
+boundary), packed↔online feature/mask/competition/gate parity, window
+causality, reset-once and model-visible masks at frames 1/50/51, unmatched
+history recording, real-`Track` early-enable match 2/3 behavior, branch on/off
+training, checkpoint branch validation, sequence-organized sampling/load
+counts, resume append/contract checks, read-only guards and a tiny end-to-end
+training run.
 
-The real TrackTrack entry smoke is opt-in because it needs local data and a
-checkpoint:
+The real TrackTrack entry smoke is opt-in:
 
 ```bash
 SHUTRACK_RUN_TRACKER_SMOKE=1 \
-SHUTRACK_SMOKE_CHECKPOINT=outputs/agentguard/experiments/shutrack_v2_smoke_contract_20261116/checkpoints/last.pt \
+SHUTRACK_SMOKE_CHECKPOINT=outputs/agentguard/experiments/shutrack_v3_mot17_competition_smoke/checkpoints/last.pt \
 ./.venv/bin/python -m pytest shutrack/tests/test_tracktrack_entry_smoke.py -q -s
 ```
 
-## Artifacts
-
-* `last.pt` — model + optimizer + scheduler + progress, for resume.
-* `best.pt` — model + metadata only.
-* Both embed architecture/version, feature schema and hash, context=6,
-  HCE/RSC hyperparameters, 63-dim normalization, margin source/statistics,
-  dataset/split/source path and training config.
-* The loader is strict (`strict=True`) and rejects legacy IWG/RG-CMA
-  checkpoints with an explicit message.
-
 ## Known limitations
 
-1. Real packed training currently has no margin data; the checkpoint records
-   `margin.enabled=false` and online inference obeys it (see above).
-2. By default the model is applied only after six observations, matching the
-   legacy event-cache timeline start.  Early cold-start gating is available via
-   `--shutrack-min-observations 1`, but padding/null-token handling only proves
-   shape safety; early-track distribution coverage must be validated after a
-   formal training run before using that option.
-3. This round does not launch the three-dataset formal training and does not
-   regenerate any cache, label or dataset.
+1. The packed data still has no source event caches; competition columns are
+   read directly from the existing normalized packed scalars (they are
+   complete), so no margin-style degradation exists anymore.
+2. Early enablement is optional and not represented in the legacy supervised
+   windows; its real early-track benefit must be validated separately.
+3. This round does not launch the formal long training and does not regenerate
+   caches, labels, trajectories or datasets.

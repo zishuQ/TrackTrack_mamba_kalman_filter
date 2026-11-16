@@ -1,10 +1,12 @@
 """HCE — Historical Context Encoder.
 
-HCE reads only the five events before the current one.  A shared temporal
-Transformer encodes the fused history tokens; two learned queries read out the
-motion and appearance history contexts ``h_m`` and ``h_a``.  A learned null
-token is always present in the key/value sequence, so an empty history (cold
-start) or an all-padding window never produces an all-masked attention row.
+HCE reads only the five events before the current one.  Each history event
+fuses a motion+observation evidence token with an appearance token; a shared
+temporal Transformer encodes the fused history.  Two learned queries read out
+the motion/observation and appearance history contexts ``h_m`` and ``h_a``.  A
+learned null token is always present in the key/value sequence, so an empty
+history (cold start) or an all-padding window never produces an all-masked
+attention row.
 """
 
 from __future__ import annotations

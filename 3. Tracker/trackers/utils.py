@@ -365,6 +365,16 @@ def iterative_assignment(tracks, dets_high, dets_low, dets_del_high, match_thr, 
             "assignment_round": assignment_round,
             "assignment_threshold": assignment_threshold,
             "detection_source": detection_source,
+            # Stable frame-level detection indices in matrix-column order.
+            # Downstream event/competition features use this to align the
+            # recorded candidate pool with the frame's detection boxes.
+            "detection_indices": np.asarray(
+                [
+                    int(getattr(det, "frame_detection_index", index))
+                    for index, det in enumerate(dets)
+                ],
+                dtype=np.int64,
+            ),
         }
         return matches, u_tracks, u_dets, association_meta
 

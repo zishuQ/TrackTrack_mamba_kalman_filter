@@ -19,11 +19,10 @@ import torch
 from shutrack.data.evidence import EventEvidence
 from shutrack.data.legacy_adapter import (
     build_online_evidence,
+    detection_overlap_row,
     normalizer_from_metadata,
-    online_margins_from_association_meta,
 )
-from shutrack.features.margins import INVALID_MARGIN, MarginResult
-from shutrack.features.windows import build_window, stack_windows
+from shutrack.features.windows import WindowArrays, build_window, stack_windows
 from shutrack.models.shutrack import ShutrackV2Model
 from shutrack.runtime.statistics import ShutrackRuntimeStatistics
 from shutrack.schema import CONTEXT_SIZE, HISTORY_SIZE, MAX_FRAME_GAP
@@ -60,6 +59,18 @@ class ShutrackRuntime:
         device: str | torch.device = "cpu",
         config: ShutrackRuntimeConfig | Mapping[str, Any] | None = None,
     ) -> None:
+        if not isinstance(checkpoint.get("competition_enabled"), bool):
+            raise ValueError(
+                "SHUTrack checkpoint is missing competition_enabled; retrain with "
+                "the current code so training and online inputs share the same "
+                "branch configuration"
+            )
+        self.competition_enabled = bool(checkpoint["competition_enabled"])
+        if self.competition_enabled != model.competition_enabled:
+            raise ValueError(
+                "checkpoint/model competition branch mismatch: "
+                f"{self.competition_enabled} != {model.competition_enabled}"
+            )
         self.model = model
         self.model.to(device)
         self.model.eval()
@@ -71,55 +82,41 @@ class ShutrackRuntime:
                 "normalization_std": checkpoint.get("normalization_std", []),
             }
         )
-        margin = checkpoint.get("margin", {})
-        if not isinstance(margin, Mapping) or not isinstance(
-            margin.get("enabled"), bool
-        ):
-            raise ValueError(
-                "SHUTrack checkpoint is missing margin.enabled; retrain with the "
-                "current code so training and online inputs share the same contract"
-            )
-        self.margin_enabled = bool(margin["enabled"])
-        self.margin_stats = margin.get("stats") if self.margin_enabled else None
-        if self.margin_enabled and (
-            not isinstance(self.margin_stats, Mapping)
-            or "mean" not in self.margin_stats
-            or "std" not in self.margin_stats
-        ):
-            raise ValueError(
-                "margin-enabled SHUTrack checkpoint must contain margin stats"
-            )
-        self.margin_source = margin.get("source", "unknown")
         dataset_meta = checkpoint.get("dataset", {})
+        if bool(dataset_meta.get("competition_enabled", self.competition_enabled)) != (
+            self.competition_enabled
+        ):
+            raise ValueError(
+                "checkpoint dataset competition_enabled does not match the model"
+            )
         checkpoint_gap = int(dataset_meta.get("max_frame_gap", MAX_FRAME_GAP))
         if config is None:
             config = ShutrackRuntimeConfig(max_frame_gap=checkpoint_gap)
         elif isinstance(config, Mapping):
             config = ShutrackRuntimeConfig(
                 max_frame_gap=int(config.get("max_frame_gap", checkpoint_gap)),
-                min_observations=int(config.get("min_observations", 1)),
+                min_observations=int(config.get("min_observations", CONTEXT_SIZE)),
                 disable_kf_gate=bool(config.get("disable_kf_gate", False)),
                 disable_ema_gate=bool(config.get("disable_ema_gate", False)),
             )
         if int(config.max_frame_gap) != checkpoint_gap:
-            # A different reset horizon is a deliberate live-tracking choice,
-            # but the checkpoint's own horizon is the training-time contract.
             raise ValueError(
                 "SHUTrack runtime max_frame_gap does not match the checkpoint: "
                 f"{config.max_frame_gap} != {checkpoint_gap}"
             )
         self.config = config
         self.stats = ShutrackRuntimeStatistics()
-        # The Tracker's unmatched-event path checks this attribute before
-        # populating legacy TrackEvent features. SHUTrack builds its own
-        # evidence and intentionally has no legacy feature builder.
-        self.feature_builder = None
         self.event_buffers: dict[int, deque[EventEvidence]] = {}
         self._last_frame: dict[int, int] = {}
         self._last_observation: dict[int, int] = {}
         self._segment: dict[int, int] = {}
         self._last_reset_frame: dict[int, int] = {}
         self._lost_tracks: set[int] = set()
+        self._detection_boxes: dict[int, np.ndarray] = {}
+        # The Tracker's unmatched-event path checks this attribute before
+        # populating legacy TrackEvent features. SHUTrack builds its own
+        # evidence and intentionally has no legacy feature builder.
+        self.feature_builder = None
 
     # ------------------------------------------------------------------
     # Track lifecycle helpers
@@ -137,25 +134,41 @@ class ShutrackRuntime:
             return False
         return self._observation_count(track) >= int(self.config.min_observations)
 
-    def _maybe_reset(self, track_id: int, frame_id: int, observation_count: int) -> None:
+    def _begin_event(
+        self, track_id: int, frame_id: int, observation_count: int
+    ) -> int:
+        """Advance the per-track event clock exactly once per event.
+
+        The same event never resets twice: ``make_evidence`` and
+        ``push_evidence`` both call this helper, but the second call sees the
+        same frame id and is a no-op.  The returned segment id is the one the
+        evidence and the buffer must share.
+        """
+
         track_id = int(track_id)
         frame_id = int(frame_id)
+        observation_count = int(observation_count)
         previous_frame = self._last_frame.get(track_id)
         previous_observation = self._last_observation.get(track_id)
         reset = False
         if previous_frame is not None:
-            gap = frame_id - previous_frame
-            reset = (
-                gap <= 0
-                or gap > int(self.config.max_frame_gap)
-                or int(observation_count) < int(previous_observation or 0)
-            )
+            if frame_id < previous_frame:
+                reset = True
+            elif frame_id > previous_frame:
+                gap = frame_id - previous_frame
+                reset = (
+                    gap > int(self.config.max_frame_gap)
+                    or observation_count < int(previous_observation or 0)
+                )
         if reset:
             self.event_buffers.pop(track_id, None)
             self._segment[track_id] = self._segment.get(track_id, 0) + 1
             if self._last_reset_frame.get(track_id) != frame_id:
                 self.stats.record_buffer_reset()
                 self._last_reset_frame[track_id] = frame_id
+        self._last_frame[track_id] = frame_id
+        self._last_observation[track_id] = observation_count
+        return int(self._segment.get(track_id, 0))
 
     def _buffer(self, track_id: int) -> deque[EventEvidence]:
         buffer = self.event_buffers.get(int(track_id))
@@ -172,6 +185,43 @@ class ShutrackRuntime:
         self._segment.pop(track_id, None)
         self._last_reset_frame.pop(track_id, None)
         self._lost_tracks.discard(track_id)
+
+    # ------------------------------------------------------------------
+    # Frame-level detection pool (competition overlaps)
+    # ------------------------------------------------------------------
+    def set_frame_detection_pool(self, pool: Sequence[Any] | None) -> None:
+        self._detection_boxes = {}
+        if pool is None:
+            return
+        for fallback_index, detection in enumerate(pool):
+            index = int(getattr(detection, "frame_detection_index", fallback_index))
+            box = getattr(detection, "x1y1x2y2", None)
+            if box is None:
+                box = getattr(detection, "box", None)
+            if box is None:
+                continue
+            self._detection_boxes[index] = (
+                np.asarray(box, dtype=np.float64).reshape(4).copy()
+            )
+
+    def _overlap_row(
+        self, association_meta: Mapping[str, Any], detection_col: int
+    ) -> np.ndarray | None:
+        indices = association_meta.get("detection_indices")
+        if indices is None:
+            return None
+        detection_indices = np.asarray(indices, dtype=np.int64).reshape(-1)
+        column = int(detection_col)
+        if detection_indices.size == 0 or column < 0 or column >= detection_indices.size:
+            return None
+        boxes = []
+        for index in detection_indices:
+            box = self._detection_boxes.get(int(index))
+            if box is None:
+                return None
+            boxes.append(box)
+        pool = np.stack(boxes, axis=0)
+        return detection_overlap_row(pool[column], pool, column)
 
     # ------------------------------------------------------------------
     # Evidence construction
@@ -214,8 +264,10 @@ class ShutrackRuntime:
     ) -> dict[str, Any]:
         """Build the exact legacy scalar parameters used online.
 
-        Exposed so contract tests can feed the same evidence through the
-        offline packed adapter and the online builder.
+        The recorded candidate pool is passed through as ``track_cost_row``,
+        ``detection_cost_col`` and ``max_iou_with_other`` so columns 15/21/25
+        reproduce the cached values exactly (same pre-iteration ``final_cost``,
+        same single-candidate fallback, self excluded from the IoU row).
         """
 
         association_pair = (
@@ -284,6 +336,22 @@ class ShutrackRuntime:
                 }
             if association_pair is not None:
                 scalar_params["association"] = association_pair
+            if association_meta is not None and track_row >= 0 and detection_col >= 0:
+                final_cost = association_meta.get("final_cost")
+                if final_cost is not None:
+                    matrix = np.asarray(final_cost)
+                    if (
+                        matrix.ndim == 2
+                        and track_row < matrix.shape[0]
+                        and detection_col < matrix.shape[1]
+                    ):
+                        scalar_params["track_cost_row"] = matrix[track_row, :].copy()
+                        scalar_params["detection_cost_col"] = matrix[:, detection_col].copy()
+                overlap = self._overlap_row(association_meta, detection_col)
+                if overlap is not None:
+                    scalar_params["max_iou_with_other"] = (
+                        float(np.max(overlap)) if overlap.size > 0 else 0.0
+                    )
         return scalar_params
 
     def make_evidence(
@@ -307,8 +375,7 @@ class ShutrackRuntime:
     ) -> EventEvidence:
         track_id = int(track_id)
         frame_id = int(frame_id)
-        self._maybe_reset(track_id, frame_id, observation_count)
-        segment_id = int(self._segment.get(track_id, 0))
+        segment_id = self._begin_event(track_id, frame_id, observation_count)
 
         scalar_params = self.scalar_params_for(
             frame_id=frame_id,
@@ -323,21 +390,7 @@ class ShutrackRuntime:
             track_row=track_row,
             detection_col=detection_col,
         )
-
-        margins: MarginResult
-        if has_detection and self.margin_enabled:
-            margins = online_margins_from_association_meta(
-                association_meta,
-                track_row=int(track_row),
-                detection_col=int(detection_col),
-            )
-        else:
-            # The training input contract disabled margins (or there is no
-            # detection).  Online inference must feed the exact same zeros,
-            # even when a full association matrix is available.
-            margins = INVALID_MARGIN
-
-        evidence = build_online_evidence(
+        return build_online_evidence(
             scalar_params=scalar_params,
             track_feature=np.asarray(track_feature, dtype=np.float32).reshape(-1),
             detection_feature=(
@@ -346,8 +399,7 @@ class ShutrackRuntime:
                 else np.zeros_like(np.asarray(track_feature).reshape(-1), dtype=np.float32)
             ),
             has_detection=bool(has_detection),
-            margins=margins,
-            margin_stats=self.margin_stats,
+            competition_enabled=self.competition_enabled,
             scalar_mean=self.scalar_mean,
             scalar_std=self.scalar_std,
             frame_id=frame_id,
@@ -355,30 +407,28 @@ class ShutrackRuntime:
             segment_id=segment_id,
             observation_count=int(observation_count),
         )
-        return evidence
 
     # ------------------------------------------------------------------
     # Inference / buffering
     # ------------------------------------------------------------------
-    def _windows_for(
-        self, items: Sequence[tuple[int, EventEvidence]]
-    ) -> list[Any]:
-        windows = []
-        for track_id, evidence in items:
-            self._maybe_reset(
-                int(track_id), int(evidence.frame_id), int(evidence.observation_count)
-            )
-            buffer = self.event_buffers.get(int(track_id))
-            history = list(buffer) if buffer is not None else []
-            windows.append(build_window(history, evidence))
-        return windows
+    def window_for(
+        self, track_id: int, evidence: EventEvidence
+    ) -> WindowArrays:
+        """Window the model sees for this event (used by tests/diagnostics)."""
+
+        self._begin_event(
+            int(track_id), int(evidence.frame_id), int(evidence.observation_count)
+        )
+        buffer = self.event_buffers.get(int(track_id))
+        history = list(buffer) if buffer is not None else []
+        return build_window(history, evidence)
 
     def infer_batch(
         self, items: Sequence[tuple[int, EventEvidence]]
     ) -> list[np.ndarray]:
         if not items:
             return []
-        windows = self._windows_for(items)
+        windows = [self.window_for(track_id, evidence) for track_id, evidence in items]
         batch = stack_windows(windows)
         tensors = {
             key: torch.from_numpy(value).to(self.device)
@@ -408,13 +458,11 @@ class ShutrackRuntime:
 
     def push_evidence(self, track_id: int, evidence: EventEvidence) -> None:
         track_id = int(track_id)
-        self._maybe_reset(
+        self._begin_event(
             track_id, int(evidence.frame_id), int(evidence.observation_count)
         )
         buffer = self._buffer(track_id)
         buffer.append(evidence)
-        self._last_frame[track_id] = int(evidence.frame_id)
-        self._last_observation[track_id] = int(evidence.observation_count)
 
     def record_unmatched_evidence(
         self, track_id: int, evidence: EventEvidence

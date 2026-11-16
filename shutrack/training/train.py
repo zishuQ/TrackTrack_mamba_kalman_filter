@@ -43,8 +43,7 @@ TRAIN_DEFAULTS: dict[str, Any] = {
     "max_steps": 0,
     "max_samples": 0,
     "log_interval": 20,
-    "margin_mode": "auto",
-    "margin_stats_json": "",
+    "competition_enabled": True,
     "resume": "",
     "d_model": 128,
     "n_heads": 4,
@@ -56,16 +55,15 @@ TRAIN_DEFAULTS: dict[str, Any] = {
 }
 
 MODEL_INPUT_KEYS = (
-    "history_motion",
+    "history_evidence",
     "history_track",
     "history_detection",
-    "history_context",
     "history_mask",
     "history_has_detection",
-    "current_motion",
+    "current_evidence",
     "current_track",
     "current_detection",
-    "current_context",
+    "current_competition",
     "current_has_detection",
     "history_reset",
 )
@@ -90,21 +88,11 @@ def _model_inputs(batch: Mapping[str, Any]) -> dict[str, torch.Tensor]:
     return {key: batch[key] for key in MODEL_INPUT_KEYS}
 
 
-def _load_margin_stats(path: str) -> dict[str, Any] | None:
-    if not str(path or "").strip():
-        return None
-    data = json.loads(Path(path).read_text())
-    if "mean" not in data or "std" not in data:
-        raise ValueError(f"margin stats file must contain mean/std: {path}")
-    return data
-
-
 def build_dataset(config: Mapping[str, Any]) -> PackedShutrackDataset:
     return PackedShutrackDataset(
         config["dataset_dir"],
         max_samples=int(config.get("max_samples", 0)),
-        margin_mode=str(config.get("margin_mode", "auto")),
-        margin_stats=_load_margin_stats(str(config.get("margin_stats_json", ""))),
+        competition_enabled=bool(config.get("competition_enabled", True)),
         sequence_cache_size=int(config.get("sequence_cache_size", 2)),
     )
 
@@ -118,6 +106,7 @@ def build_model(dataset: PackedShutrackDataset, config: Mapping[str, Any]) -> Sh
         ff_dim=int(config.get("ff_dim", 256)),
         dropout=float(config.get("dropout", 0.0)),
         appearance_proj_dim=int(config.get("appearance_proj_dim", 64)),
+        competition_enabled=bool(config.get("competition_enabled", True)),
     )
     return ShutrackV2Model(model_config)
 
@@ -174,21 +163,19 @@ def _validate_resume_contract(
         mismatches["normalization_mean"] = "different"
     if not np.allclose(std, dataset.scalar_std, rtol=0.0, atol=1e-12):
         mismatches["normalization_std"] = "different"
-    margin = checkpoint.get("margin", {})
-    if bool(margin.get("enabled")) != bool(dataset.margin_enabled):
-        mismatches["margin.enabled"] = (
-            margin.get("enabled"),
-            dataset.margin_enabled,
+    margin_removed = checkpoint.get("margin", None)
+    if margin_removed is not None:
+        mismatches["checkpoint_schema"] = "legacy margin-based checkpoint"
+    if bool(checkpoint.get("competition_enabled")) != model.competition_enabled:
+        mismatches["competition_enabled"] = (
+            checkpoint.get("competition_enabled"),
+            model.competition_enabled,
         )
-    if str(margin.get("source")) != str(dataset.margin_source):
-        mismatches["margin.source"] = (
-            margin.get("source"),
-            dataset.margin_source,
+    if dataset.competition_enabled != model.competition_enabled:
+        mismatches["dataset_competition_enabled"] = (
+            dataset.competition_enabled,
+            model.competition_enabled,
         )
-    if json.dumps(margin.get("stats", {}), sort_keys=True) != json.dumps(
-        dataset.margin_stats, sort_keys=True
-    ):
-        mismatches["margin.stats"] = "different"
     checkpoint_dataset = checkpoint.get("dataset", {})
     current = dataset.descriptor()
     for key in (
@@ -199,9 +186,11 @@ def _validate_resume_contract(
         "max_frame_gap",
         "scalar_dim",
         "reid_dim",
+        "evidence_dim",
+        "competition_dim",
+        "competition_enabled",
         "feature_schema_version",
         "label_source",
-        "margin_enabled",
     ):
         if checkpoint_dataset.get(key) != current.get(key):
             mismatches[f"dataset.{key}"] = (
@@ -211,18 +200,9 @@ def _validate_resume_contract(
     if mismatches:
         raise ValueError(
             "SHUTrack resume contract mismatch; refusing to continue with a "
-            "different model/data/margin configuration: "
+            "different model/data/branch configuration: "
             + json.dumps(mismatches, sort_keys=True, default=str)
         )
-
-
-def _margin_block(dataset: PackedShutrackDataset) -> dict[str, Any]:
-    return {
-        "enabled": bool(dataset.margin_enabled),
-        "source": dataset.margin_source,
-        "valid_rate": dataset.margin_valid_rate,
-        "stats": dataset.margin_stats,
-    }
 
 
 def _checkpoint_payload(
@@ -248,7 +228,6 @@ def _checkpoint_payload(
         scheduler=scheduler,
         normalization_mean=dataset.scalar_mean,
         normalization_std=dataset.scalar_std,
-        margin=_margin_block(dataset),
         include_optimizer=include_optimizer,
     )
 
@@ -359,10 +338,7 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
             write_log(f"samples={len(dataset)} steps_per_epoch={steps_per_epoch}")
             write_log(f"total_steps={total_steps} warmup_steps={warmup_steps}")
             write_log(
-                "margin_enabled="
-                f"{str(dataset.margin_enabled).lower()} "
-                f"margin_source={dataset.margin_source} "
-                f"margin_valid_rate={dataset.margin_valid_rate}"
+                f"competition_enabled={str(dataset.competition_enabled).lower()}"
             )
             write_log(
                 "best.pt tracks the lowest average training loss, not tracker "
@@ -445,9 +421,9 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                             dataset.sequence_load_count - epoch_start_loads
                         ),
                         "rss_mb": _rss_mb(),
-                        "margin_enabled": bool(dataset.margin_enabled),
-                        "margin_source": dataset.margin_source,
-                        "margin_valid_rate": dataset.margin_valid_rate,
+                        "competition_enabled": bool(
+                            dataset.competition_enabled
+                        ),
                     }
                 )
                 metrics_handle.write(json.dumps(metrics, sort_keys=True) + "\n")
@@ -516,7 +492,7 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
             "elapsed_sec": float(time.time() - started),
             "sequence_load_count": int(dataset.sequence_load_count),
             "parameter_counts": model.parameter_report(),
-            "margin": _margin_block(dataset),
+            "competition_enabled": bool(dataset.competition_enabled),
             "training_config": dict(resolved),
         }
         summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
@@ -532,8 +508,6 @@ def evaluate_checkpoint(
     batch_size: int = 64,
     max_batches: int = 8,
     device: str = "cpu",
-    margin_mode: str = "auto",
-    margin_stats_json: str = "",
 ) -> dict[str, Any]:
     """Small deterministic evaluation used by the CLI contract check."""
 
@@ -542,14 +516,17 @@ def evaluate_checkpoint(
     model.eval()
     dataset = PackedShutrackDataset(
         dataset_dir,
-        margin_mode=margin_mode,
-        margin_stats=_load_margin_stats(margin_stats_json),
+        competition_enabled=bool(checkpoint["competition_enabled"]),
     )
     try:
         if dataset.reid_dim != int(checkpoint["reid_dim"]):
             raise ValueError(
                 f"checkpoint/dataset reid_dim mismatch: "
                 f"{checkpoint['reid_dim']} != {dataset.reid_dim}"
+            )
+        if dataset.competition_enabled != bool(checkpoint["competition_enabled"]):
+            raise ValueError(
+                "checkpoint/dataset competition branch mismatch"
             )
         loader = DataLoader(
             dataset,
@@ -586,8 +563,7 @@ def evaluate_checkpoint(
             "batches": batches,
             "metrics": totals.summary(),
             "parameter_counts": model.parameter_report(),
-            "margin_source": dataset.margin_source,
-            "margin_valid_rate": dataset.margin_valid_rate,
+            "competition_enabled": bool(dataset.competition_enabled),
             "architecture": checkpoint["architecture"],
             "architecture_version": checkpoint["architecture_version"],
             "epoch": checkpoint.get("epoch"),

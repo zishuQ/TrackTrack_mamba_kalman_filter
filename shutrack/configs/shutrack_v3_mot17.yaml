@@ -1,20 +1,18 @@
-# Reference configuration for SHUTrack v2 on MOT17.
+# Reference configuration for SHUTrack v3 on MOT17.
 #
 # The CLI flags are authoritative; this file documents the equivalent formal
-# training settings and is intentionally not auto-loaded, so there is no second
-# source of truth for a run.
+# training settings and is intentionally not auto-loaded.
 architecture: shutrack_hce_rsc
-architecture_version: shutrack_v2
-feature_schema_version: shutrack_v2_event18
+architecture_version: shutrack_v3
+feature_schema_version: shutrack_v3_evidence13_competition3
 context_size: 6
 history_size: 5
 
 data:
   dataset_dir: outputs/agentguard/train_data/MOT17
   split: all
-  margin_mode: auto          # effective contract is margin_enabled=false
-  margin_enabled: false      # packed data has no candidate-pool matrices
-  sequence_cache_size: 2     # bounded data.pt LRU; ReID stays memory-mapped
+  competition_enabled: true   # false trains the lean dual-evidence variant
+  sequence_cache_size: 2      # bounded data.pt LRU; ReID stays memory-mapped
 
 model:
   reid_dim: 2048
@@ -40,5 +38,6 @@ training:
 runtime:
   checkpoint: best.pt
   device: cpu
-  min_observations: 6        # match legacy event-cache maturity; 1 enables early cold start
+  min_observations: 6        # match legacy event-cache maturity
+  early_enable: false        # optional New-path match-2/3 behavior
   max_frame_gap: 30          # must equal the checkpoint dataset horizon

@@ -1,4 +1,4 @@
-"""Runtime checkpoint loading for SHUTrack v2."""
+"""Runtime checkpoint loading for SHUTrack v3."""
 
 from __future__ import annotations
 
@@ -20,6 +20,11 @@ def load_runtime_model(
     model, checkpoint = load_shutrack_checkpoint(
         checkpoint_path, map_location="cpu"
     )
+    if not isinstance(checkpoint.get("competition_enabled"), bool):
+        raise ValueError(
+            "SHUTrack checkpoint is missing competition_enabled; retrain so "
+            "online inference can obey the training branch configuration"
+        )
     model.to(device)
     model.eval()
     mean = np.asarray(checkpoint.get("normalization_mean", []), dtype=np.float64)
@@ -29,14 +34,6 @@ def load_runtime_model(
             "SHUTrack checkpoint is missing 63-dim normalization statistics; "
             "online inference cannot reproduce training features"
         )
-    margin = checkpoint.get("margin", {})
-    if not isinstance(margin, dict) or not isinstance(margin.get("enabled"), bool):
-        raise ValueError(
-            "SHUTrack checkpoint is missing margin.enabled; retrain so online "
-            "inference can obey the training input contract"
-        )
-    if margin["enabled"] and "stats" not in margin:
-        raise ValueError("margin-enabled SHUTrack checkpoint is missing margin stats")
     return model, dict(checkpoint)
 
 

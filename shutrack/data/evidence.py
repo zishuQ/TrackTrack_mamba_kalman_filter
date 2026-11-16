@@ -12,13 +12,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from shutrack.schema import CONTEXT_DIM, MOTION_DIM
+from shutrack.schema import COMPETITION_DIM, EVIDENCE_DIM
 
 
 @dataclass(frozen=True)
 class EventEvidence:
-    motion: np.ndarray            # (12,) float32, normalized space
-    context: np.ndarray           # (8,) float32, fixed schema order
+    evidence: np.ndarray          # (13,) float32: motion+observation, normalized
+    competition: np.ndarray       # (3,) float32: row/col cost gaps + max IoU
     track_feature: np.ndarray     # (D,) float32, pre-update template
     detection_feature: np.ndarray  # (D,) float32, zeros without detection
     has_detection: bool
@@ -28,15 +28,18 @@ class EventEvidence:
     observation_count: int
 
     def __post_init__(self) -> None:
-        motion = np.asarray(self.motion, dtype=np.float32).reshape(-1)
-        context = np.asarray(self.context, dtype=np.float32).reshape(-1)
+        evidence = np.asarray(self.evidence, dtype=np.float32).reshape(-1)
+        competition = np.asarray(self.competition, dtype=np.float32).reshape(-1)
         track = np.asarray(self.track_feature, dtype=np.float32).reshape(-1)
         detection = np.asarray(self.detection_feature, dtype=np.float32).reshape(-1)
-        if motion.shape != (MOTION_DIM,):
-            raise ValueError(f"motion must have shape ({MOTION_DIM},), got {motion.shape}")
-        if context.shape != (CONTEXT_DIM,):
+        if evidence.shape != (EVIDENCE_DIM,):
             raise ValueError(
-                f"context must have shape ({CONTEXT_DIM},), got {context.shape}"
+                f"evidence must have shape ({EVIDENCE_DIM},), got {evidence.shape}"
+            )
+        if competition.shape != (COMPETITION_DIM,):
+            raise ValueError(
+                f"competition must have shape ({COMPETITION_DIM},), "
+                f"got {competition.shape}"
             )
         if track.shape != detection.shape:
             raise ValueError(
@@ -46,15 +49,15 @@ class EventEvidence:
         if track.size == 0:
             raise ValueError("appearance features must not be empty")
         for name, value in (
-            ("motion", motion),
-            ("context", context),
+            ("evidence", evidence),
+            ("competition", competition),
             ("track_feature", track),
             ("detection_feature", detection),
         ):
             if not np.isfinite(value).all():
                 raise ValueError(f"{name} contains non-finite values")
-        object.__setattr__(self, "motion", motion)
-        object.__setattr__(self, "context", context)
+        object.__setattr__(self, "evidence", evidence)
+        object.__setattr__(self, "competition", competition)
         object.__setattr__(self, "track_feature", track)
         object.__setattr__(self, "detection_feature", detection)
         object.__setattr__(self, "has_detection", bool(self.has_detection))

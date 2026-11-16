@@ -6,6 +6,8 @@ stable, read-only pieces:
 * ``agentguard.features.scalar.compute_scalar_features`` (legacy 63-dim
   definition, including the packed training tensors already normalized with
   the same convention);
+* ``agentguard.features.geometry.pairwise_iou_xyxy`` for the competition
+  token's max-IoU column;
 * ``agentguard.data.cache_reader.CompactEventCacheReader`` and compact label
   loaders when a source event cache is actually present;
 * legacy contract dataclasses only where they are the stable interchange
@@ -24,16 +26,12 @@ import numpy as np
 
 from shutrack.data.evidence import EventEvidence
 from shutrack.features.core import (
-    build_core_features,
+    build_competition,
+    build_evidence,
     normalize_scalar63,
     sanitize_float32,
 )
-from shutrack.features.margins import (
-    INVALID_MARGIN,
-    MarginResult,
-    compute_margins_from_association_record,
-    compute_selected_margins,
-)
+from shutrack.schema import COMPETITION_DIM
 
 
 def _legacy_scalar_module():
@@ -54,84 +52,33 @@ def legacy_shutrack_scalar63(params: Mapping[str, Any]) -> np.ndarray:
     return np.asarray(compute_scalar_features(dict(params)), dtype=np.float64)
 
 
-def scalar_params_from_state(
-    *,
-    frame_id: int,
-    track_id: int,
-    image_width: int,
-    image_height: int,
-    has_detection: bool,
-    pre_update_state: Any,
-    detection: Any = None,
-    association: Any = None,
-    association_context: Any = None,
-) -> dict[str, Any]:
-    """Build the flat/nested dict accepted by the legacy scalar function.
+def detection_overlap_row(
+    selected_box: np.ndarray,
+    pool_boxes: np.ndarray,
+    selected_column: int,
+) -> np.ndarray:
+    """Legacy max-IoU row: IoU of the accepted detection vs the pool.
 
-    The inputs are the same objects the online tracker holds immediately
-    before ``update_with_gates``: the pre-update snapshot, the accepted
-    detection and the association pair/context of the current frame.
+    The accepted detection's own entry is set to zero, matching
+    ``CompactEventCacheReader._association_detection_overlap_row``.
     """
 
-    params: dict[str, Any] = {
-        "has_detection": bool(has_detection),
-        "image_width": int(image_width),
-        "image_height": int(image_height),
-        "frame_id": int(frame_id),
-    }
-    if association is not None:
-        params["association"] = {
-            "iou_similarity": float(association.iou_similarity),
-            "iou_distance": float(association.iou_distance),
-            "cosine_distance": float(association.cosine_distance),
-            "confidence_distance": float(association.confidence_distance),
-            "angle_distance": float(association.angle_distance),
-            "raw_cost": float(association.raw_cost),
-            "final_cost": float(association.final_cost),
-            "assignment_round": int(association.assignment_round),
-            "assignment_threshold": float(association.assignment_threshold),
-            "detection_source": int(association.detection_source),
-        }
-    if detection is not None and has_detection:
-        params["detection"] = {
-            "box": np.asarray(detection.box, dtype=np.float64),
-            "score": float(detection.score),
-            "source": int(detection.source),
-        }
-    if pre_update_state is not None:
-        history = getattr(pre_update_state, "history", {}) or {}
-        params["pre_update_state"] = {
-            "mean": (
-                None
-                if getattr(pre_update_state, "mean", None) is None
-                else np.asarray(pre_update_state.mean, dtype=np.float64)
-            ),
-            "covariance": (
-                None
-                if getattr(pre_update_state, "covariance", None) is None
-                else np.asarray(pre_update_state.covariance, dtype=np.float64)
-            ),
-            "velocity": np.asarray(
-                getattr(pre_update_state, "velocity", np.zeros((4, 2))),
-                dtype=np.float64,
-            ),
-            "score": float(getattr(pre_update_state, "score", 0.0)),
-            "history": history,
-            "end_frame_id": int(getattr(pre_update_state, "end_frame_id", 0)),
-            "state": int(getattr(pre_update_state, "state", 0)),
-        }
-    if association_context is not None:
-        params["track_cost_row"] = np.asarray(
-            association_context.track_cost_row, dtype=np.float64
-        )
-        params["detection_cost_col"] = np.asarray(
-            association_context.detection_cost_col, dtype=np.float64
-        )
-        overlap = np.asarray(association_context.detection_overlap_row, dtype=np.float64)
-        params["max_iou_with_other"] = (
-            float(np.max(overlap)) if overlap.size > 0 else 0.0
-        )
-    return params
+    boxes = np.asarray(pool_boxes, dtype=np.float64).reshape(-1, 4)
+    selected = np.asarray(selected_box, dtype=np.float64).reshape(1, 4)
+    if boxes.shape[0] == 0:
+        return np.zeros((0,), dtype=np.float64)
+    try:
+        from agentguard.features.geometry import pairwise_iou_xyxy
+    except ImportError as exc:  # pragma: no cover - environment guard
+        raise RuntimeError(
+            "AgentGuard pairwise IoU is unavailable; the competition token "
+            "requires the installed agentguard package"
+        ) from exc
+    overlap = np.asarray(pairwise_iou_xyxy(selected, boxes)[0], dtype=np.float64)
+    column = int(selected_column)
+    if 0 <= column < overlap.shape[0]:
+        overlap[column] = 0.0
+    return overlap
 
 
 def normalizer_from_metadata(metadata: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray]:
@@ -152,8 +99,7 @@ def build_online_evidence(
     track_feature: np.ndarray,
     detection_feature: np.ndarray,
     has_detection: bool,
-    margins: MarginResult,
-    margin_stats: Mapping[str, Any] | None,
+    competition_enabled: bool,
     scalar_mean: np.ndarray,
     scalar_std: np.ndarray,
     frame_id: int,
@@ -165,7 +111,12 @@ def build_online_evidence(
 
     raw_scalar = legacy_shutrack_scalar63(scalar_params)
     normalized = normalize_scalar63(raw_scalar, scalar_mean, scalar_std)
-    motion, context = build_core_features(normalized, margins, margin_stats)
+    evidence = build_evidence(normalized, has_detection)
+    competition = (
+        build_competition(normalized)
+        if competition_enabled
+        else np.zeros(COMPETITION_DIM, dtype=np.float32)
+    )
     track = sanitize_float32(track_feature)
     detection = (
         sanitize_float32(detection_feature)
@@ -173,8 +124,8 @@ def build_online_evidence(
         else np.zeros_like(track)
     )
     return EventEvidence(
-        motion=sanitize_float32(motion),
-        context=sanitize_float32(context),
+        evidence=sanitize_float32(evidence),
+        competition=sanitize_float32(competition),
         track_feature=track,
         detection_feature=detection,
         has_detection=has_detection,
@@ -220,31 +171,13 @@ def load_compact_labels(label_dir: str | Path):
     return load_compact_label_arrays(label_dir)
 
 
-def margins_from_cached_event(reader: Any, record: Mapping[str, Any]) -> MarginResult:
-    """Margins for one cached event, using only the recorded candidate pool."""
-
-    if not bool(record.get("matched", False)):
-        return INVALID_MARGIN
-    association = reader.get_association(
-        int(record.get("association_shard_id", -1)),
-        int(record.get("association_offset", -1)),
-    )
-    if association is None:
-        return INVALID_MARGIN
-    return compute_margins_from_association_record(
-        association,
-        track_row=int(record.get("association_track_row", -1)),
-        accepted_detection_index=int(record.get("accepted_detection_index", -1)),
-    )
-
-
 def evidence_from_cached_event(
     reader: Any,
     record: Mapping[str, Any],
     *,
     scalar_mean: np.ndarray,
     scalar_std: np.ndarray,
-    margin_stats: Mapping[str, Any] | None,
+    competition_enabled: bool,
     segment_id: int,
 ) -> EventEvidence:
     """Build evidence from one cached event without writing anything.
@@ -260,11 +193,15 @@ def evidence_from_cached_event(
             f"cached event {record.get('event_id')} has no valid 63-dim scalar"
         )
     normalized = normalize_scalar63(raw_scalar, scalar_mean, scalar_std)
-    margins = margins_from_cached_event(reader, record)
-    motion, context = build_core_features(normalized, margins, margin_stats)
+    matched = bool(record.get("matched", False))
+    evidence = build_evidence(normalized, matched)
+    competition = (
+        build_competition(normalized)
+        if competition_enabled
+        else np.zeros(COMPETITION_DIM, dtype=np.float32)
+    )
 
     track_feature = np.asarray(record.get("track_feature", []), dtype=np.float32).reshape(-1)
-    matched = bool(record.get("matched", False))
     accepted = int(record.get("accepted_detection_index", -1))
     if matched and accepted >= 0:
         detection_feature = np.asarray(
@@ -274,8 +211,8 @@ def evidence_from_cached_event(
         detection_feature = np.zeros_like(track_feature)
 
     return EventEvidence(
-        motion=sanitize_float32(motion),
-        context=sanitize_float32(context),
+        evidence=sanitize_float32(evidence),
+        competition=sanitize_float32(competition),
         track_feature=sanitize_float32(track_feature),
         detection_feature=sanitize_float32(detection_feature),
         has_detection=matched,
@@ -286,57 +223,39 @@ def evidence_from_cached_event(
     )
 
 
-def iter_cached_margin_observations(
+def iter_cached_evidence(
     reader: Any,
     *,
+    scalar_mean: np.ndarray,
+    scalar_std: np.ndarray,
+    competition_enabled: bool,
+    segment_id: int = 0,
     limit: int | None = None,
-) -> Iterator[MarginResult]:
-    """Stream margin observations from a source event cache (bounded reader)."""
+) -> Iterator[EventEvidence]:
+    """Stream cached event evidence (bounded reader), for diagnostics/tests."""
 
     yielded = 0
     for record in reader.iter_event_records():
-        if not bool(record.get("matched", False)):
-            continue
-        yield margins_from_cached_event(reader, record)
+        yield evidence_from_cached_event(
+            reader,
+            record,
+            scalar_mean=scalar_mean,
+            scalar_std=scalar_std,
+            competition_enabled=competition_enabled,
+            segment_id=segment_id,
+        )
         yielded += 1
         if limit is not None and yielded >= int(limit):
             return
 
 
-def online_margins_from_association_meta(
-    association_meta: Mapping[str, Any] | None,
-    *,
-    track_row: int,
-    detection_col: int,
-) -> MarginResult:
-    """Margins from the live association metadata of the current frame."""
-
-    if association_meta is None:
-        return INVALID_MARGIN
-    raw_cost = association_meta.get("raw_cost")
-    iou_similarity = association_meta.get("iou_similarity")
-    if raw_cost is None or iou_similarity is None:
-        return INVALID_MARGIN
-    try:
-        return compute_selected_margins(
-            np.asarray(raw_cost),
-            np.asarray(iou_similarity),
-            int(track_row),
-            int(detection_col),
-        )
-    except ValueError:
-        return INVALID_MARGIN
-
-
 __all__ = [
     "legacy_shutrack_scalar63",
-    "scalar_params_from_state",
+    "detection_overlap_row",
     "normalizer_from_metadata",
     "build_online_evidence",
     "open_compact_event_reader",
     "load_compact_labels",
-    "margins_from_cached_event",
     "evidence_from_cached_event",
-    "iter_cached_margin_observations",
-    "online_margins_from_association_meta",
+    "iter_cached_evidence",
 ]

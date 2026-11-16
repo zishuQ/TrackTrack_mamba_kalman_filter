@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from shutrack.schema import CONTEXT_DIM, MOTION_DIM
+from shutrack.schema import COMPETITION_DIM, EVIDENCE_DIM
 
 
 def _mlp(in_dim: int, d_model: int, ff_dim: int) -> nn.Sequential:
@@ -17,28 +17,28 @@ def _mlp(in_dim: int, d_model: int, ff_dim: int) -> nn.Sequential:
     )
 
 
-class MotionEncoder(nn.Module):
-    """Encode the 12 motion values into a d_model token."""
+class EvidenceEncoder(nn.Module):
+    """Encode the 13-dim motion+observation evidence into a d_model token."""
 
     def __init__(self, d_model: int = 128, ff_dim: int = 256) -> None:
         super().__init__()
-        self.input_norm = nn.LayerNorm(MOTION_DIM)
-        self.net = _mlp(MOTION_DIM, d_model, ff_dim)
+        self.input_norm = nn.LayerNorm(EVIDENCE_DIM)
+        self.net = _mlp(EVIDENCE_DIM, d_model, ff_dim)
 
-    def forward(self, motion: torch.Tensor) -> torch.Tensor:
-        return self.net(self.input_norm(motion.float()))
+    def forward(self, evidence: torch.Tensor) -> torch.Tensor:
+        return self.net(self.input_norm(evidence.float()))
 
 
-class ContextEncoder(nn.Module):
-    """Encode the 8 match-context values into a d_model token."""
+class CompetitionEncoder(nn.Module):
+    """Encode the 3-dim association-competition evidence."""
 
     def __init__(self, d_model: int = 128, ff_dim: int = 256) -> None:
         super().__init__()
-        self.input_norm = nn.LayerNorm(CONTEXT_DIM)
-        self.net = _mlp(CONTEXT_DIM, d_model, ff_dim)
+        self.input_norm = nn.LayerNorm(COMPETITION_DIM)
+        self.net = _mlp(COMPETITION_DIM, d_model, ff_dim)
 
-    def forward(self, context: torch.Tensor) -> torch.Tensor:
-        return self.net(self.input_norm(context.float()))
+    def forward(self, competition: torch.Tensor) -> torch.Tensor:
+        return self.net(self.input_norm(competition.float()))
 
 
 class AppearanceEncoder(nn.Module):
@@ -93,4 +93,8 @@ class AppearanceEncoder(nn.Module):
         return self.interaction(interaction)
 
 
-__all__ = ["MotionEncoder", "ContextEncoder", "AppearanceEncoder"]
+__all__ = [
+    "EvidenceEncoder",
+    "CompetitionEncoder",
+    "AppearanceEncoder",
+]

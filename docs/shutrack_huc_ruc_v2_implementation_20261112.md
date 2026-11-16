@@ -12,6 +12,15 @@
 - 两个 gate 不使用 softmax，不要求和为 1；不再存在 base gate、refined gate、correction、policy、cue、risk 或五策略原型。
 - 旧实现中的 `HUC`/`RUC`/`IWGRGCMA` 历史命名保持原样，不进行全仓库替换；新代码、配置、日志、测试和本文档统一使用 HCE/RSC。下文中旧 HUC/RUC 表述仅作为历史映射说明保留。
 
+### 0.1 v3 最终输入与信息流（2026-11-16 修订，覆盖下文 18+2/margin 描述）
+
+- 运动与上下文合并为 13 维 evidence：4 个框偏差（旧 27:31）、4 个 KF 速度（39:43）、2 个中心预测方差（43:45）、检测置信度（9）、观测间隔（59）、是否有检测（0/1 flag）。删除宽高方差、快照历史长度、selected margin 及其有效位；保留独立的 has-detection 与历史 padding/reset mask。
+- 新增可选竞争分支 3 维：旧 63 维缓存第 15、21、25 列（0-based）——行前两名代价差、列前两名代价差、当前检测与候选池内其他检测的最大 IoU。在线使用同一候选池、迭代前 `final_cost`、相同归一化重现；最大 IoU 排除自身，单候选沿用旧特征的 `second_min=1.0` 边界。训练配置 `--competition off` 可关闭该分支，checkpoint 记录 `competition_enabled` 并在加载时检查。
+- HCE 仍只读最多 5 个历史事件；每个历史事件由 evidence 与外观两路编码融合。RSC 以两个历史读出为 query，读取当前 evidence、外观、竞争三个 token，输出两个 gate。
+- 历史重置按事件幂等：同一事件只重置一次，事件段号与缓冲区段号一致；第 50 帧历史为空，第 51 帧模型实际 mask 恰好读到第 50 帧。失配仍记录为真实历史事件，无匹配只预测、重匹配再算 gate。
+- 提前启用为独立选项（`--shutrack-early-enable`）：第 1 次观测初始化，第 2 次匹配原样更新并记录更新前证据，第 3 次匹配在 New 路径首次应用 gate；竞争特征取 New 路径自身候选池；候选轨迹移除时清理缓冲。默认两组竞争分支共用 `observation_count >= 6` 的启用条件。
+- 本轮不迁移递推训练、不重建缓存；写回仍为原 `Track.update_with_gates`，损失仍为加权 BCE + 0.1 MSE。详细命令见 `shutrack/README.md`。
+
 本轮实施：新增独立架构与只读数据适配路径，完成训练/在线接线、必要测试、少量真实数据smoke，交付可运行训练命令。
 不要自动启动三数据集正式长训练，不执行检测/ReID提取、轨迹再采集或rollout标签再生成。
 不要改动MoTTrack仓库。

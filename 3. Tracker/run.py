@@ -130,6 +130,9 @@ def make_parser():
     parser.add_argument("--shutrack-min-observations", type=int, default=6,
                        help="Minimum cumulative observations before the SHUTrack v2 model is applied "
                             "(default 6 matches the legacy event-cache maturity; set 1 for early cold start)")
+    parser.add_argument("--shutrack-early-enable", action="store_true",
+                       help="SHUTrack v2 optional early-enable path: record evidence on the 2nd New-path "
+                            "match and apply the gate from the 3rd match")
     parser.add_argument(
                        "--iwg-rg-cma-output", "--rg-cma-output",
                        dest="rg_cma_output", choices=["base", "final"], default="final",

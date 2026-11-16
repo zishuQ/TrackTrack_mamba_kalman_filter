@@ -51,11 +51,11 @@ def _add_train_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-samples", type=int, default=0)
     parser.add_argument("--log-interval", type=int, default=TRAIN_DEFAULTS["log_interval"])
     parser.add_argument(
-        "--margin-mode",
-        choices=["auto", "required", "disabled"],
-        default=TRAIN_DEFAULTS["margin_mode"],
+        "--competition",
+        choices=["on", "off"],
+        default="on" if TRAIN_DEFAULTS["competition_enabled"] else "off",
+        help="Train with the association-competition branch or the lean dual-evidence variant",
     )
-    parser.add_argument("--margin-stats-json", default="")
     parser.add_argument("--resume", default="")
     parser.add_argument("--d-model", type=int, default=TRAIN_DEFAULTS["d_model"])
     parser.add_argument("--n-heads", type=int, default=TRAIN_DEFAULTS["n_heads"])
@@ -93,8 +93,6 @@ def _train_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
             "max_steps",
             "max_samples",
             "log_interval",
-            "margin_mode",
-            "margin_stats_json",
             "resume",
             "d_model",
             "n_heads",
@@ -105,6 +103,7 @@ def _train_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
             "sequence_cache_size",
         )
     }
+    config["competition_enabled"] = str(args.competition).lower() == "on"
     return config
 
 
@@ -130,7 +129,6 @@ def _cmd_validate_checkpoint(args: argparse.Namespace) -> None:
             batch_size=args.batch_size,
             max_batches=args.max_batches,
             device=args.device,
-            margin_mode=args.margin_mode,
         )
     else:
         model, checkpoint = load_shutrack_checkpoint(
@@ -150,7 +148,7 @@ def _cmd_inspect_data(args: argparse.Namespace) -> None:
     dataset = PackedShutrackDataset(
         args.dataset_dir,
         max_samples=args.max_samples,
-        margin_mode=args.margin_mode,
+        competition_enabled=str(args.competition).lower() == "on",
     )
     try:
         sample = dataset[0]
@@ -163,22 +161,20 @@ def _cmd_inspect_data(args: argparse.Namespace) -> None:
                 for key, value in sample.items()
                 if key
                 in {
-                    "history_motion",
+                    "history_evidence",
                     "history_track",
                     "history_detection",
-                    "history_context",
                     "history_mask",
                     "history_has_detection",
                     "history_reset",
-                    "current_motion",
+                    "current_evidence",
+                    "current_competition",
                     "current_track",
                     "current_detection",
-                    "current_context",
                     "current_has_detection",
                     "safe_gate_target",
                     "valid_channels",
                     "sample_weight",
-                    "margin_valid",
                     "sequence",
                     "track_id",
                     "segment_id",
@@ -188,42 +184,6 @@ def _cmd_inspect_data(args: argparse.Namespace) -> None:
         print(json.dumps(result, indent=2, sort_keys=True))
     finally:
         dataset.close()
-
-
-def _cmd_fit_margin_stats(args: argparse.Namespace) -> None:
-    from shutrack.data.legacy_adapter import (
-        iter_cached_margin_observations,
-        open_compact_event_reader,
-    )
-    from shutrack.features.margins import fit_margin_statistics
-
-    root = Path(args.cache_root) / args.dataset / args.split
-    if args.sequences:
-        sequences = list(args.sequences)
-    else:
-        sequences = sorted(
-            path.name for path in root.iterdir() if (path / "manifest.json").is_file()
-        )
-    if not sequences:
-        raise FileNotFoundError(
-            f"no compact event cache sequences under {root}. This is expected in "
-            "the current checkout: only packed train_data exists, so margins "
-            "cannot be fitted without restoring the read-only event caches "
-            "(events_*.pt/associations_*.pt and compact labels)."
-        )
-    results = []
-    for sequence in sequences:
-        reader = open_compact_event_reader(root / sequence, args.detection_cache_root or None)
-        try:
-            results.extend(
-                iter_cached_margin_observations(reader, limit=args.limit or None)
-            )
-        finally:
-            reader.close()
-    stats = fit_margin_statistics(results)
-    if args.output:
-        Path(args.output).write_text(json.dumps(stats, indent=2, sort_keys=True) + "\n")
-    print(json.dumps(stats, indent=2, sort_keys=True))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -248,9 +208,6 @@ def build_parser() -> argparse.ArgumentParser:
     validate_parser.add_argument("--batch-size", type=int, default=64)
     validate_parser.add_argument("--max-batches", type=int, default=8)
     validate_parser.add_argument("--device", default="cpu")
-    validate_parser.add_argument(
-        "--margin-mode", choices=["auto", "required", "disabled"], default="auto"
-    )
     validate_parser.set_defaults(func=_cmd_validate_checkpoint)
 
     inspect_parser = subparsers.add_parser(
@@ -259,22 +216,12 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--dataset-dir", required=True)
     inspect_parser.add_argument("--max-samples", type=int, default=0)
     inspect_parser.add_argument(
-        "--margin-mode", choices=["auto", "required", "disabled"], default="auto"
+        "--competition",
+        choices=["on", "off"],
+        default="on",
+        help="Inspect the full branch or the lean dual-evidence variant",
     )
     inspect_parser.set_defaults(func=_cmd_inspect_data)
-
-    margin_parser = subparsers.add_parser(
-        "fit-margin-stats",
-        help="Stream row/col margin statistics from a compact event cache",
-    )
-    margin_parser.add_argument("--cache-root", required=True)
-    margin_parser.add_argument("--dataset", required=True)
-    margin_parser.add_argument("--split", default="all")
-    margin_parser.add_argument("--sequences", nargs="+", default=None)
-    margin_parser.add_argument("--detection-cache-root", default="")
-    margin_parser.add_argument("--limit", type=int, default=0)
-    margin_parser.add_argument("--output", default="")
-    margin_parser.set_defaults(func=_cmd_fit_margin_stats)
 
     return parser
 

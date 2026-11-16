@@ -40,6 +40,7 @@ class ShutrackTrackerAdapter:
         self.args = args
         self.vid_name = vid_name
         self.runtime = runtime
+        self.early_enable = bool(getattr(args, "shutrack_early_enable", False))
         self.frame_id = -1
         self.img_width = int(getattr(args, "img_w", 1920))
         self.img_height = int(getattr(args, "img_h", 1080))
@@ -59,6 +60,7 @@ class ShutrackTrackerAdapter:
         self.frame_id = int(frame_id)
         self.img_width = int(img_width or self.img_width)
         self.img_height = int(img_height or self.img_height)
+        self.runtime.set_frame_detection_pool(detection_pool)
 
     def set_frame_warp(self, warp_matrix: np.ndarray) -> None:
         self._warp = np.asarray(warp_matrix, dtype=np.float64).copy()
@@ -176,6 +178,60 @@ class ShutrackTrackerAdapter:
             evidence=evidence,
             has_detection=False,
         )
+
+    def process_new_track_match(
+        self,
+        track: Any,
+        detection: Any,
+        track_idx: int,
+        det_idx: int,
+        association_meta: Any,
+        warp_matrix: np.ndarray,
+        frame_id: int,
+    ) -> bool:
+        """Optional early-enable path for a matched ``TrackState.New`` track.
+
+        Match 1 initializes the track (handled by the Tracker's init path).
+        Match 2 updates with the original, ungated ``Track.update`` and records
+        its pre-update evidence.  Match 3 and later apply the SHUTrack gate
+        inside the New association path.  TrackTrack's own confirmation rule
+        (``observation_count >= min_len``) is untouched.
+
+        Returns ``True`` when this helper handled the match; ``False`` lets the
+        Tracker fall back to the original update.
+        """
+
+        if not self.early_enable:
+            return False
+        observation_count = self._observation_count(track)
+        if observation_count < 1:
+            return False
+        pre_update = track.snapshot_state(compact_history=True)
+        event = self.build_matched_event(
+            track,
+            detection,
+            track_idx,
+            det_idx,
+            association_meta,
+            warp_matrix,
+            pre_update,
+            pre_update,
+        )
+        if observation_count >= 2:
+            decision = self.get_iwg_decisions_batch(
+                [(int(track.track_id), event)]
+            )[0]
+            self.apply_gate(track, detection, decision)
+            self.runtime.stats.record_early_gate_update()
+            self.record_event(int(track.track_id), event, decision)
+        else:
+            track.update(int(frame_id), detection)
+            self.record_event(
+                int(track.track_id),
+                event,
+                ShutrackGateDecision(motion_gate=1.0, appearance_gate=1.0),
+            )
+        return True
 
     # ------------------------------------------------------------------
     # Decisions / updates
