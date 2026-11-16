@@ -1,0 +1,43 @@
+# Reference configuration for SHUTrack v2 on MOT17.
+#
+# The CLI flags are authoritative; this file documents the equivalent formal
+# training settings and is intentionally not auto-loaded, so there is no second
+# source of truth for a run.
+architecture: shutrack_hce_rsc
+architecture_version: shutrack_v2
+feature_schema_version: shutrack_v2_event18
+context_size: 6
+history_size: 5
+
+data:
+  dataset_dir: outputs/agentguard/train_data/MOT17
+  split: all
+  margin_mode: auto          # explicit unavailable_margin degradation is logged
+  sequence_cache_size: 2     # bounded data.pt LRU; ReID stays memory-mapped
+
+model:
+  reid_dim: 2048
+  d_model: 128
+  n_heads: 4
+  hce_layers: 2
+  ff_dim: 256
+  dropout: 0.0
+  appearance_proj_dim: 64
+
+training:
+  device: cuda
+  epochs: 100
+  batch_size: 1024
+  num_workers: 0
+  lr: 0.0001
+  weight_decay: 0.0001
+  warmup_epochs: 1
+  grad_clip: 1.0
+  seed: 42
+  log_interval: 20
+
+runtime:
+  checkpoint: best.pt
+  device: cpu
+  min_observations: 1
+  max_frame_gap: 30          # must equal the checkpoint dataset horizon
