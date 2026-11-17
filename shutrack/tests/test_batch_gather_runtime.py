@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 from shutrack.data.batch_loader import BatchIndexLoader
@@ -147,6 +148,97 @@ def test_overlap_row_cache_matches_direct_computation(tmp_path):
         boxes_reordered[1], boxes_reordered, 1
     )
     np.testing.assert_allclose(row, direct, atol=1e-12)
+
+
+def test_overlap_row_cache_key_includes_ordered_pool(tmp_path):
+    """Same frame, different candidate order: column 0 is a different detection."""
+
+    runtime = _runtime(tmp_path)
+    pool = [
+        _detection(0, [0, 0, 10, 10]),
+        _detection(1, [2, 2, 12, 12]),
+        _detection(2, [50, 50, 60, 60]),
+    ]
+    runtime.set_frame_detection_pool(pool)
+    meta_a = {"detection_indices": np.asarray([0, 1, 2])}
+    meta_b = {"detection_indices": np.asarray([2, 1, 0])}
+    boxes_a = np.stack([[0, 0, 10, 10], [2, 2, 12, 12], [50, 50, 60, 60]])
+    boxes_b = np.stack([[50, 50, 60, 60], [2, 2, 12, 12], [0, 0, 10, 10]])
+
+    rows_a = [runtime._overlap_row(meta_a, column) for column in range(3)]
+    rows_b = [runtime._overlap_row(meta_b, column) for column in range(3)]
+    for column in range(3):
+        np.testing.assert_allclose(
+            rows_a[column],
+            detection_overlap_row(boxes_a[column], boxes_a, column),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            rows_b[column],
+            detection_overlap_row(boxes_b[column], boxes_b, column),
+            atol=1e-12,
+        )
+    # The two pools must disagree for column 0; a column-only cache key would
+    # have reused the first row for the second pool.
+    assert not np.allclose(rows_a[0], rows_b[0])
+    assert rows_b[0][0] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_competition_max_iou_uses_ordered_pool_within_frame(tmp_path):
+    """Mature association and the early-enable New path can pass different pools."""
+
+    from shutrack.tests.test_runtime_adapter import (
+        _adapter,
+        FakeDetection,
+        FakeSnapshot,
+        FakeTrack,
+    )
+
+    adapter, _runtime_instance = _adapter(tmp_path, competition_enabled=True)
+    pool = [
+        FakeDetection(box=[0, 0, 10, 10], frame_detection_index=0),
+        FakeDetection(box=[2, 2, 12, 12], frame_detection_index=1),
+        FakeDetection(box=[50, 50, 60, 60], frame_detection_index=2),
+    ]
+    adapter.begin_frame(7, 640, 480, detection_pool=pool)
+    track = FakeTrack(track_id=9, observation_count=6)
+    snapshot = FakeSnapshot(frame_id=7)
+
+    def meta(indices):
+        size = len(indices)
+        return {
+            "final_cost": np.full((1, size), 0.5),
+            "detection_indices": np.asarray(indices, dtype=np.int64),
+            "detection_source": np.zeros((1, size), dtype=np.int8),
+        }
+
+    event_a = adapter.build_matched_event(
+        track,
+        pool[0],
+        track_idx=0,
+        det_idx=0,
+        association_meta=meta([0, 1, 2]),
+        warp_matrix=np.eye(2, 3),
+        frame_start_state_snapshot=snapshot,
+        pre_update_state_snapshot=snapshot,
+    )
+    # New-track path in the same frame with its own candidate pool order.
+    event_b = adapter.build_matched_event(
+        track,
+        pool[2],
+        track_idx=0,
+        det_idx=0,
+        association_meta=meta([2, 1, 0]),
+        warp_matrix=np.eye(2, 3),
+        frame_start_state_snapshot=snapshot,
+        pre_update_state_snapshot=snapshot,
+    )
+    boxes_a = np.stack([[0, 0, 10, 10], [2, 2, 12, 12], [50, 50, 60, 60]])
+    boxes_b = np.stack([[50, 50, 60, 60], [2, 2, 12, 12], [0, 0, 10, 10]])
+    expected_a = float(detection_overlap_row(boxes_a[0], boxes_a, 0).max())
+    assert event_a.evidence.competition[2] == pytest.approx(expected_a, abs=1e-6)
+    assert expected_a > 0.4
+    assert event_b.evidence.competition[2] == pytest.approx(0.0, abs=1e-12)
 
 
 def test_shutrack_adapter_skips_frame_start_snapshot():

@@ -478,88 +478,90 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                 compute_seconds = 0.0
                 epoch_batches = 0
                 loader_iter = iter(loader)
-                while True:
-                    if profile:
-                        data_started = time.perf_counter()
-                        if device.type == "cuda":
-                            torch.cuda.synchronize(device)
-                        try:
-                            batch = next(loader_iter)
-                        except StopIteration:
-                            break
-                        data_seconds += time.perf_counter() - data_started
-                    else:
-                        try:
-                            batch = next(loader_iter)
-                        except StopIteration:
-                            break
-                    h2d_started = time.perf_counter()
-                    batch = _move_batch(batch, device)
-                    h2d_seconds += time.perf_counter() - h2d_started
-                    compute_started = time.perf_counter()
-                    epoch_batches += 1
-                    epoch_samples += int(batch["safe_gate_target"].shape[0])
-                    outputs = model(**_model_inputs(batch))
-                    loss, components = gate_loss(outputs, batch)
-                    if not torch.isfinite(loss):
-                        raise FloatingPointError(
-                            f"non-finite SHUTrack loss at epoch={epoch} "
-                            f"step={global_step}"
+                try:
+                    while True:
+                        if profile:
+                            data_started = time.perf_counter()
+                            if device.type == "cuda":
+                                torch.cuda.synchronize(device)
+                            try:
+                                batch = next(loader_iter)
+                            except StopIteration:
+                                break
+                            data_seconds += time.perf_counter() - data_started
+                        else:
+                            try:
+                                batch = next(loader_iter)
+                            except StopIteration:
+                                break
+                        h2d_started = time.perf_counter()
+                        batch = _move_batch(batch, device)
+                        h2d_seconds += time.perf_counter() - h2d_started
+                        compute_started = time.perf_counter()
+                        epoch_batches += 1
+                        epoch_samples += int(batch["safe_gate_target"].shape[0])
+                        outputs = model(**_model_inputs(batch))
+                        loss, components = gate_loss(outputs, batch)
+                        if not torch.isfinite(loss):
+                            raise FloatingPointError(
+                                f"non-finite SHUTrack loss at epoch={epoch} "
+                                f"step={global_step}"
+                            )
+                        optimizer.zero_grad(set_to_none=True)
+                        loss.backward()
+                        grad_norm = torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), float(resolved["grad_clip"])
                         )
-                    optimizer.zero_grad(set_to_none=True)
-                    loss.backward()
-                    grad_norm = torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), float(resolved["grad_clip"])
-                    )
-                    optimizer.step()
-                    scheduler.step()
-                    global_step += 1
-                    if profile:
-                        if device.type == "cuda":
-                            torch.cuda.synchronize(device)
-                        compute_seconds += time.perf_counter() - compute_started
+                        optimizer.step()
+                        scheduler.step()
+                        global_step += 1
+                        if profile:
+                            if device.type == "cuda":
+                                torch.cuda.synchronize(device)
+                            compute_seconds += time.perf_counter() - compute_started
 
-                    weight = components["weight_sum"].detach()
-                    weight = torch.where(
-                        weight > 0, weight, torch.ones_like(weight)
-                    )
-                    for name, value in (
-                        ("loss", loss.detach()),
-                        ("bce", components["bce"].detach()),
-                        ("mse", components["mse"].detach()),
-                    ):
-                        stat_sums[name] = stat_sums[name] + value * weight
-                        stat_weights[name] = stat_weights[name] + weight
-                    for name, value in (
-                        (
-                            "motion_gate_mean",
-                            components["motion_gate_mean"].detach(),
-                        ),
-                        (
-                            "appearance_gate_mean",
-                            components["appearance_gate_mean"].detach(),
-                        ),
-                        ("grad_norm", grad_norm.detach()),
-                    ):
-                        stat_sums[name] = stat_sums[name] + value
-                        stat_weights[name] = stat_weights[name] + 1.0
-
-                    if global_step % log_interval == 0 or global_step == 1:
-                        write_log(
-                            f"epoch={epoch} step={global_step} "
-                            f"loss={float(loss.detach()):.6f} "
-                            f"bce={float(components['bce'].detach()):.6f} "
-                            f"mse={float(components['mse'].detach()):.6f} "
-                            f"grad_norm={float(grad_norm):.4f} "
-                            f"lr={scheduler.get_last_lr()[0]:.3e}"
+                        weight = components["weight_sum"].detach()
+                        weight = torch.where(
+                            weight > 0, weight, torch.ones_like(weight)
                         )
-                    if max_steps > 0 and global_step >= max_steps:
-                        stop_requested = True
-                        break
+                        for name, value in (
+                            ("loss", loss.detach()),
+                            ("bce", components["bce"].detach()),
+                            ("mse", components["mse"].detach()),
+                        ):
+                            stat_sums[name] = stat_sums[name] + value * weight
+                            stat_weights[name] = stat_weights[name] + weight
+                        for name, value in (
+                            (
+                                "motion_gate_mean",
+                                components["motion_gate_mean"].detach(),
+                            ),
+                            (
+                                "appearance_gate_mean",
+                                components["appearance_gate_mean"].detach(),
+                            ),
+                            ("grad_norm", grad_norm.detach()),
+                        ):
+                            stat_sums[name] = stat_sums[name] + value
+                            stat_weights[name] = stat_weights[name] + 1.0
 
-                close_loader = getattr(loader_iter, "close", None)
-                if close_loader is not None:
-                    close_loader()
+                        if global_step % log_interval == 0 or global_step == 1:
+                            write_log(
+                                f"epoch={epoch} step={global_step} "
+                                f"loss={float(loss.detach()):.6f} "
+                                f"bce={float(components['bce'].detach()):.6f} "
+                                f"mse={float(components['mse'].detach()):.6f} "
+                                f"grad_norm={float(grad_norm):.4f} "
+                                f"lr={scheduler.get_last_lr()[0]:.3e}"
+                            )
+                        if max_steps > 0 and global_step >= max_steps:
+                            stop_requested = True
+                            break
+
+                finally:
+                    close_loader = getattr(loader_iter, "close", None)
+                    if close_loader is not None:
+                        close_loader()
 
                 metrics = {}
                 for name in stat_names:

@@ -146,17 +146,32 @@ epoch; `metrics.jsonl` records `samples_per_second`, `sequence_load_count` and
 
 ### Prepared next-round commands (paused until review)
 
-MOT20 full-shard timing (one shard of the old recipe, new experimental dir):
+MOT20 single-shard timing (first shard = 262,271 samples / 257 batches).
+`--max-steps 257` stops after the first shard; it also changes the LR schedule
+of this timing run, so these weights are not used for formal resume.  Both
+paths share the same sampler (`sqrt-size`, batch 1024, seed 42) and the same
+`--profile` timing, with independent output directories:
 
 ```bash
 ./.venv/bin/python -m shutrack.cli train \
   --dataset-dir outputs/agentguard/train_data/MOT20 \
-  --checkpoint-dir outputs/agentguard/experiments/shutrack_a_old_recipe_20261117/MOT20_shard_timing/checkpoints \
-  --device cuda --epochs 1 --batch-size 1024 --num-workers 0 \
+  --checkpoint-dir outputs/agentguard/experiments/shutrack_a_old_recipe_20261117/MOT20_shard_timing_batch/checkpoints \
+  --device cuda --epochs 4 --batch-size 1024 --num-workers 0 \
   --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 --grad-clip 1.0 --seed 42 \
   --memory-shards 4 --shard-cycles 1 --epochs-per-shard 1 \
   --sequence-sampling sqrt-size --competition on \
-  --data-loader batch --prefetch 2 --profile
+  --data-loader batch --prefetch 2 --profile --max-steps 257
+```
+
+```bash
+./.venv/bin/python -m shutrack.cli train \
+  --dataset-dir outputs/agentguard/train_data/MOT20 \
+  --checkpoint-dir outputs/agentguard/experiments/shutrack_a_old_recipe_20261117/MOT20_shard_timing_items/checkpoints \
+  --device cuda --epochs 4 --batch-size 1024 --num-workers 4 \
+  --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 --grad-clip 1.0 --seed 42 \
+  --memory-shards 4 --shard-cycles 1 --epochs-per-shard 1 \
+  --sequence-sampling sqrt-size --competition on \
+  --data-loader items --profile --max-steps 257
 ```
 
 MOT17 continuation from the paused epoch-24 checkpoint (same schedule, no
@@ -174,10 +189,19 @@ MOT17 continuation from the paused epoch-24 checkpoint (same schedule, no
   --data-loader batch --prefetch 2
 ```
 
-SportsMOT from scratch uses the same command shape with
-`--epochs 20 --batch-size 1024 --num-workers 0 --memory-shards 1
---shard-cycles 1 --epochs-per-shard 20 --sequence-sampling sample-proportional`
-and a new `SportsMOT/checkpoints` directory.
+SportsMOT from scratch (200 shard-epochs = 50 full passes; recipe from the
+paused `plan.json`):
+
+```bash
+./.venv/bin/python -m shutrack.cli train \
+  --dataset-dir outputs/agentguard/train_data/SportsMOT \
+  --checkpoint-dir outputs/agentguard/experiments/shutrack_a_old_recipe_20261117/SportsMOT/checkpoints \
+  --device cuda --epochs 200 --batch-size 1024 --num-workers 4 \
+  --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 --grad-clip 1.0 --seed 42 \
+  --memory-shards 4 --shard-cycles 50 --epochs-per-shard 1 \
+  --sequence-sampling sample-proportional --competition on \
+  --data-loader batch --prefetch 2
+```
 
 Raw evaluation (explicit full sequence list, mmap detection cache, result
 directory prepared under `outputs/agentguard/eval_results/shutrack_a_opt_20261117/`):
@@ -222,8 +246,10 @@ With competition token:
   --seed 42 --competition on
 ```
 
-`--epochs` counts **full dataset passes**.  MOT20/SportsMOT formal runs use 20
-full passes to match the old `5×1×20` / `10×1×20` effective budgets.
+`--epochs` is the number of schedule epochs.  With the shard sampler it must
+equal `memory_shards × shard_cycles × epochs_per_shard`: MOT20 uses
+4×25×1 = 100 shard-epochs (25 full passes), SportsMOT uses 4×50×1 = 200
+shard-epochs (50 full passes), and MOT17 uses 1×1×50 = 50 full passes.
 
 Training writes only `last.pt`, `best.pt`, `metrics.jsonl`, `training.log` and
 `training_summary.json`.  A run refuses to reuse an existing checkpoint

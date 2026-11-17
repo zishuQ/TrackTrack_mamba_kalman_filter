@@ -115,7 +115,7 @@ class ShutrackRuntime:
         self._detection_boxes: dict[int, np.ndarray] = {}
         self._pool_indices: np.ndarray | None = None
         self._pool_boxes: np.ndarray | None = None
-        self._overlap_cache: dict[int, np.ndarray] = {}
+        self._overlap_cache: dict[tuple[tuple[int, ...], int], np.ndarray] = {}
         # The Tracker's unmatched-event path checks this attribute before
         # populating legacy TrackEvent features. SHUTrack builds its own
         # evidence and intentionally has no legacy feature builder.
@@ -226,7 +226,14 @@ class ShutrackRuntime:
         column = int(detection_col)
         if detection_indices.size == 0 or column < 0 or column >= detection_indices.size:
             return None
-        cached = self._overlap_cache.get(column)
+        # The candidate pool may change within one frame (mature-track
+        # association vs the early-enable New path), so the cache key must
+        # include the ordered detection indices, not just the column.
+        cache_key = (
+            tuple(int(index) for index in detection_indices.tolist()),
+            column,
+        )
+        cached = self._overlap_cache.get(cache_key)
         if cached is not None:
             return cached
         if self._pool_boxes is not None and np.array_equal(
@@ -242,7 +249,7 @@ class ShutrackRuntime:
                 boxes.append(box)
             pool = np.stack(boxes, axis=0)
         row = detection_overlap_row(pool[column], pool, column)
-        self._overlap_cache[column] = row
+        self._overlap_cache[cache_key] = row
         return row
 
     # ------------------------------------------------------------------
