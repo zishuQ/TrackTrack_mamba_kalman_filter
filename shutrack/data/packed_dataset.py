@@ -22,9 +22,10 @@ from __future__ import annotations
 import bisect
 import json
 import mmap
+import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -36,9 +37,12 @@ from shutrack.features.core import build_competition, build_evidence
 from shutrack.features.windows import WindowArrays, build_window
 from shutrack.schema import (
     COMPETITION_DIM,
+    COMPETITION_SCALAR_INDICES,
     CONTEXT_SIZE,
     EVIDENCE_DIM,
+    EVIDENCE_SCALAR_INDICES,
     FEATURE_SCHEMA_VERSION,
+    HISTORY_SIZE,
     LEGACY_SCALAR_DIM,
 )
 
@@ -122,6 +126,19 @@ class PackedShutrackDataset(Dataset):
         self._sequence_cache_size = max(1, int(sequence_cache_size))
         self._cache: OrderedDict[int, dict[str, Any]] = OrderedDict()
         self.sequence_load_count = 0
+        # Worker processes each hold their own dataset copy; the trainer passes
+        # a shared counter so loads in workers are counted too.
+        self._shared_load_counter = None
+        self._load_lock = threading.Lock()
+
+    def set_shared_load_counter(self, counter: Any) -> None:
+        self._shared_load_counter = counter
+
+    def total_sequence_loads(self) -> int:
+        shared = 0
+        if self._shared_load_counter is not None:
+            shared = int(self._shared_load_counter.value)
+        return int(self.sequence_load_count) + shared
 
     @property
     def sample_boundaries(self) -> tuple[int, ...]:
@@ -164,66 +181,76 @@ class PackedShutrackDataset(Dataset):
     # Sequence cache
     # ------------------------------------------------------------------
     def _load_sequence(self, sequence_position: int) -> dict[str, Any]:
-        cached = self._cache.pop(sequence_position, None)
-        if cached is not None:
+        with self._load_lock:
+            cached = self._cache.pop(sequence_position, None)
+            if cached is not None:
+                self._cache[sequence_position] = cached
+                return cached
+
+            sequence = self.sequences[sequence_position]
+            sequence_dir = self.dataset_dir / str(sequence)
+            data_path = sequence_dir / "data.pt"
+            if not data_path.is_file():
+                raise FileNotFoundError(f"packed sequence data not found: {data_path}")
+            if self._shared_load_counter is not None:
+                with self._shared_load_counter.get_lock():
+                    self._shared_load_counter.value += 1
+            else:
+                self.sequence_load_count += 1
+            try:
+                packed = torch.load(
+                    data_path, map_location="cpu", weights_only=False, mmap=True
+                )
+            except (RuntimeError, TypeError, ValueError):
+                packed = torch.load(data_path, map_location="cpu", weights_only=False)
+            if not isinstance(packed, dict) or not isinstance(packed.get("arrays"), dict):
+                raise ValueError(f"invalid packed sequence payload: {data_path}")
+            arrays_raw = packed["arrays"]
+            missing = [name for name in _REQUIRED_PACKED_ARRAYS if name not in arrays_raw]
+            if missing:
+                raise ValueError(f"packed sequence {sequence} missing arrays: {missing}")
+            arrays: dict[str, np.ndarray] = {}
+            for name in _REQUIRED_PACKED_ARRAYS:
+                value = arrays_raw[name]
+                arrays[name] = (
+                    value.numpy() if isinstance(value, torch.Tensor) else np.asarray(value)
+                )
+
+            expected_samples = int(self._sequence_counts[sequence_position])
+            if int(arrays["event_indices"].shape[0]) != expected_samples:
+                raise ValueError(
+                    f"packed sample count mismatch for {sequence}: "
+                    f"{arrays['event_indices'].shape[0]} != {expected_samples}"
+                )
+            if int(arrays["event_indices"].shape[1]) != CONTEXT_SIZE:
+                raise ValueError(
+                    f"packed context mismatch for {sequence}: "
+                    f"{arrays['event_indices'].shape[1]} != {CONTEXT_SIZE}"
+                )
+            timeline_count = int(arrays["timeline_scalar_feats"].shape[0])
+            if arrays["timeline_scalar_feats"].shape[1] != LEGACY_SCALAR_DIM:
+                raise ValueError(f"packed scalar dimension mismatch for {sequence}")
+
+            reid_path = sequence_dir / str(
+                self.metadata.get("reid_feature_file", "reid_features.npy")
+            )
+            if not reid_path.is_file():
+                raise FileNotFoundError(f"packed ReID cache not found: {reid_path}")
+            reid_features = np.load(reid_path, mmap_mode="r", allow_pickle=False)
+            if reid_features.shape != (timeline_count, 2, self.reid_dim):
+                raise ValueError(
+                    f"packed ReID shape mismatch in {reid_path}: "
+                    f"{reid_features.shape} != {(timeline_count, 2, self.reid_dim)}"
+                )
+
+            cached = {"arrays": arrays, "reid_features": reid_features, "packed": packed}
             self._cache[sequence_position] = cached
+            while len(self._cache) > self._sequence_cache_size:
+                _, evicted = self._cache.popitem(last=False)
+                mapped = getattr(evicted.get("reid_features"), "_mmap", None)
+                if mapped is not None:
+                    mapped.close()
             return cached
-
-        sequence = self.sequences[sequence_position]
-        sequence_dir = self.dataset_dir / str(sequence)
-        data_path = sequence_dir / "data.pt"
-        if not data_path.is_file():
-            raise FileNotFoundError(f"packed sequence data not found: {data_path}")
-        self.sequence_load_count += 1
-        packed = torch.load(data_path, map_location="cpu", weights_only=False)
-        if not isinstance(packed, dict) or not isinstance(packed.get("arrays"), dict):
-            raise ValueError(f"invalid packed sequence payload: {data_path}")
-        arrays_raw = packed["arrays"]
-        missing = [name for name in _REQUIRED_PACKED_ARRAYS if name not in arrays_raw]
-        if missing:
-            raise ValueError(f"packed sequence {sequence} missing arrays: {missing}")
-        arrays: dict[str, np.ndarray] = {}
-        for name in _REQUIRED_PACKED_ARRAYS:
-            value = arrays_raw[name]
-            arrays[name] = (
-                value.numpy() if isinstance(value, torch.Tensor) else np.asarray(value)
-            )
-
-        expected_samples = int(self._sequence_counts[sequence_position])
-        if int(arrays["event_indices"].shape[0]) != expected_samples:
-            raise ValueError(
-                f"packed sample count mismatch for {sequence}: "
-                f"{arrays['event_indices'].shape[0]} != {expected_samples}"
-            )
-        if int(arrays["event_indices"].shape[1]) != CONTEXT_SIZE:
-            raise ValueError(
-                f"packed context mismatch for {sequence}: "
-                f"{arrays['event_indices'].shape[1]} != {CONTEXT_SIZE}"
-            )
-        timeline_count = int(arrays["timeline_scalar_feats"].shape[0])
-        if arrays["timeline_scalar_feats"].shape[1] != LEGACY_SCALAR_DIM:
-            raise ValueError(f"packed scalar dimension mismatch for {sequence}")
-
-        reid_path = sequence_dir / str(
-            self.metadata.get("reid_feature_file", "reid_features.npy")
-        )
-        if not reid_path.is_file():
-            raise FileNotFoundError(f"packed ReID cache not found: {reid_path}")
-        reid_features = np.load(reid_path, mmap_mode="r", allow_pickle=False)
-        if reid_features.shape != (timeline_count, 2, self.reid_dim):
-            raise ValueError(
-                f"packed ReID shape mismatch in {reid_path}: "
-                f"{reid_features.shape} != {(timeline_count, 2, self.reid_dim)}"
-            )
-
-        cached = {"arrays": arrays, "reid_features": reid_features}
-        self._cache[sequence_position] = cached
-        while len(self._cache) > self._sequence_cache_size:
-            _, evicted = self._cache.popitem(last=False)
-            mapped = getattr(evicted.get("reid_features"), "_mmap", None)
-            if mapped is not None:
-                mapped.close()
-        return cached
 
     def close(self) -> None:
         for evicted in self._cache.values():
@@ -382,6 +409,155 @@ class PackedShutrackDataset(Dataset):
             "segment_id": segment_id,
             "local_index": int(local_index),
         }
+
+    def batch(self, indices: Sequence[int]) -> dict[str, Any]:
+        """Vectorised gather for a whole batch of packed sample indices.
+
+        Groups the batch by sequence, gathers the per-sample windows with
+        numpy fancy indexing on the mmap-backed arrays and scatters the rows
+        back into the original sample order (duplicates preserved).  The
+        result is tensor-for-tensor identical to stacking ``__getitem__``.
+        """
+
+        index_array = np.asarray(indices, dtype=np.int64).reshape(-1)
+        count = int(index_array.size)
+        if count == 0:
+            raise ValueError("batch must contain at least one sample index")
+        if int(index_array.min()) < 0 or int(index_array.max()) >= len(self):
+            raise IndexError("batch contains out-of-range sample indices")
+        boundaries = np.asarray(self._boundaries, dtype=np.int64)
+        sequence_positions = np.searchsorted(boundaries, index_array, side="right")
+        starts = np.zeros(count, dtype=np.int64)
+        non_first = sequence_positions > 0
+        starts[non_first] = boundaries[sequence_positions[non_first] - 1]
+        local_indices = index_array - starts
+
+        history = HISTORY_SIZE
+        reid_dim = self.reid_dim
+        out = {
+            "history_evidence": np.zeros((count, history, EVIDENCE_DIM), np.float32),
+            "history_track": np.zeros((count, history, reid_dim), np.float32),
+            "history_detection": np.zeros((count, history, reid_dim), np.float32),
+            "history_mask": np.ones((count, history), np.bool_),
+            "history_has_detection": np.zeros((count, history), np.bool_),
+            "history_reset": np.zeros((count, history), np.bool_),
+            "current_evidence": np.zeros((count, EVIDENCE_DIM), np.float32),
+            "current_competition": np.zeros((count, COMPETITION_DIM), np.float32),
+            "current_track": np.zeros((count, reid_dim), np.float32),
+            "current_detection": np.zeros((count, reid_dim), np.float32),
+            "current_has_detection": np.zeros((count,), np.bool_),
+            "safe_gate_target": np.zeros((count, 2), np.float32),
+            "valid_channels": np.zeros((count, 2), np.bool_),
+            "sample_weight": np.zeros((count,), np.float32),
+        }
+        track_ids = np.zeros(count, np.int64)
+        segment_ids = np.zeros(count, np.int64)
+        local_out = np.zeros(count, np.int64)
+        sequences: list[str] = [""] * count
+
+        for position in np.unique(sequence_positions):
+            rows = np.nonzero(sequence_positions == position)[0]
+            cached = self._load_sequence(int(position))
+            arrays = cached["arrays"]
+            reid_features = cached["reid_features"]
+            sequence = self.sequences[int(position)]
+            previous = int(boundaries[position - 1]) if position > 0 else 0
+            local = local_indices[rows]
+            event_indices = np.asarray(
+                arrays["event_indices"][local], dtype=np.int64
+            )
+
+            def gather(timeline_position: int):
+                timeline_index = event_indices[:, timeline_position]
+                valid = timeline_index >= 0
+                safe_index = np.where(valid, timeline_index, 0)
+                scalar = np.asarray(
+                    arrays["timeline_scalar_feats"][safe_index], dtype=np.float64
+                )
+                has_detection = (
+                    np.asarray(
+                        arrays["timeline_has_detection"][safe_index], dtype=np.bool_
+                    )
+                    & valid
+                )
+                track = np.asarray(
+                    reid_features[safe_index, 0, :], dtype=np.float32
+                )
+                detection = np.asarray(
+                    reid_features[safe_index, 1, :], dtype=np.float32
+                )
+                track[~valid] = 0.0
+                detection[~has_detection] = 0.0
+                evidence = np.concatenate(
+                    [
+                        scalar[:, EVIDENCE_SCALAR_INDICES],
+                        has_detection[:, None].astype(np.float64),
+                    ],
+                    axis=1,
+                ).astype(np.float32)
+                competition = (
+                    np.asarray(
+                        scalar[:, COMPETITION_SCALAR_INDICES], dtype=np.float32
+                    )
+                    if self.competition_enabled
+                    else np.zeros((safe_index.size, COMPETITION_DIM), np.float32)
+                )
+                evidence[~valid] = 0.0
+                competition[~valid] = 0.0
+                return evidence, competition, track, detection, has_detection, valid
+
+            for history_position in range(history):
+                evidence, _, track, detection, has_detection, valid = gather(
+                    history_position
+                )
+                out["history_evidence"][rows, history_position] = evidence
+                out["history_track"][rows, history_position] = track
+                out["history_detection"][rows, history_position] = detection
+                out["history_has_detection"][rows, history_position] = has_detection
+                out["history_mask"][rows, history_position] = ~valid
+
+            (
+                current_evidence,
+                current_competition,
+                current_track,
+                current_detection,
+                current_has_detection,
+                current_valid,
+            ) = gather(history)
+            if not bool((current_valid & current_has_detection).all()):
+                bad = int((~(current_valid & current_has_detection)).sum())
+                raise ValueError(
+                    f"{bad} packed samples in {sequence} point to a missing or "
+                    "unmatched current event"
+                )
+            out["current_evidence"][rows] = current_evidence
+            out["current_competition"][rows] = current_competition
+            out["current_track"][rows] = current_track
+            out["current_detection"][rows] = current_detection
+            out["current_has_detection"][rows] = current_has_detection
+            out["safe_gate_target"][rows] = np.asarray(
+                arrays["safe_gate_target"][local], dtype=np.float32
+            )
+            out["valid_channels"][rows] = np.asarray(
+                arrays["valid_channels"][local], dtype=np.bool_
+            ).reshape(-1, 2)
+            out["sample_weight"][rows] = np.asarray(
+                arrays["sample_weight"][local], dtype=np.float32
+            ).reshape(-1)
+            track_ids[rows] = np.asarray(arrays["track_ids"][local], dtype=np.int64)
+            segment_ids[rows] = np.asarray(
+                arrays["segment_ids"][local], dtype=np.int64
+            )
+            local_out[rows] = local
+            for row in rows.tolist():
+                sequences[row] = str(sequence)
+
+        result = {key: torch.from_numpy(value) for key, value in out.items()}
+        result["track_id"] = [int(value) for value in track_ids]
+        result["segment_id"] = [int(value) for value in segment_ids]
+        result["sequence"] = sequences
+        result["local_index"] = [int(value) for value in local_out]
+        return result
 
     @staticmethod
     def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:

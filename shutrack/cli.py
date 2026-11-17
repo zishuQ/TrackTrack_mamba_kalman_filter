@@ -57,6 +57,34 @@ def _add_train_arguments(parser: argparse.ArgumentParser) -> None:
         help="Train with the association-competition branch or the lean dual-evidence variant",
     )
     parser.add_argument("--resume", default="")
+    parser.add_argument(
+        "--init-checkpoint",
+        default="",
+        help="Initialize model weights from an A checkpoint with a fresh optimizer",
+    )
+    parser.add_argument("--memory-shards", type=int, default=TRAIN_DEFAULTS["memory_shards"])
+    parser.add_argument("--shard-cycles", type=int, default=TRAIN_DEFAULTS["shard_cycles"])
+    parser.add_argument("--epochs-per-shard", type=int, default=TRAIN_DEFAULTS["epochs_per_shard"])
+    parser.add_argument(
+        "--sequence-sampling",
+        choices=["sample-proportional", "sqrt-size"],
+        default=TRAIN_DEFAULTS["sequence_sampling"],
+    )
+    parser.add_argument(
+        "--data-loader",
+        choices=["batch", "items"],
+        default=TRAIN_DEFAULTS["data_loader"],
+        help="batch = vectorised per-batch gather; items = legacy per-sample path",
+    )
+    parser.add_argument(
+        "--prefetch", type=int, default=TRAIN_DEFAULTS["prefetch"]
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        default=TRAIN_DEFAULTS["profile"],
+        help="Synchronize per batch to split data/H2D/compute timings",
+    )
     parser.add_argument("--d-model", type=int, default=TRAIN_DEFAULTS["d_model"])
     parser.add_argument("--n-heads", type=int, default=TRAIN_DEFAULTS["n_heads"])
     parser.add_argument("--hce-layers", type=int, default=TRAIN_DEFAULTS["hce_layers"])
@@ -94,6 +122,14 @@ def _train_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
             "max_samples",
             "log_interval",
             "resume",
+            "init_checkpoint",
+            "memory_shards",
+            "shard_cycles",
+            "epochs_per_shard",
+            "sequence_sampling",
+            "data_loader",
+            "prefetch",
+            "profile",
             "d_model",
             "n_heads",
             "hce_layers",

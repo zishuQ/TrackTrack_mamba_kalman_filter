@@ -11,10 +11,13 @@ epoch (the LRU only has to hold one sequence at a time).
 from __future__ import annotations
 
 import math
-from typing import Iterator, Sequence
+from typing import TYPE_CHECKING, Any, Iterator, Mapping, Sequence
 
 import numpy as np
 from torch.utils.data import Sampler
+
+if TYPE_CHECKING:
+    from shutrack.data.packed_dataset import PackedShutrackDataset
 
 
 class SequenceBatchSampler(Sampler[list[int]]):
@@ -77,4 +80,79 @@ class SequenceBatchSampler(Sampler[list[int]]):
         )
 
 
-__all__ = ["SequenceBatchSampler"]
+class ShardBatchSampler(Sampler[list[int]]):
+    """Use AgentGuard's shard ranges and quotas with sequence-local I/O."""
+
+    def __init__(
+        self, dataset: PackedShutrackDataset, config: Mapping[str, Any]
+    ) -> None:
+        from agentguard.training.train_iwg_rg_cma import build_memory_shard_schedule
+
+        self.schedule = build_memory_shard_schedule(dataset, dict(config))
+        self.batch_size = int(config["batch_size"])
+        if self.batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        self.seed = int(config["seed"])
+        self.epoch = 1
+        self.steps_per_epoch = [
+            math.ceil(int(phase["samples"]) / self.batch_size)
+            for phase in self.schedule["phases"]
+            for _ in range(int(phase["epochs"]))
+        ]
+        if any(steps == 0 for steps in self.steps_per_epoch):
+            raise ValueError("a training shard contains no samples")
+
+    @property
+    def phase(self) -> dict[str, Any]:
+        return self.schedule["phases"][
+            (self.epoch - 1) // self.schedule["epochs_per_shard"]
+        ]
+
+    def set_epoch(self, epoch: int) -> None:
+        if not 1 <= epoch <= len(self.steps_per_epoch):
+            raise ValueError(f"epoch {epoch} is outside the training schedule")
+        self.epoch = epoch
+
+    def __len__(self) -> int:
+        return self.steps_per_epoch[self.epoch - 1]
+
+    def __iter__(self) -> Iterator[list[int]]:
+        phase = self.phase
+        ranges = [item for item in phase["ranges"] if item["samples"] > 0]
+        rng = np.random.RandomState(self.seed + self.epoch)
+        sequence_order = rng.permutation(len(ranges))
+        if self.schedule["sequence_sampling_replacement"]:
+            from agentguard.training.train_iwg_rg_cma import SequenceSqrtSampler
+
+            phase_seed = (
+                self.seed
+                + (phase["cycle"] - 1) * self.schedule["memory_shards"]
+                + phase["shard"] - 1
+            )
+            source = SequenceSqrtSampler(
+                ranges,
+                phase["sequence_sampling_target_counts"],
+                num_samples=phase["samples"],
+                seed=phase_seed,
+            )
+            source.set_epoch(self.epoch)
+            indices = np.fromiter(source, dtype=np.int64, count=phase["samples"])
+            ends = np.cumsum([item["samples"] for item in ranges])
+            starts = np.r_[0, ends[:-1]]
+            groups = np.searchsorted(ends, indices, side="right")
+            # Retain the sampled rows and repeats, grouping by sequence for mmap reuse.
+            ordered = [
+                indices[groups == i] - starts[i] + ranges[i]["global_start"]
+                for i in sequence_order
+            ]
+        else:
+            ordered = [
+                rng.permutation(ranges[i]["samples"]) + ranges[i]["global_start"]
+                for i in sequence_order
+            ]
+        indices = np.concatenate(ordered)
+        for start in range(0, len(indices), self.batch_size):
+            yield indices[start : start + self.batch_size].tolist()
+
+
+__all__ = ["SequenceBatchSampler", "ShardBatchSampler"]

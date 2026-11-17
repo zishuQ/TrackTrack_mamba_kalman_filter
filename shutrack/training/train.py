@@ -14,8 +14,9 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from shutrack.data.batch_loader import BatchIndexLoader
 from shutrack.data.packed_dataset import PackedShutrackDataset
-from shutrack.data.sampling import SequenceBatchSampler
+from shutrack.data.sampling import SequenceBatchSampler, ShardBatchSampler
 from shutrack.models.shutrack import ShutrackV2Config, ShutrackV2Model
 from shutrack.schema import ARCHITECTURE_NAME, ARCHITECTURE_VERSION
 from shutrack.training.checkpoint import (
@@ -45,6 +46,11 @@ TRAIN_DEFAULTS: dict[str, Any] = {
     "log_interval": 20,
     "competition_enabled": True,
     "resume": "",
+    "init_checkpoint": "",
+    "memory_shards": 1,
+    "shard_cycles": 1,
+    "epochs_per_shard": 0,
+    "sequence_sampling": "sample-proportional",
     "d_model": 128,
     "n_heads": 4,
     "hce_layers": 2,
@@ -52,6 +58,9 @@ TRAIN_DEFAULTS: dict[str, Any] = {
     "dropout": 0.0,
     "appearance_proj_dim": 64,
     "sequence_cache_size": 2,
+    "data_loader": "batch",
+    "prefetch": 2,
+    "profile": False,
 }
 
 MODEL_INPUT_KEYS = (
@@ -133,6 +142,13 @@ def _resolved_warmup_steps(config: Mapping[str, Any], steps_per_epoch: int, tota
         return min(explicit, total_steps)
     warmup = int(config.get("warmup_epochs", 1)) * max(1, steps_per_epoch)
     return min(warmup, max(1, total_steps // 10))
+
+
+def _total_sequence_loads(dataset: PackedShutrackDataset, counter: Any) -> int:
+    """Loads made in this process plus loads made by DataLoader workers."""
+
+    shared = int(counter.value) if counter is not None else 0
+    return int(dataset.sequence_load_count) + shared
 
 
 def _rss_mb() -> float:
@@ -263,6 +279,12 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
     last_path = checkpoint_dir / "last.pt"
     best_path = checkpoint_dir / "best.pt"
     resume_path = str(resolved.get("resume", "")).strip()
+    init_path = str(resolved.get("init_checkpoint", "")).strip()
+    if resume_path and init_path:
+        raise ValueError("--resume and --init-checkpoint are mutually exclusive")
+    epochs = int(resolved["epochs"])
+    if epochs < 1:
+        raise ValueError("epochs must be positive")
     if last_path.exists() and not resume_path:
         raise FileExistsError(
             "SHUTrack formal training requires a new checkpoint directory; "
@@ -277,21 +299,43 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
     dataset = build_dataset(resolved)
     try:
         model = build_model(dataset, resolved).to(device)
+        initialization = {"mode": "random"}
+        if init_path:
+            source_model, source = load_shutrack_checkpoint(init_path, map_location="cpu")
+            if source_model.config.as_dict() != model.config.as_dict():
+                raise ValueError("--init-checkpoint model_config does not match SHUTrack A")
+            model.load_state_dict(source_model.state_dict(), strict=True)
+            initialization = {
+                "mode": "weights_only",
+                "checkpoint": str(Path(init_path).resolve()),
+                "source_epoch": int(source["epoch"]),
+                "source_dataset": source["dataset"]["dataset"],
+            }
+            del source_model, source
         optimizer = torch.optim.AdamW(
             [parameter for parameter in model.parameters() if parameter.requires_grad],
             lr=float(resolved["lr"]),
             weight_decay=float(resolved["weight_decay"]),
         )
-        sampler = SequenceBatchSampler(
-            dataset.sample_boundaries,
-            int(resolved["batch_size"]),
-            total_samples=len(dataset),
-            seed=int(resolved["seed"]),
+        schedule_keys = (
+            "memory_shards", "shard_cycles", "epochs_per_shard", "sequence_sampling"
         )
-        steps_per_epoch = max(1, len(sampler))
+        uses_shards = any(resolved[key] != TRAIN_DEFAULTS[key] for key in schedule_keys)
+        if uses_shards:
+            sampler = ShardBatchSampler(dataset, resolved)
+            epoch_steps = sampler.steps_per_epoch
+        else:
+            sampler = SequenceBatchSampler(
+                dataset.sample_boundaries,
+                int(resolved["batch_size"]),
+                total_samples=len(dataset),
+                seed=int(resolved["seed"]),
+            )
+            epoch_steps = [len(sampler)] * epochs
+        steps_per_epoch = max(1, epoch_steps[0])
         max_steps = int(resolved.get("max_steps", 0))
         total_steps = (
-            max_steps if max_steps > 0 else int(resolved["epochs"]) * steps_per_epoch
+            max_steps if max_steps > 0 else sum(epoch_steps)
         )
         warmup_steps = _resolved_warmup_steps(resolved, steps_per_epoch, total_steps)
         scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -311,6 +355,12 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                     f"{resume_path} does not contain one"
                 )
             _validate_resume_contract(checkpoint, model, dataset)
+            checkpoint_config = checkpoint.get("training_config", {})
+            if any(
+                resolved[key] != checkpoint_config.get(key, TRAIN_DEFAULTS[key])
+                for key in schedule_keys
+            ):
+                raise ValueError("SHUTrack resume sampling schedule mismatch")
             model.load_state_dict(resumed_model.state_dict(), strict=True)
             validate_checkpoint(checkpoint)
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -319,22 +369,43 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
             start_epoch = int(checkpoint.get("epoch", 0))
             global_step = int(checkpoint.get("global_step", 0))
             best_metric = float(checkpoint.get("best_metric", best_metric))
+            initialization = {"mode": "resume", "checkpoint": resume_path}
 
-        loader = DataLoader(
-            dataset,
-            batch_sampler=sampler,
-            num_workers=int(resolved["num_workers"]),
-            collate_fn=PackedShutrackDataset.collate_fn,
-            pin_memory=device.type == "cuda",
-            persistent_workers=False,
-        )
+        data_loader_mode = str(resolved.get("data_loader", "batch"))
+        if data_loader_mode not in ("batch", "items"):
+            raise ValueError(
+                f"data_loader must be 'batch' or 'items', got {data_loader_mode!r}"
+            )
+        profile = bool(resolved.get("profile", False))
+        worker_counter = None
+        if data_loader_mode == "batch":
+            loader = BatchIndexLoader(
+                dataset, sampler, prefetch=int(resolved.get("prefetch", 2))
+            )
+        else:
+            num_workers = int(resolved["num_workers"])
+            worker_init = None
+            if num_workers > 0:
+                worker_counter = torch.multiprocessing.Value("q", 0)
+
+                def worker_init(worker_id: int) -> None:  # noqa: ARG001
+                    dataset.set_shared_load_counter(worker_counter)
+
+            loader = DataLoader(
+                dataset,
+                batch_sampler=sampler,
+                num_workers=num_workers,
+                collate_fn=PackedShutrackDataset.collate_fn,
+                pin_memory=device.type == "cuda",
+                persistent_workers=uses_shards and num_workers > 0,
+                worker_init_fn=worker_init,
+            )
 
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         metrics_path = checkpoint_dir / "metrics.jsonl"
         training_log_path = checkpoint_dir / "training.log"
         summary_path = checkpoint_dir / "training_summary.json"
         started = time.time()
-        epochs = int(resolved["epochs"])
         log_interval = max(1, int(resolved["log_interval"]))
         stop_requested = max_steps > 0 and global_step >= max_steps
         last_epoch = start_epoch
@@ -353,9 +424,15 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
             write_log("SHUTrack v2 (HCE + RSC) training")
             if resume_path:
                 write_log(f"RESUME from {resume_path}")
+            elif init_path:
+                write_log("INIT " + json.dumps(initialization, sort_keys=True))
             write_log(f"architecture={ARCHITECTURE_NAME} version={ARCHITECTURE_VERSION}")
             write_log(f"dataset={dataset.dataset_dir}")
             write_log(f"device={device}")
+            write_log(
+                f"data_loader={data_loader_mode} prefetch={resolved.get('prefetch')} "
+                f"profile={profile}"
+            )
             write_log(f"parameters={json.dumps(model.parameter_report(), sort_keys=True)}")
             write_log(f"samples={len(dataset)} steps_per_epoch={steps_per_epoch}")
             write_log(f"total_steps={total_steps} warmup_steps={warmup_steps}")
@@ -373,27 +450,55 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                     break
                 model.train()
                 sampler.set_epoch(epoch)
-                accumulator = ScalarAccumulator()
+                if isinstance(sampler, ShardBatchSampler):
+                    phase = sampler.phase
+                    write_log(
+                        f"epoch={epoch} cycle={phase['cycle']} shard={phase['shard']} "
+                        f"planned_samples={phase['samples']} planned_batches={len(sampler)}"
+                    )
+                stat_names = (
+                    "loss",
+                    "bce",
+                    "mse",
+                    "motion_gate_mean",
+                    "appearance_gate_mean",
+                    "grad_norm",
+                )
+                stat_sums = {
+                    name: torch.zeros((), device=device) for name in stat_names
+                }
+                stat_weights = {
+                    name: torch.zeros((), device=device) for name in stat_names
+                }
                 epoch_started = time.time()
-                epoch_start_loads = dataset.sequence_load_count
+                epoch_start_loads = _total_sequence_loads(dataset, worker_counter)
                 epoch_samples = 0
                 data_seconds = 0.0
+                h2d_seconds = 0.0
                 compute_seconds = 0.0
                 epoch_batches = 0
                 loader_iter = iter(loader)
                 while True:
-                    data_started = time.perf_counter()
-                    try:
-                        batch = next(loader_iter)
-                    except StopIteration:
-                        break
-                    if device.type == "cuda":
-                        torch.cuda.synchronize(device)
-                    data_seconds += time.perf_counter() - data_started
+                    if profile:
+                        data_started = time.perf_counter()
+                        if device.type == "cuda":
+                            torch.cuda.synchronize(device)
+                        try:
+                            batch = next(loader_iter)
+                        except StopIteration:
+                            break
+                        data_seconds += time.perf_counter() - data_started
+                    else:
+                        try:
+                            batch = next(loader_iter)
+                        except StopIteration:
+                            break
+                    h2d_started = time.perf_counter()
+                    batch = _move_batch(batch, device)
+                    h2d_seconds += time.perf_counter() - h2d_started
                     compute_started = time.perf_counter()
                     epoch_batches += 1
                     epoch_samples += int(batch["safe_gate_target"].shape[0])
-                    batch = _move_batch(batch, device)
                     outputs = model(**_model_inputs(batch))
                     loss, components = gate_loss(outputs, batch)
                     if not torch.isfinite(loss):
@@ -409,34 +514,42 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                     optimizer.step()
                     scheduler.step()
                     global_step += 1
-                    if device.type == "cuda":
-                        torch.cuda.synchronize(device)
-                    compute_seconds += time.perf_counter() - compute_started
+                    if profile:
+                        if device.type == "cuda":
+                            torch.cuda.synchronize(device)
+                        compute_seconds += time.perf_counter() - compute_started
 
-                    weight = float(components["weight_sum"].detach().cpu())
-                    accumulator.add("loss", loss, weight if weight > 0 else 1.0)
-                    accumulator.add(
-                        "bce", components["bce"], weight if weight > 0 else 1.0
+                    weight = components["weight_sum"].detach()
+                    weight = torch.where(
+                        weight > 0, weight, torch.ones_like(weight)
                     )
-                    accumulator.add(
-                        "mse", components["mse"], weight if weight > 0 else 1.0
-                    )
-                    accumulator.add(
-                        "motion_gate_mean", components["motion_gate_mean"], 1.0
-                    )
-                    accumulator.add(
-                        "appearance_gate_mean",
-                        components["appearance_gate_mean"],
-                        1.0,
-                    )
-                    accumulator.add("grad_norm", grad_norm, 1.0)
+                    for name, value in (
+                        ("loss", loss.detach()),
+                        ("bce", components["bce"].detach()),
+                        ("mse", components["mse"].detach()),
+                    ):
+                        stat_sums[name] = stat_sums[name] + value * weight
+                        stat_weights[name] = stat_weights[name] + weight
+                    for name, value in (
+                        (
+                            "motion_gate_mean",
+                            components["motion_gate_mean"].detach(),
+                        ),
+                        (
+                            "appearance_gate_mean",
+                            components["appearance_gate_mean"].detach(),
+                        ),
+                        ("grad_norm", grad_norm.detach()),
+                    ):
+                        stat_sums[name] = stat_sums[name] + value
+                        stat_weights[name] = stat_weights[name] + 1.0
 
                     if global_step % log_interval == 0 or global_step == 1:
                         write_log(
                             f"epoch={epoch} step={global_step} "
-                            f"loss={float(loss.detach().cpu()):.6f} "
-                            f"bce={float(components['bce'].detach().cpu()):.6f} "
-                            f"mse={float(components['mse'].detach().cpu()):.6f} "
+                            f"loss={float(loss.detach()):.6f} "
+                            f"bce={float(components['bce'].detach()):.6f} "
+                            f"mse={float(components['mse'].detach()):.6f} "
                             f"grad_norm={float(grad_norm):.4f} "
                             f"lr={scheduler.get_last_lr()[0]:.3e}"
                         )
@@ -444,7 +557,20 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                         stop_requested = True
                         break
 
-                metrics = accumulator.summary()
+                close_loader = getattr(loader_iter, "close", None)
+                if close_loader is not None:
+                    close_loader()
+
+                metrics = {}
+                for name in stat_names:
+                    weight = stat_weights[name]
+                    safe = torch.where(
+                        weight > 0, weight, torch.ones_like(weight)
+                    )
+                    value = stat_sums[name] / safe
+                    metrics[name] = float(
+                        torch.where(weight > 0, value, value * 0.0).item()
+                    )
                 last_epoch = epoch
                 epoch_seconds = time.time() - epoch_started
                 cuda_allocated_peak, cuda_reserved_peak = _cuda_peak_mb()
@@ -458,10 +584,14 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                             epoch_samples / max(epoch_seconds, 1e-9)
                         ),
                         "data_read_seconds": float(data_seconds),
+                        "h2d_seconds": float(h2d_seconds),
                         "compute_seconds": float(compute_seconds),
                         "batches": int(epoch_batches),
+                        "profile": bool(profile),
+                        "data_loader": data_loader_mode,
                         "sequence_load_count": int(
-                            dataset.sequence_load_count - epoch_start_loads
+                            _total_sequence_loads(dataset, worker_counter)
+                            - epoch_start_loads
                         ),
                         "rss_mb": _rss_mb(),
                         "rss_peak_mb": _rss_peak_mb(),
@@ -536,13 +666,18 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
             "best_metric": float(best_metric),
             "best_metric_name": "training_loss",
             "elapsed_sec": float(time.time() - started),
-            "sequence_load_count": int(dataset.sequence_load_count),
+            "sequence_load_count": int(
+                _total_sequence_loads(dataset, worker_counter)
+            ),
+            "data_loader": data_loader_mode,
+            "profile": bool(profile),
             "parameter_counts": model.parameter_report(),
             "competition_enabled": bool(dataset.competition_enabled),
             "rss_peak_mb": _rss_peak_mb(),
             "cuda_peak_allocated_mb": _cuda_peak_mb()[0],
             "cuda_peak_reserved_mb": _cuda_peak_mb()[1],
             "training_config": dict(resolved),
+            "initialization": initialization,
         }
         summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
         return summary
