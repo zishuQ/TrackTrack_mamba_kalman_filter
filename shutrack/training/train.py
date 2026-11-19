@@ -15,7 +15,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from shutrack.data.packed_dataset import PackedShutrackDataset
-from shutrack.data.sampling import SequenceBatchSampler
+from shutrack.data.sampling import SequenceBatchSampler, ShardBatchSampler
 from shutrack.models.shutrack import ShutrackV2Config, ShutrackV2Model
 from shutrack.schema import ARCHITECTURE_NAME, ARCHITECTURE_VERSION
 from shutrack.training.checkpoint import (
@@ -45,6 +45,11 @@ TRAIN_DEFAULTS: dict[str, Any] = {
     "log_interval": 20,
     "competition_enabled": True,
     "resume": "",
+    "init_checkpoint": "",
+    "memory_shards": 1,
+    "shard_cycles": 1,
+    "epochs_per_shard": 0,
+    "sequence_sampling": "sample-proportional",
     "d_model": 128,
     "n_heads": 4,
     "hce_layers": 2,
@@ -263,6 +268,12 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
     last_path = checkpoint_dir / "last.pt"
     best_path = checkpoint_dir / "best.pt"
     resume_path = str(resolved.get("resume", "")).strip()
+    init_path = str(resolved.get("init_checkpoint", "")).strip()
+    if resume_path and init_path:
+        raise ValueError("--resume and --init-checkpoint are mutually exclusive")
+    epochs = int(resolved["epochs"])
+    if epochs < 1:
+        raise ValueError("epochs must be positive")
     if last_path.exists() and not resume_path:
         raise FileExistsError(
             "SHUTrack formal training requires a new checkpoint directory; "
@@ -277,21 +288,43 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
     dataset = build_dataset(resolved)
     try:
         model = build_model(dataset, resolved).to(device)
+        initialization = {"mode": "random"}
+        if init_path:
+            source_model, source = load_shutrack_checkpoint(init_path, map_location="cpu")
+            if source_model.config.as_dict() != model.config.as_dict():
+                raise ValueError("--init-checkpoint model_config does not match SHUTrack A")
+            model.load_state_dict(source_model.state_dict(), strict=True)
+            initialization = {
+                "mode": "weights_only",
+                "checkpoint": str(Path(init_path).resolve()),
+                "source_epoch": int(source["epoch"]),
+                "source_dataset": source["dataset"]["dataset"],
+            }
+            del source_model, source
         optimizer = torch.optim.AdamW(
             [parameter for parameter in model.parameters() if parameter.requires_grad],
             lr=float(resolved["lr"]),
             weight_decay=float(resolved["weight_decay"]),
         )
-        sampler = SequenceBatchSampler(
-            dataset.sample_boundaries,
-            int(resolved["batch_size"]),
-            total_samples=len(dataset),
-            seed=int(resolved["seed"]),
+        schedule_keys = (
+            "memory_shards", "shard_cycles", "epochs_per_shard", "sequence_sampling"
         )
-        steps_per_epoch = max(1, len(sampler))
+        uses_shards = any(resolved[key] != TRAIN_DEFAULTS[key] for key in schedule_keys)
+        if uses_shards:
+            sampler = ShardBatchSampler(dataset, resolved)
+            epoch_steps = sampler.steps_per_epoch
+        else:
+            sampler = SequenceBatchSampler(
+                dataset.sample_boundaries,
+                int(resolved["batch_size"]),
+                total_samples=len(dataset),
+                seed=int(resolved["seed"]),
+            )
+            epoch_steps = [len(sampler)] * epochs
+        steps_per_epoch = max(1, epoch_steps[0])
         max_steps = int(resolved.get("max_steps", 0))
         total_steps = (
-            max_steps if max_steps > 0 else int(resolved["epochs"]) * steps_per_epoch
+            max_steps if max_steps > 0 else sum(epoch_steps)
         )
         warmup_steps = _resolved_warmup_steps(resolved, steps_per_epoch, total_steps)
         scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -311,6 +344,12 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                     f"{resume_path} does not contain one"
                 )
             _validate_resume_contract(checkpoint, model, dataset)
+            checkpoint_config = checkpoint.get("training_config", {})
+            if any(
+                resolved[key] != checkpoint_config.get(key, TRAIN_DEFAULTS[key])
+                for key in schedule_keys
+            ):
+                raise ValueError("SHUTrack resume sampling schedule mismatch")
             model.load_state_dict(resumed_model.state_dict(), strict=True)
             validate_checkpoint(checkpoint)
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -319,6 +358,7 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
             start_epoch = int(checkpoint.get("epoch", 0))
             global_step = int(checkpoint.get("global_step", 0))
             best_metric = float(checkpoint.get("best_metric", best_metric))
+            initialization = {"mode": "resume", "checkpoint": resume_path}
 
         loader = DataLoader(
             dataset,
@@ -326,7 +366,7 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
             num_workers=int(resolved["num_workers"]),
             collate_fn=PackedShutrackDataset.collate_fn,
             pin_memory=device.type == "cuda",
-            persistent_workers=False,
+            persistent_workers=uses_shards and int(resolved["num_workers"]) > 0,
         )
 
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -334,7 +374,6 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
         training_log_path = checkpoint_dir / "training.log"
         summary_path = checkpoint_dir / "training_summary.json"
         started = time.time()
-        epochs = int(resolved["epochs"])
         log_interval = max(1, int(resolved["log_interval"]))
         stop_requested = max_steps > 0 and global_step >= max_steps
         last_epoch = start_epoch
@@ -353,6 +392,8 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
             write_log("SHUTrack v2 (HCE + RSC) training")
             if resume_path:
                 write_log(f"RESUME from {resume_path}")
+            elif init_path:
+                write_log("INIT " + json.dumps(initialization, sort_keys=True))
             write_log(f"architecture={ARCHITECTURE_NAME} version={ARCHITECTURE_VERSION}")
             write_log(f"dataset={dataset.dataset_dir}")
             write_log(f"device={device}")
@@ -373,6 +414,12 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                     break
                 model.train()
                 sampler.set_epoch(epoch)
+                if isinstance(sampler, ShardBatchSampler):
+                    phase = sampler.phase
+                    write_log(
+                        f"epoch={epoch} cycle={phase['cycle']} shard={phase['shard']} "
+                        f"planned_samples={phase['samples']} planned_batches={len(sampler)}"
+                    )
                 accumulator = ScalarAccumulator()
                 epoch_started = time.time()
                 epoch_start_loads = dataset.sequence_load_count
@@ -543,6 +590,7 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
             "cuda_peak_allocated_mb": _cuda_peak_mb()[0],
             "cuda_peak_reserved_mb": _cuda_peak_mb()[1],
             "training_config": dict(resolved),
+            "initialization": initialization,
         }
         summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
         return summary
