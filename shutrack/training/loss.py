@@ -178,6 +178,7 @@ __all__ = [
     "appearance_soft_loss",
     "appearance_rank_loss",
     "motion_speed_l1_loss",
+    "motion_speed4_l1_loss",
     "gated_appearance_template",
 ]
 
@@ -264,6 +265,63 @@ def motion_box_diou_loss(
         "diou_at_gate_mean": ((elementwise * mask).sum() / denominator).detach(),
     }
     return components["loss"], components
+
+
+def motion_speed4_l1_loss(
+    outputs: Mapping[str, torch.Tensor],
+    batch: Mapping[str, torch.Tensor],
+    *,
+    center_weight: float = 50.0,
+    size_weight: float = 0.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """4-D KF velocity L1 (centre vx/vy + size vw/vh).
+
+    ``kf_velocity4_g0`` / ``kf_velocity4_g1`` hold the t+1 KF velocities at
+    the two gate endpoints, normalised by image width/height per component;
+    the predicted velocity is linear in the gate (verified against the numpy
+    online path).  ``gt_velocity4`` is the adjacent-frame GT label in the same
+    normalisation.  With ``size_weight=0`` the loss is numerically identical
+    to :func:`motion_speed_l1_loss` on the centre two dimensions.
+    """
+    gate = torch.sigmoid(outputs["gate_logits"].float())[:, 0]
+    v0 = batch["kf_velocity4_g0"].float()
+    v1 = batch["kf_velocity4_g1"].float()
+    target = batch["gt_velocity4"].float()
+    valid = batch["size_adj_valid"].bool()
+    if not (v0.shape == v1.shape == target.shape == (gate.shape[0], 4)):
+        raise ValueError(
+            "4-D KF velocities and GT must be (N, 4), got "
+            f"{tuple(v0.shape)}, {tuple(v1.shape)}, {tuple(target.shape)}"
+        )
+    velocity = v0 + gate.unsqueeze(-1) * (v1 - v0)
+    error = (velocity - target).abs()
+    center_error = error[:, :2].sum(dim=-1)
+    size_error = error[:, 2:].sum(dim=-1)
+    mask = valid.float()
+    denominator = mask.sum().clamp_min(1.0)
+    center_loss = (center_error * mask).sum() / denominator
+    size_loss = (size_error * mask).sum() / denominator
+    loss = float(center_weight) * center_loss + float(size_weight) * size_loss
+    components = {
+        "loss": loss,
+        "speed_center_l1": center_loss.detach(),
+        "speed_size_l1": size_loss.detach(),
+        "speed4_l1": (center_loss + size_loss).detach(),
+        "valid_ratio": mask.mean().detach(),
+        "center_at_g0": (
+            ((v0 - target)[:, :2].abs().sum(dim=-1) * mask).sum() / denominator
+        ).detach(),
+        "center_at_g1": (
+            ((v1 - target)[:, :2].abs().sum(dim=-1) * mask).sum() / denominator
+        ).detach(),
+        "size_at_g0": (
+            ((v0 - target)[:, 2:].abs().sum(dim=-1) * mask).sum() / denominator
+        ).detach(),
+        "size_at_g1": (
+            ((v1 - target)[:, 2:].abs().sum(dim=-1) * mask).sum() / denominator
+        ).detach(),
+    }
+    return loss, components
 
 
 def gated_appearance_template(

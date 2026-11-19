@@ -192,6 +192,7 @@ class SequencePilot:
         self.prototypes: dict[int, np.ndarray] = {}
         self.kf = None
         self.frame_matches_precomputed = False
+        self.store_rank_features = True
 
     # ------------------------------------------------------------------
     def frame_matches(self, frame_index: int) -> list[dict]:
@@ -442,25 +443,34 @@ class SequencePilot:
             box0 = mean_to_box(mean0).tolist()
             box1 = mean_to_box(mean1).tolist()
             valid = True
-            velocity0 = np.asarray(mean0[4:6], dtype=np.float64) / np.array(
-                [float(self.img_w), float(self.img_h)]
+            scale4 = np.array(
+                [float(self.img_w), float(self.img_h), float(self.img_w), float(self.img_h)]
             )
-            velocity1 = np.asarray(mean1[4:6], dtype=np.float64) / np.array(
-                [float(self.img_w), float(self.img_h)]
-            )
+            velocity0 = np.asarray(mean0[4:8], dtype=np.float64) / scale4
+            velocity1 = np.asarray(mean1[4:8], dtype=np.float64) / scale4
             mean_mid = 0.5 * (
                 np.asarray(mean_prior, dtype=np.float64)
                 + np.asarray(mean_full, dtype=np.float64)
             )
             mean_mid_pred, _ = warp_predict(mean_mid, cov_prior, warp_next, self.kf)
-            velocity_mid_actual = np.asarray(mean_mid_pred[4:6], dtype=np.float64) / np.array(
-                [float(self.img_w), float(self.img_h)]
-            )
+            velocity_mid_actual = np.asarray(mean_mid_pred[4:8], dtype=np.float64) / scale4
             velocity_mid_linear = 0.5 * (velocity0 + velocity1)
-            record["kf_velocity_g0"] = velocity0.tolist()
-            record["kf_velocity_g1"] = velocity1.tolist()
+            box_mid_actual = mean_to_box(mean_mid_pred)
+            box_mid_linear = 0.5 * (
+                np.asarray(box0, dtype=np.float64) + np.asarray(box1, dtype=np.float64)
+            )
+            record["kf_velocity4_g0"] = velocity0.tolist()
+            record["kf_velocity4_g1"] = velocity1.tolist()
+            record["kf_velocity_g0"] = velocity0[:2].tolist()
+            record["kf_velocity_g1"] = velocity1[:2].tolist()
             record["kf_velocity_mid_error"] = float(
                 np.max(np.abs(velocity_mid_actual - velocity_mid_linear))
+            )
+            record["kf_velocity4_mid_error"] = float(
+                np.max(np.abs(velocity_mid_actual - velocity_mid_linear))
+            )
+            record["kf_box_mid_error"] = float(
+                np.max(np.abs(box_mid_actual - box_mid_linear))
             )
         record["pred_box_g0"] = box0
         record["pred_box_g1"] = box1
@@ -478,6 +488,10 @@ class SequencePilot:
             valid and gt_now is not None and gt_t1 is not None and warp_next is not None
         )
         record["speed_valid"] = speed_valid
+        record["size_adj_valid"] = False
+        record["gt_velocity4"] = None
+        record["gt_size_velocity_central"] = None
+        record["size_central_valid"] = False
         if speed_valid:
             center_t = np.array(
                 [
@@ -501,6 +515,38 @@ class SequencePilot:
                 float(displacement[0] / float(self.img_w)),
                 float(displacement[1] / float(self.img_h)),
             ]
+            size_t = np.array(
+                [gt_now[2] - gt_now[0], gt_now[3] - gt_now[1]], dtype=np.float64
+            )
+            size_t1 = np.array(
+                [gt_t1[2] - gt_t1[0], gt_t1[3] - gt_t1[1]], dtype=np.float64
+            )
+            warped_size = rot @ size_t
+            size_displacement = size_t1 - warped_size
+            record["gt_velocity4"] = [
+                float(displacement[0] / float(self.img_w)),
+                float(displacement[1] / float(self.img_h)),
+                float(size_displacement[0] / float(self.img_w)),
+                float(size_displacement[1] / float(self.img_h)),
+            ]
+            record["size_adj_valid"] = True
+            gt_t2 = None
+            if target is not None:
+                gt_t2 = self.gt.get(frame_id + 2, {}).get(int(target))
+            warp_t2 = self.warps.get(frame_id + 2)
+            if gt_t2 is not None and warp_t2 is not None:
+                rot_t2 = np.asarray(warp_t2, dtype=np.float64)[:, :2]
+                size_t2 = np.array(
+                    [gt_t2[2] - gt_t2[0], gt_t2[3] - gt_t2[1]], dtype=np.float64
+                )
+                size_t_in_t1 = rot @ size_t
+                size_t2_in_t1 = rot_t2.T @ size_t2
+                central = (size_t2_in_t1 - size_t_in_t1) / 2.0
+                record["gt_size_velocity_central"] = [
+                    float(central[0] / float(self.img_w)),
+                    float(central[1] / float(self.img_h)),
+                ]
+                record["size_central_valid"] = True
         else:
             record["gt_velocity"] = None
 
@@ -636,29 +682,38 @@ class SequencePilot:
             current_competition[row] = window.current_competition
 
         source_ids = {"tracked_lost_unmature": 0, "new_path_unmature": 1, "gated": 2}
-        rank_valid = np.asarray(
-            [bool(record.get("rank_valid", False)) for record in mature], dtype=np.bool_
-        )
-        rank_rows = np.nonzero(rank_valid)[0]
+        if self.store_rank_features:
+            rank_valid = np.asarray(
+                [bool(record.get("rank_valid", False)) for record in mature], dtype=np.bool_
+            )
+            rank_rows = np.nonzero(rank_valid)[0]
 
-        def stack_rank(key: str) -> np.ndarray:
-            if rank_rows.size == 0:
-                return np.zeros((0, 2048), dtype=np.float16)
-            return np.stack(
-                [
-                    np.asarray(mature[index][key], dtype=np.float32)
-                    for index in rank_rows
-                ]
-            ).astype(np.float16)
+            def stack_rank(key: str) -> np.ndarray:
+                if rank_rows.size == 0:
+                    return np.zeros((0, 2048), dtype=np.float16)
+                return np.stack(
+                    [
+                        np.asarray(mature[index][key], dtype=np.float32)
+                        for index in rank_rows
+                    ]
+                ).astype(np.float16)
 
-        rank_template0 = stack_rank("pre_feature")
-        rank_detection = stack_rank("det_feature")
-        rank_positive = stack_rank("rank_positive_feature")
-        rank_competitor = stack_rank("rank_competitor_feature")
-        rank_score = np.asarray(
-            [float(mature[index].get("detection_score", 0.0)) for index in rank_rows],
-            dtype=np.float32,
-        )
+            rank_template0 = stack_rank("pre_feature")
+            rank_detection = stack_rank("det_feature")
+            rank_positive = stack_rank("rank_positive_feature")
+            rank_competitor = stack_rank("rank_competitor_feature")
+            rank_score = np.asarray(
+                [float(mature[index].get("detection_score", 0.0)) for index in rank_rows],
+                dtype=np.float32,
+            )
+        else:
+            rank_valid = np.zeros(len(mature), dtype=np.bool_)
+            rank_rows = np.zeros(0, dtype=np.int64)
+            rank_template0 = np.zeros((0, 2048), dtype=np.float16)
+            rank_detection = np.zeros((0, 2048), dtype=np.float16)
+            rank_positive = np.zeros((0, 2048), dtype=np.float16)
+            rank_competitor = np.zeros((0, 2048), dtype=np.float16)
+            rank_score = np.zeros(0, dtype=np.float32)
         speed_valid = np.asarray(
             [bool(record.get("speed_valid", False)) for record in mature], dtype=np.bool_
         )
@@ -674,10 +729,42 @@ class SequencePilot:
             [record.get("gt_velocity") or [0.0, 0.0] for record in mature],
             dtype=np.float32,
         )
+        kf_velocity4_g0 = np.asarray(
+            [record.get("kf_velocity4_g0") or [0.0, 0.0, 0.0, 0.0] for record in mature],
+            dtype=np.float32,
+        )
+        kf_velocity4_g1 = np.asarray(
+            [record.get("kf_velocity4_g1") or [0.0, 0.0, 0.0, 0.0] for record in mature],
+            dtype=np.float32,
+        )
+        gt_velocity4 = np.asarray(
+            [record.get("gt_velocity4") or [0.0, 0.0, 0.0, 0.0] for record in mature],
+            dtype=np.float32,
+        )
+        gt_size_velocity_central = np.asarray(
+            [record.get("gt_size_velocity_central") or [0.0, 0.0] for record in mature],
+            dtype=np.float32,
+        )
+        size_adj_valid = np.asarray(
+            [bool(record.get("size_adj_valid", False)) for record in mature], dtype=np.bool_
+        )
+        size_central_valid = np.asarray(
+            [bool(record.get("size_central_valid", False)) for record in mature], dtype=np.bool_
+        )
         velocity_mid_errors = [
             float(record["kf_velocity_mid_error"])
             for record in mature
             if record.get("kf_velocity_mid_error") is not None
+        ]
+        velocity4_mid_errors = [
+            float(record["kf_velocity4_mid_error"])
+            for record in mature
+            if record.get("kf_velocity4_mid_error") is not None
+        ]
+        box_mid_errors = [
+            float(record["kf_box_mid_error"])
+            for record in mature
+            if record.get("kf_box_mid_error") is not None
         ]
         arrays = {
             "frame": np.asarray([record["frame_t"] for record in mature], dtype=np.int64),
@@ -778,6 +865,12 @@ class SequencePilot:
             "kf_velocity_g0": kf_velocity_g0,
             "kf_velocity_g1": kf_velocity_g1,
             "gt_velocity": gt_velocity,
+            "kf_velocity4_g0": kf_velocity4_g0,
+            "kf_velocity4_g1": kf_velocity4_g1,
+            "gt_velocity4": gt_velocity4,
+            "gt_size_velocity_central": gt_size_velocity_central,
+            "size_adj_valid": size_adj_valid,
+            "size_central_valid": size_central_valid,
             "keys_json": json.dumps(
                 [
                     {
@@ -819,8 +912,16 @@ class SequencePilot:
             "appearance_diag_valid": int(arrays["appearance_diag_valid"].sum()),
             "rank_valid": int(rank_valid.sum()),
             "speed_valid": int(speed_valid.sum()),
+            "size_adj_valid": int(size_adj_valid.sum()),
+            "size_central_valid": int(size_central_valid.sum()),
             "kf_velocity_mid_error_max": (
                 float(max(velocity_mid_errors)) if velocity_mid_errors else None
+            ),
+            "kf_velocity4_mid_error_max": (
+                float(max(velocity4_mid_errors)) if velocity4_mid_errors else None
+            ),
+            "kf_box_mid_error_max": (
+                float(max(box_mid_errors)) if box_mid_errors else None
             ),
             "img_width": int(self.img_w),
             "img_height": int(self.img_h),
@@ -1075,9 +1176,10 @@ class SequencePilot:
             d0_comp = cosine_distance(template0, competitor_feature)
             d1_pos = cosine_distance(template1, positive_feature)
             d1_comp = cosine_distance(template1, competitor_feature)
-            record["rank_valid"] = True
-            record["rank_positive_feature"] = positive_feature.astype(np.float32).copy()
-            record["rank_competitor_feature"] = competitor_feature.astype(np.float32).copy()
+            if self.store_rank_features:
+                record["rank_valid"] = True
+                record["rank_positive_feature"] = positive_feature.astype(np.float32).copy()
+                record["rank_competitor_feature"] = competitor_feature.astype(np.float32).copy()
             contested = []
             for other_id, gt_box in self.gt.get(positive_frame, {}).items():
                 if int(other_id) == int(target):

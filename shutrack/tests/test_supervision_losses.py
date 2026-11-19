@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from shutrack.training.loss import (
     appearance_rank_loss,
     gated_appearance_template,
+    motion_speed4_l1_loss,
     motion_speed_l1_loss,
 )
 
@@ -87,3 +88,51 @@ def test_speed_l1_gradient_only_on_motion_channel() -> None:
     assert float(grad[:, 1].abs().max()) == 0.0
     assert float(grad[:, 0].abs().sum()) > 0.0
     assert float(components["valid_ratio"]) > 0.0
+
+
+def _speed4_batch():
+    torch.manual_seed(2)
+    v0 = torch.randn(5, 4) * 0.01
+    v1 = torch.randn(5, 4) * 0.01
+    target = torch.randn(5, 4) * 0.01
+    valid = torch.tensor([True, True, True, False, True])
+    return {
+        "kf_velocity4_g0": v0,
+        "kf_velocity4_g1": v1,
+        "gt_velocity4": target,
+        "size_adj_valid": valid,
+        "kf_velocity_g0": v0[:, :2].clone(),
+        "kf_velocity_g1": v1[:, :2].clone(),
+        "gt_velocity": target[:, :2].clone(),
+        "speed_valid": valid,
+    }
+
+
+def test_speed4_zero_size_weight_equals_center_speed() -> None:
+    batch = _speed4_batch()
+    logits4 = torch.zeros(5, 2, requires_grad=True)
+    logits2 = torch.zeros(5, 2, requires_grad=True)
+    loss4, _ = motion_speed4_l1_loss(
+        {"gate_logits": logits4}, batch, center_weight=50.0, size_weight=0.0
+    )
+    loss2, _ = motion_speed_l1_loss({"gate_logits": logits2}, batch, weight=50.0)
+    assert torch.equal(loss4, loss2)
+    grad4 = torch.autograd.grad(loss4, logits4)[0]
+    grad2 = torch.autograd.grad(loss2, logits2)[0]
+    assert torch.equal(grad4, grad2)
+
+
+def test_speed4_size_weight_affects_motion_gradient() -> None:
+    batch = _speed4_batch()
+    base = torch.zeros(5, 2, requires_grad=True)
+    plus = torch.zeros(5, 2, requires_grad=True)
+    loss0, _ = motion_speed4_l1_loss(
+        {"gate_logits": base}, batch, center_weight=50.0, size_weight=0.0
+    )
+    loss1, _ = motion_speed4_l1_loss(
+        {"gate_logits": plus}, batch, center_weight=50.0, size_weight=10.0
+    )
+    grad0 = torch.autograd.grad(loss0, base)[0]
+    grad1 = torch.autograd.grad(loss1, plus)[0]
+    assert torch.equal(grad0[:, 1], torch.zeros(5))
+    assert not torch.equal(grad0[:, 0], grad1[:, 0])

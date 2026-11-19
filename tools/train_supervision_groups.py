@@ -12,6 +12,7 @@ Groups (same data, schedule, optimizer budget, e200 init):
                    template (fallback to the original soft label)
   motion_diou_speed  motion DIoU + KF centre-velocity L1 + discrimination
                    appearance soft labels
+  motion_diou_speed4 motion_diou_speed plus KF size-velocity (vw/vh) L1
 
 Schedule: 40 shard-epochs = 4 shards x 10 cycles; per shard each sequence
 contributes its contiguous fraction of samples (frame order).  Weights are
@@ -53,6 +54,7 @@ from shutrack.training.loss import (
     appearance_soft_loss,
     gate_loss,
     motion_box_diou_loss,
+    motion_speed4_l1_loss,
     motion_speed_l1_loss,
 )
 from shutrack.training.train import _load_init_state_with_extension
@@ -212,7 +214,13 @@ def batch_tensors(seq: SequenceData, rows: np.ndarray, targets, group: str) -> d
             [
                 targets["motion_safe"][rows],
                 targets["appearance_new"][rows]
-                if group in ("appearance_score", "motion_diou_appearance_score", "motion_diou_speed")
+                if group
+                in (
+                    "appearance_score",
+                    "motion_diou_appearance_score",
+                    "motion_diou_speed",
+                    "motion_diou_speed4",
+                )
                 else targets["appearance_safe"][rows],
             ],
             axis=1,
@@ -223,7 +231,13 @@ def batch_tensors(seq: SequenceData, rows: np.ndarray, targets, group: str) -> d
         "sample_weight": np.ones(len(rows), dtype=np.float32),
         "appearance_target": (
             targets["appearance_new"][rows]
-            if group in ("appearance_score", "motion_diou_appearance_score", "motion_diou_speed")
+            if group
+            in (
+                "appearance_score",
+                "motion_diou_appearance_score",
+                "motion_diou_speed",
+                "motion_diou_speed4",
+            )
             else targets["appearance_safe"][rows]
         ).astype(np.float32),
         "appearance_valid": targets["valid_appearance"][rows].astype(np.bool_),
@@ -258,6 +272,11 @@ def batch_tensors(seq: SequenceData, rows: np.ndarray, targets, group: str) -> d
         batch["kf_velocity_g1"] = samples["kf_velocity_g1"][rows].astype(np.float32)
         batch["gt_velocity"] = samples["gt_velocity"][rows].astype(np.float32)
         batch["speed_valid"] = samples["speed_valid"][rows].astype(np.bool_)
+    if group == "motion_diou_speed4":
+        batch["kf_velocity4_g0"] = samples["kf_velocity4_g0"][rows].astype(np.float32)
+        batch["kf_velocity4_g1"] = samples["kf_velocity4_g1"][rows].astype(np.float32)
+        batch["gt_velocity4"] = samples["gt_velocity4"][rows].astype(np.float32)
+        batch["size_adj_valid"] = samples["size_adj_valid"][rows].astype(np.bool_)
     return batch
 
 
@@ -310,6 +329,10 @@ def to_device(batch: dict, device: torch.device) -> dict:
         "kf_velocity_g1",
         "gt_velocity",
         "speed_valid",
+        "kf_velocity4_g0",
+        "kf_velocity4_g1",
+        "gt_velocity4",
+        "size_adj_valid",
     }
     return {
         key: torch.from_numpy(value).to(device) if key in tensor_keys else value
@@ -435,6 +458,7 @@ def train(group: str, args) -> None:
         "rank_alpha": args.rank_alpha,
         "rank_weight": args.rank_weight,
         "speed_weight": args.speed_weight,
+        "size_weight": args.size_weight,
     }
     (group_dir / "config.json").write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
     log_handle = log_path.open("a" if args.resume else "w")
@@ -506,6 +530,23 @@ def train(group: str, args) -> None:
                         appearance_loss, appearance_components = appearance_soft_loss(outputs, batch)
                         loss = motion_loss + appearance_loss
                         extra["speed_l1"] = float(speed_components["speed_l1"])
+                    elif group == "motion_diou_speed4":
+                        box_loss, motion_components = motion_box_diou_loss(outputs, batch)
+                        speed_loss, speed_components = motion_speed4_l1_loss(
+                            outputs,
+                            batch,
+                            center_weight=args.speed_weight,
+                            size_weight=args.size_weight,
+                        )
+                        motion_loss = box_loss + speed_loss
+                        appearance_loss, appearance_components = appearance_soft_loss(outputs, batch)
+                        loss = motion_loss + appearance_loss
+                        extra["speed_center_l1"] = float(
+                            speed_components["speed_center_l1"]
+                        )
+                        extra["speed_size_l1"] = float(
+                            speed_components["speed_size_l1"]
+                        )
                     elif group in ("motion_diou", "motion_diou_appearance_score"):
                         motion_loss, motion_components = motion_box_diou_loss(outputs, batch)
                         appearance_loss, appearance_components = appearance_soft_loss(outputs, batch)
@@ -555,7 +596,13 @@ def train(group: str, args) -> None:
                 appearance_gate_sum / max(gate_count, 1) if gate_count else None
             ),
         }
-        for key in ("rank_mean", "fallback_mean", "speed_l1"):
+        for key in (
+            "rank_mean",
+            "fallback_mean",
+            "speed_l1",
+            "speed_center_l1",
+            "speed_size_l1",
+        ):
             if key in totals:
                 metrics[key] = totals[key] / max(totals["samples"], 1)
         log("epoch summary: " + json.dumps(metrics, sort_keys=True))
@@ -611,6 +658,7 @@ def main() -> None:
             "motion_diou_appearance_score",
             "appearance_rank",
             "motion_diou_speed",
+            "motion_diou_speed4",
         ],
     )
     parser.add_argument("--init", default=str(INIT_CKPT))
@@ -627,6 +675,7 @@ def main() -> None:
     parser.add_argument("--rank-alpha", type=float, default=0.95)
     parser.add_argument("--rank-weight", type=float, default=1.0)
     parser.add_argument("--speed-weight", type=float, default=1.0)
+    parser.add_argument("--size-weight", type=float, default=0.0)
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     torch.set_num_threads(4)

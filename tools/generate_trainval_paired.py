@@ -40,6 +40,11 @@ def main() -> None:
     parser.add_argument("--checkpoint", default=str(DEFAULT_CKPT))
     parser.add_argument("--max-sequences", type=int, default=0)
     parser.add_argument("--only", nargs="*", default=None)
+    parser.add_argument(
+        "--skip-rank-arrays",
+        action="store_true",
+        help="omit the 2048-d rank features (smaller shards for motion-only groups)",
+    )
     args = parser.parse_args()
     root = Path(args.root)
     data = root / "data"
@@ -88,6 +93,8 @@ def main() -> None:
             pilot = SequencePilot(
                 sequence, split, Path(args.checkpoint), logs / sequence
             )
+            if args.skip_rank_arrays:
+                pilot.store_rank_features = False
             pilot.run_replay()
             pilot.compute_labels()
             pilot.appearance_diagnostics()
