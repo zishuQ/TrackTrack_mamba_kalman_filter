@@ -35,6 +35,9 @@ class ShutrackTrackerAdapter:
     capture_only = False
     event_sink = None
     stats_prefix = "shutrack"
+    # SHUTrack builds evidence from the post-CMC, post-predict snapshot only;
+    # the tracker can skip the per-frame pre-CMC snapshot copies entirely.
+    needs_frame_start_snapshot = False
 
     def __init__(self, args: Any, vid_name: str, runtime: ShutrackRuntime) -> None:
         self.args = args

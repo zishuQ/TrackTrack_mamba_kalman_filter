@@ -247,7 +247,9 @@ class Tracker(object):
 
         # AgentGuard: save frame_start_state for mature tracks (pre-CMC)
         frame_start_snapshots = {}
-        if self.agentguard_adapter:
+        if self.agentguard_adapter and getattr(
+            self.agentguard_adapter, "needs_frame_start_snapshot", True
+        ):
             rt = self.agentguard_adapter.runtime
             for t in tracked_lost:
                 if rt and rt.is_mature_track(t):
@@ -467,7 +469,9 @@ class Tracker(object):
 
         # AgentGuard: save frame_start snapshots for mature tracks (pre-CMC)
         frame_start_snapshots = {}
-        if self.agentguard_adapter:
+        if self.agentguard_adapter and getattr(
+            self.agentguard_adapter, "needs_frame_start_snapshot", True
+        ):
             rt = self.agentguard_adapter.runtime
             for t in self.tracks:
                 if rt and rt.is_mature_track(t):

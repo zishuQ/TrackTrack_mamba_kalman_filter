@@ -36,6 +36,7 @@ class ShutrackV2Config:
     appearance_proj_dim: int = 64
     context_size: int = CONTEXT_SIZE
     competition_enabled: bool = True
+    appearance_match_input: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -80,6 +81,7 @@ class ShutrackV2Model(nn.Module):
             ff_dim=config.ff_dim,
             dropout=config.dropout,
             competition_enabled=config.competition_enabled,
+            appearance_match_input=config.appearance_match_input,
         )
 
     @property
@@ -111,6 +113,7 @@ class ShutrackV2Model(nn.Module):
         current_competition: torch.Tensor,
         current_has_detection: torch.Tensor,
         history_reset: torch.Tensor | None = None,
+        current_match_distance: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         batch_size = history_evidence.shape[0]
         expected = {
@@ -171,6 +174,17 @@ class ShutrackV2Model(nn.Module):
             current_competition_token = self.competition_encoder(
                 current_competition
             )
+        if self.config.appearance_match_input:
+            if current_match_distance is None or current_match_distance.shape != (
+                batch_size,
+            ):
+                raise ValueError(
+                    "appearance_match_input model requires current_match_distance "
+                    f"with shape ({batch_size},), got "
+                    f"{None if current_match_distance is None else tuple(current_match_distance.shape)}"
+                )
+        else:
+            current_match_distance = None
         return self.rsc(
             history_evidence_context,
             history_appearance_context,
@@ -178,6 +192,7 @@ class ShutrackV2Model(nn.Module):
             current_appearance_token,
             current_competition_token,
             current_has_detection,
+            current_match_distance=current_match_distance,
         )
 
     def parameter_report(self) -> dict[str, int]:

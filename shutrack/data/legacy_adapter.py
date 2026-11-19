@@ -117,6 +117,7 @@ def build_online_evidence(
         if competition_enabled
         else np.zeros(COMPETITION_DIM, dtype=np.float32)
     )
+    match_distance = float(normalized[2]) if has_detection else 0.0
     track = sanitize_float32(track_feature)
     detection = (
         sanitize_float32(detection_feature)
@@ -133,6 +134,7 @@ def build_online_evidence(
         track_id=track_id,
         segment_id=segment_id,
         observation_count=observation_count,
+        match_distance=match_distance,
     )
 
 

@@ -113,6 +113,9 @@ class ShutrackRuntime:
         self._last_reset_frame: dict[int, int] = {}
         self._lost_tracks: set[int] = set()
         self._detection_boxes: dict[int, np.ndarray] = {}
+        self._pool_indices: np.ndarray | None = None
+        self._pool_boxes: np.ndarray | None = None
+        self._overlap_cache: dict[tuple[tuple[int, ...], int], np.ndarray] = {}
         # The Tracker's unmatched-event path checks this attribute before
         # populating legacy TrackEvent features. SHUTrack builds its own
         # evidence and intentionally has no legacy feature builder.
@@ -191,8 +194,13 @@ class ShutrackRuntime:
     # ------------------------------------------------------------------
     def set_frame_detection_pool(self, pool: Sequence[Any] | None) -> None:
         self._detection_boxes = {}
+        self._pool_indices = None
+        self._pool_boxes = None
+        self._overlap_cache = {}
         if pool is None:
             return
+        indices: list[int] = []
+        boxes: list[np.ndarray] = []
         for fallback_index, detection in enumerate(pool):
             index = int(getattr(detection, "frame_detection_index", fallback_index))
             box = getattr(detection, "x1y1x2y2", None)
@@ -200,9 +208,13 @@ class ShutrackRuntime:
                 box = getattr(detection, "box", None)
             if box is None:
                 continue
-            self._detection_boxes[index] = (
-                np.asarray(box, dtype=np.float64).reshape(4).copy()
-            )
+            box = np.asarray(box, dtype=np.float64).reshape(4).copy()
+            self._detection_boxes[index] = box
+            indices.append(index)
+            boxes.append(box)
+        if boxes:
+            self._pool_indices = np.asarray(indices, dtype=np.int64)
+            self._pool_boxes = np.stack(boxes, axis=0)
 
     def _overlap_row(
         self, association_meta: Mapping[str, Any], detection_col: int
@@ -214,14 +226,31 @@ class ShutrackRuntime:
         column = int(detection_col)
         if detection_indices.size == 0 or column < 0 or column >= detection_indices.size:
             return None
-        boxes = []
-        for index in detection_indices:
-            box = self._detection_boxes.get(int(index))
-            if box is None:
-                return None
-            boxes.append(box)
-        pool = np.stack(boxes, axis=0)
-        return detection_overlap_row(pool[column], pool, column)
+        # The candidate pool may change within one frame (mature-track
+        # association vs the early-enable New path), so the cache key must
+        # include the ordered detection indices, not just the column.
+        cache_key = (
+            tuple(int(index) for index in detection_indices.tolist()),
+            column,
+        )
+        cached = self._overlap_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        if self._pool_boxes is not None and np.array_equal(
+            self._pool_indices, detection_indices
+        ):
+            pool = self._pool_boxes
+        else:
+            boxes = []
+            for index in detection_indices:
+                box = self._detection_boxes.get(int(index))
+                if box is None:
+                    return None
+                boxes.append(box)
+            pool = np.stack(boxes, axis=0)
+        row = detection_overlap_row(pool[column], pool, column)
+        self._overlap_cache[cache_key] = row
+        return row
 
     # ------------------------------------------------------------------
     # Evidence construction
@@ -345,8 +374,8 @@ class ShutrackRuntime:
                         and track_row < matrix.shape[0]
                         and detection_col < matrix.shape[1]
                     ):
-                        scalar_params["track_cost_row"] = matrix[track_row, :].copy()
-                        scalar_params["detection_cost_col"] = matrix[:, detection_col].copy()
+                        scalar_params["track_cost_row"] = matrix[track_row, :]
+                        scalar_params["detection_cost_col"] = matrix[:, detection_col]
                 overlap = self._overlap_row(association_meta, detection_col)
                 if overlap is not None:
                     scalar_params["max_iou_with_other"] = (
@@ -434,6 +463,8 @@ class ShutrackRuntime:
             key: torch.from_numpy(value).to(self.device)
             for key, value in batch.items()
         }
+        if not bool(getattr(self.model.config, "appearance_match_input", False)):
+            tensors.pop("current_match_distance", None)
         with torch.inference_mode():
             outputs = self.model(**tensors)
         gates = outputs["gates"].float().cpu().numpy()

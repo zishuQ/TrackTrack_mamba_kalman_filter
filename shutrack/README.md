@@ -122,6 +122,106 @@ shuffled inside each sequence), so each `data.pt` file loads at most once per
 epoch; `metrics.jsonl` records `samples_per_second`, `sequence_load_count` and
 `rss_mb`.
 
+### Data loading, timing and resume
+
+* `--data-loader batch` (default) gathers a whole batch with numpy fancy
+  indexing on the mmap-backed `data.pt` and `reid_features.npy` arrays,
+  grouped by sequence and scattered back to the sampler order (duplicated
+  samples kept).  On real MOT17 data this is 8-17x faster than the legacy
+  per-item path (`--data-loader items`, kept for numerical comparison);
+  per-step losses are identical.
+* `--prefetch N` (default 2) runs the CPU gather in a producer thread so the
+  next batch is ready while the GPU computes.  The thread stops when the
+  iterator closes, including early `--max-steps` stops.
+* `--profile` synchronizes per batch and splits `data_read_seconds`,
+  `h2d_seconds` and `compute_seconds`.  Without it the formal path has no
+  per-batch CUDA synchronization and converts the loss statistics once per
+  epoch; the non-finite loss check is kept.
+* `sequence_load_count` includes DataLoader-worker loads when the legacy
+  items path runs with `--num-workers > 0` (shared counter).
+* Resume restores optimizer, scheduler, global_step and epoch, and re-seeds
+  the sampler with `seed + epoch`, so the run continues the schedule instead
+  of restarting it (MOT17 epoch-24 `last.pt`: step 2209 resumes at
+  lr 5.477e-6, not the 1e-5 initial value).
+
+### Prepared next-round commands (paused until review)
+
+MOT20 single-shard timing (first shard = 262,271 samples / 257 batches).
+`--max-steps 257` stops after the first shard; it also changes the LR schedule
+of this timing run, so these weights are not used for formal resume.  Both
+paths share the same sampler (`sqrt-size`, batch 1024, seed 42) and the same
+`--profile` timing, with independent output directories:
+
+```bash
+./.venv/bin/python -m shutrack.cli train \
+  --dataset-dir outputs/agentguard/train_data/MOT20 \
+  --checkpoint-dir outputs/agentguard/experiments/shutrack_a_old_recipe_20261117/MOT20_shard_timing_batch/checkpoints \
+  --device cuda --epochs 4 --batch-size 1024 --num-workers 0 \
+  --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 --grad-clip 1.0 --seed 42 \
+  --memory-shards 4 --shard-cycles 1 --epochs-per-shard 1 \
+  --sequence-sampling sqrt-size --competition on \
+  --data-loader batch --prefetch 2 --profile --max-steps 257
+```
+
+```bash
+./.venv/bin/python -m shutrack.cli train \
+  --dataset-dir outputs/agentguard/train_data/MOT20 \
+  --checkpoint-dir outputs/agentguard/experiments/shutrack_a_old_recipe_20261117/MOT20_shard_timing_items/checkpoints \
+  --device cuda --epochs 4 --batch-size 1024 --num-workers 4 \
+  --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 --grad-clip 1.0 --seed 42 \
+  --memory-shards 4 --shard-cycles 1 --epochs-per-shard 1 \
+  --sequence-sampling sqrt-size --competition on \
+  --data-loader items --profile --max-steps 257
+```
+
+MOT17 continuation from the paused epoch-24 checkpoint (same schedule, no
+`--init-checkpoint`):
+
+```bash
+./.venv/bin/python -m shutrack.cli train \
+  --dataset-dir outputs/agentguard/train_data/MOT17 \
+  --checkpoint-dir outputs/agentguard/experiments/shutrack_a_old_recipe_20261117/MOT17/checkpoints \
+  --device cuda --epochs 50 --batch-size 1024 --num-workers 0 \
+  --lr 1e-5 --weight-decay 1e-4 --warmup-epochs 1 --grad-clip 1.0 --seed 42 \
+  --memory-shards 1 --shard-cycles 1 --epochs-per-shard 50 \
+  --sequence-sampling sample-proportional --competition on \
+  --resume outputs/agentguard/experiments/shutrack_a_old_recipe_20261117/MOT17/checkpoints/last.pt \
+  --data-loader batch --prefetch 2
+```
+
+SportsMOT from scratch (200 shard-epochs = 50 full passes; recipe from the
+paused `plan.json`):
+
+```bash
+./.venv/bin/python -m shutrack.cli train \
+  --dataset-dir outputs/agentguard/train_data/SportsMOT \
+  --checkpoint-dir outputs/agentguard/experiments/shutrack_a_old_recipe_20261117/SportsMOT/checkpoints \
+  --device cuda --epochs 200 --batch-size 1024 --num-workers 4 \
+  --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 --grad-clip 1.0 --seed 42 \
+  --memory-shards 4 --shard-cycles 50 --epochs-per-shard 1 \
+  --sequence-sampling sample-proportional --competition on \
+  --data-loader batch --prefetch 2
+```
+
+Raw evaluation (explicit full sequence list, mmap detection cache, result
+directory prepared under `outputs/agentguard/eval_results/shutrack_a_opt_20261117/`):
+
+```bash
+cd "3. Tracker"
+../.venv/bin/python -u run.py --dataset SportsMOT --mode val \
+  --sequences <the same 45-sequence list> --seed 10000 --kf-type nsa \
+  --agentguard-mode shutrack-v2 \
+  --shutrack-checkpoint <checkpoint> --agentguard-device cpu \
+  --detection-cache-root ../outputs/agentguard/detection_cache \
+  --output_dir ../outputs/agentguard/eval_results/shutrack_a_opt_20261117 \
+  --tracker-suffix <run-suffix> --print-per-sequence-metrics
+```
+
+`run.py` has no multi-process per-sequence tracking entry today; a single
+invocation with the complete sequence list produces one COMBINED TrackEval
+result.  Parallel tracking would need a separate eval-only entry, which is
+not part of this round.
+
 ### Two formal commands (not started by this round)
 
 Lean dual-evidence variant:
@@ -146,8 +246,10 @@ With competition token:
   --seed 42 --competition on
 ```
 
-`--epochs` counts **full dataset passes**.  MOT20/SportsMOT formal runs use 20
-full passes to match the old `5×1×20` / `10×1×20` effective budgets.
+`--epochs` is the number of schedule epochs.  With the shard sampler it must
+equal `memory_shards × shard_cycles × epochs_per_shard`: MOT20 uses
+4×25×1 = 100 shard-epochs (25 full passes), SportsMOT uses 4×50×1 = 200
+shard-epochs (50 full passes), and MOT17 uses 1×1×50 = 50 full passes.
 
 Training writes only `last.pt`, `best.pt`, `metrics.jsonl`, `training.log` and
 `training_summary.json`.  A run refuses to reuse an existing checkpoint

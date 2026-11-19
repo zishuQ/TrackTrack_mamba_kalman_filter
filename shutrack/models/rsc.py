@@ -24,10 +24,12 @@ class RSC(nn.Module):
         ff_dim: int = 256,
         dropout: float = 0.0,
         competition_enabled: bool = True,
+        appearance_match_input: bool = False,
     ) -> None:
         super().__init__()
         self.d_model = int(d_model)
         self.competition_enabled = bool(competition_enabled)
+        self.appearance_match_input = bool(appearance_match_input)
         self.token_count = 3 if self.competition_enabled else 2
         self.current_modality_embedding = nn.Parameter(
             torch.zeros(1, self.token_count, self.d_model)
@@ -59,7 +61,9 @@ class RSC(nn.Module):
         )
         self.appearance_head = nn.Sequential(
             nn.LayerNorm(self.d_model),
-            nn.Linear(self.d_model, 64),
+            nn.Linear(
+                self.d_model + (1 if self.appearance_match_input else 0), 64
+            ),
             nn.GELU(),
             nn.Linear(64, 1),
         )
@@ -72,6 +76,7 @@ class RSC(nn.Module):
         current_appearance_token: torch.Tensor,
         current_competition_token: torch.Tensor | None,
         current_has_detection: torch.Tensor,
+        current_match_distance: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         if history_evidence.shape != history_appearance.shape:
             raise ValueError(
@@ -140,8 +145,25 @@ class RSC(nn.Module):
         z_appearance = history_appearance + self.residual_appearance(
             delta_appearance
         )
+        if self.appearance_match_input:
+            if current_match_distance is None or current_match_distance.shape != (
+                batch_size,
+            ):
+                raise ValueError(
+                    "appearance_match_input requires current_match_distance "
+                    f"with shape ({batch_size},), got "
+                    f"{None if current_match_distance is None else tuple(current_match_distance.shape)}"
+                )
+            normalized = self.appearance_head[0](z_appearance)
+            match = current_match_distance.float().reshape(batch_size, 1)
+            fused_appearance = torch.cat([normalized, match], dim=-1)
+            fused_appearance = self.appearance_head[1](fused_appearance)
+            fused_appearance = self.appearance_head[2](fused_appearance)
+            appearance_logits = self.appearance_head[3](fused_appearance)
+        else:
+            appearance_logits = self.appearance_head(z_appearance)
         gate_logits = torch.cat(
-            [self.evidence_head(z_evidence), self.appearance_head(z_appearance)],
+            [self.evidence_head(z_evidence), appearance_logits],
             dim=-1,
         )
         return {"gate_logits": gate_logits, "gates": torch.sigmoid(gate_logits)}

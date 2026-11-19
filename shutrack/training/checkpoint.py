@@ -82,6 +82,7 @@ def model_from_config(model_config: Mapping[str, Any]) -> ShutrackV2Model:
         "appearance_proj_dim",
         "context_size",
         "competition_enabled",
+        "appearance_match_input",
     }
     unknown = sorted(set(model_config).difference(allowed))
     if unknown:

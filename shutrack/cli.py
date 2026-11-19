@@ -70,6 +70,21 @@ def _add_train_arguments(parser: argparse.ArgumentParser) -> None:
         choices=["sample-proportional", "sqrt-size"],
         default=TRAIN_DEFAULTS["sequence_sampling"],
     )
+    parser.add_argument(
+        "--data-loader",
+        choices=["batch", "items"],
+        default=TRAIN_DEFAULTS["data_loader"],
+        help="batch = vectorised per-batch gather; items = legacy per-sample path",
+    )
+    parser.add_argument(
+        "--prefetch", type=int, default=TRAIN_DEFAULTS["prefetch"]
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        default=TRAIN_DEFAULTS["profile"],
+        help="Synchronize per batch to split data/H2D/compute timings",
+    )
     parser.add_argument("--d-model", type=int, default=TRAIN_DEFAULTS["d_model"])
     parser.add_argument("--n-heads", type=int, default=TRAIN_DEFAULTS["n_heads"])
     parser.add_argument("--hce-layers", type=int, default=TRAIN_DEFAULTS["hce_layers"])
@@ -79,6 +94,20 @@ def _add_train_arguments(parser: argparse.ArgumentParser) -> None:
         "--appearance-proj-dim",
         type=int,
         default=TRAIN_DEFAULTS["appearance_proj_dim"],
+    )
+    parser.add_argument(
+        "--appearance-match-input",
+        action="store_true",
+        default=TRAIN_DEFAULTS["appearance_match_input"],
+        help="Feed the standardized matched cosine distance into the appearance "
+        "gate head (one extra input column, zero-initialized)",
+    )
+    parser.add_argument(
+        "--motion-low-weight",
+        type=float,
+        default=TRAIN_DEFAULTS["motion_low_weight"],
+        help="Multiplier for motion-channel samples whose safe gate target is "
+        "below 0.5 (1.0 keeps the original loss)",
     )
     parser.add_argument(
         "--sequence-cache-size",
@@ -112,6 +141,9 @@ def _train_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
             "shard_cycles",
             "epochs_per_shard",
             "sequence_sampling",
+            "data_loader",
+            "prefetch",
+            "profile",
             "d_model",
             "n_heads",
             "hce_layers",
@@ -119,6 +151,8 @@ def _train_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
             "dropout",
             "appearance_proj_dim",
             "sequence_cache_size",
+            "appearance_match_input",
+            "motion_low_weight",
         )
     }
     config["competition_enabled"] = str(args.competition).lower() == "on"
