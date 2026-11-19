@@ -31,6 +31,7 @@ class WindowArrays:
     current_detection: np.ndarray     # (D,)
     current_has_detection: bool
     current_frame_id: int
+    current_match_distance: float = 0.0
 
 
 def select_history(
@@ -121,6 +122,7 @@ def build_window(
         current_detection=np.asarray(current.detection_feature, dtype=np.float32),
         current_has_detection=bool(current.has_detection),
         current_frame_id=int(current.frame_id),
+        current_match_distance=float(current.match_distance),
     )
 
 
@@ -167,6 +169,9 @@ def stack_windows(windows: Sequence[WindowArrays]) -> dict[str, np.ndarray]:
         ),
         "current_has_detection": np.asarray(
             [w.current_has_detection for w in windows], dtype=np.bool_
+        ),
+        "current_match_distance": np.asarray(
+            [w.current_match_distance for w in windows], dtype=np.float32
         ),
     }
 

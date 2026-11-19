@@ -463,6 +463,8 @@ class ShutrackRuntime:
             key: torch.from_numpy(value).to(self.device)
             for key, value in batch.items()
         }
+        if not bool(getattr(self.model.config, "appearance_match_input", False)):
+            tensors.pop("current_match_distance", None)
         with torch.inference_mode():
             outputs = self.model(**tensors)
         gates = outputs["gates"].float().cpu().numpy()

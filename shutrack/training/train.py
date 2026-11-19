@@ -61,6 +61,8 @@ TRAIN_DEFAULTS: dict[str, Any] = {
     "data_loader": "batch",
     "prefetch": 2,
     "profile": False,
+    "appearance_match_input": False,
+    "motion_low_weight": 1.0,
 }
 
 MODEL_INPUT_KEYS = (
@@ -93,8 +95,13 @@ def _move_batch(batch: Mapping[str, Any], device: torch.device) -> dict[str, Any
     return moved
 
 
-def _model_inputs(batch: Mapping[str, Any]) -> dict[str, torch.Tensor]:
-    return {key: batch[key] for key in MODEL_INPUT_KEYS}
+def _model_inputs(
+    batch: Mapping[str, Any], *, appearance_match_input: bool = False
+) -> dict[str, torch.Tensor]:
+    inputs = {key: batch[key] for key in MODEL_INPUT_KEYS}
+    if appearance_match_input:
+        inputs["current_match_distance"] = batch["current_match_distance"]
+    return inputs
 
 
 def build_dataset(config: Mapping[str, Any]) -> PackedShutrackDataset:
@@ -116,8 +123,61 @@ def build_model(dataset: PackedShutrackDataset, config: Mapping[str, Any]) -> Sh
         dropout=float(config.get("dropout", 0.0)),
         appearance_proj_dim=int(config.get("appearance_proj_dim", 64)),
         competition_enabled=bool(config.get("competition_enabled", True)),
+        appearance_match_input=bool(config.get("appearance_match_input", False)),
     )
     return ShutrackV2Model(model_config)
+
+
+def _load_init_state_with_extension(
+    model: ShutrackV2Model, source_model: ShutrackV2Model
+) -> None:
+    """Copy init weights, allowing only the appearance-head 1-column extension."""
+
+    source_config = dict(source_model.config.as_dict())
+    target_config = dict(model.config.as_dict())
+    source_config.setdefault("appearance_match_input", False)
+    target_config.setdefault("appearance_match_input", False)
+    differences = {
+        key: (source_config.get(key), target_config.get(key))
+        for key in sorted(set(source_config) | set(target_config))
+        if key != "appearance_match_input"
+        and source_config.get(key) != target_config.get(key)
+    }
+    if differences:
+        raise ValueError(
+            "--init-checkpoint model_config does not match SHUTrack A: "
+            + json.dumps(differences, default=str, sort_keys=True)
+        )
+    source_state = source_model.state_dict()
+    target_state = model.state_dict()
+    if source_config["appearance_match_input"] == target_config["appearance_match_input"]:
+        model.load_state_dict(source_state, strict=True)
+        return
+    if source_config["appearance_match_input"] or not target_config["appearance_match_input"]:
+        raise ValueError(
+            "unsupported appearance-head extension direction for --init-checkpoint"
+        )
+    extended_key = "rsc.appearance_head.1.weight"
+    updated: dict[str, torch.Tensor] = {}
+    for name, value in target_state.items():
+        if name not in source_state:
+            raise ValueError(f"--init-checkpoint is missing weight {name}")
+        source_value = source_state[name]
+        if source_value.shape == value.shape:
+            updated[name] = source_value
+        elif name == extended_key and source_value.shape == (
+            value.shape[0],
+            value.shape[1] - 1,
+        ):
+            extended = torch.zeros_like(value)
+            extended[:, : source_value.shape[1]] = source_value
+            updated[name] = extended
+        else:
+            raise ValueError(
+                f"--init-checkpoint weight shape mismatch for {name}: "
+                f"{tuple(source_value.shape)} vs {tuple(value.shape)}"
+            )
+    model.load_state_dict(updated, strict=True)
 
 
 def _scheduler_lambda(total_steps: int, warmup_steps: int):
@@ -188,9 +248,11 @@ def _validate_resume_contract(
     dataset: PackedShutrackDataset,
 ) -> None:
     mismatches: dict[str, Any] = {}
-    if dict(checkpoint["model_config"]) != model.config.as_dict():
+    checkpoint_model_config = dict(checkpoint["model_config"])
+    checkpoint_model_config.setdefault("appearance_match_input", False)
+    if checkpoint_model_config != model.config.as_dict():
         mismatches["model_config"] = (
-            checkpoint["model_config"],
+            checkpoint_model_config,
             model.config.as_dict(),
         )
     mean = np.asarray(checkpoint.get("normalization_mean", []), dtype=np.float64)
@@ -302,14 +364,13 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
         initialization = {"mode": "random"}
         if init_path:
             source_model, source = load_shutrack_checkpoint(init_path, map_location="cpu")
-            if source_model.config.as_dict() != model.config.as_dict():
-                raise ValueError("--init-checkpoint model_config does not match SHUTrack A")
-            model.load_state_dict(source_model.state_dict(), strict=True)
+            _load_init_state_with_extension(model, source_model)
             initialization = {
                 "mode": "weights_only",
                 "checkpoint": str(Path(init_path).resolve()),
                 "source_epoch": int(source["epoch"]),
                 "source_dataset": source["dataset"]["dataset"],
+                "appearance_match_input": bool(source_model.config.appearance_match_input),
             }
             del source_model, source
         optimizer = torch.optim.AdamW(
@@ -462,6 +523,11 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                     "mse",
                     "motion_gate_mean",
                     "appearance_gate_mean",
+                    "motion_low_weight_share",
+                    "motion_low_gate_mean",
+                    "motion_high_gate_mean",
+                    "motion_low_recall",
+                    "motion_false_suppression",
                     "grad_norm",
                 )
                 stat_sums = {
@@ -500,8 +566,21 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                         compute_started = time.perf_counter()
                         epoch_batches += 1
                         epoch_samples += int(batch["safe_gate_target"].shape[0])
-                        outputs = model(**_model_inputs(batch))
-                        loss, components = gate_loss(outputs, batch)
+                        outputs = model(
+                            **_model_inputs(
+                                batch,
+                                appearance_match_input=bool(
+                                    resolved.get("appearance_match_input", False)
+                                ),
+                            )
+                        )
+                        loss, components = gate_loss(
+                            outputs,
+                            batch,
+                            motion_low_weight=float(
+                                resolved.get("motion_low_weight", 1.0)
+                            ),
+                        )
                         if not torch.isfinite(loss):
                             raise FloatingPointError(
                                 f"non-finite SHUTrack loss at epoch={epoch} "
@@ -539,6 +618,26 @@ def train_shutrack(config: Mapping[str, Any]) -> dict[str, Any]:
                             (
                                 "appearance_gate_mean",
                                 components["appearance_gate_mean"].detach(),
+                            ),
+                            (
+                                "motion_low_weight_share",
+                                components["motion_low_weight_share"].detach(),
+                            ),
+                            (
+                                "motion_low_gate_mean",
+                                components["motion_low_gate_mean"].detach(),
+                            ),
+                            (
+                                "motion_high_gate_mean",
+                                components["motion_high_gate_mean"].detach(),
+                            ),
+                            (
+                                "motion_low_recall",
+                                components["motion_low_recall"].detach(),
+                            ),
+                            (
+                                "motion_false_suppression",
+                                components["motion_false_suppression"].detach(),
                             ),
                             ("grad_norm", grad_norm.detach()),
                         ):
@@ -752,11 +851,23 @@ def evaluate_checkpoint(
         )
         totals = ScalarAccumulator()
         batches = 0
+        motion_low_weight = float(
+            (checkpoint.get("training_config") or {}).get("motion_low_weight", 1.0)
+        )
         with torch.no_grad():
             for batch in loader:
                 batch = _move_batch(batch, torch.device(device))
-                outputs = model(**_model_inputs(batch))
-                loss, components = gate_loss(outputs, batch)
+                outputs = model(
+                    **_model_inputs(
+                        batch,
+                        appearance_match_input=bool(
+                            model.config.appearance_match_input
+                        ),
+                    )
+                )
+                loss, components = gate_loss(
+                    outputs, batch, motion_low_weight=motion_low_weight
+                )
                 weight = float(components["weight_sum"].detach().cpu())
                 totals.add("loss", loss, weight if weight > 0 else 1.0)
                 totals.add("bce", components["bce"], weight if weight > 0 else 1.0)

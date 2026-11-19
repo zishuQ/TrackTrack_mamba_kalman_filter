@@ -126,7 +126,7 @@ def test_training_loop_exception_closes_loader_before_dataset(tmp_path, monkeypa
 
     monkeypatch.setattr(PackedShutrackDataset, "close", close)
 
-    def boom(outputs, batch):
+    def boom(outputs, batch, **kwargs):
         raise RuntimeError("training boom")
 
     monkeypatch.setattr(train_module, "gate_loss", boom)

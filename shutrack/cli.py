@@ -96,6 +96,20 @@ def _add_train_arguments(parser: argparse.ArgumentParser) -> None:
         default=TRAIN_DEFAULTS["appearance_proj_dim"],
     )
     parser.add_argument(
+        "--appearance-match-input",
+        action="store_true",
+        default=TRAIN_DEFAULTS["appearance_match_input"],
+        help="Feed the standardized matched cosine distance into the appearance "
+        "gate head (one extra input column, zero-initialized)",
+    )
+    parser.add_argument(
+        "--motion-low-weight",
+        type=float,
+        default=TRAIN_DEFAULTS["motion_low_weight"],
+        help="Multiplier for motion-channel samples whose safe gate target is "
+        "below 0.5 (1.0 keeps the original loss)",
+    )
+    parser.add_argument(
         "--sequence-cache-size",
         type=int,
         default=TRAIN_DEFAULTS["sequence_cache_size"],
@@ -137,6 +151,8 @@ def _train_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
             "dropout",
             "appearance_proj_dim",
             "sequence_cache_size",
+            "appearance_match_input",
+            "motion_low_weight",
         )
     }
     config["competition_enabled"] = str(args.competition).lower() == "on"

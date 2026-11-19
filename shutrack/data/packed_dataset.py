@@ -388,6 +388,12 @@ class PackedShutrackDataset(Dataset):
         )
         valid = np.asarray(arrays["valid_channels"][local_index], dtype=np.bool_).reshape(2)
         weight = np.asarray(arrays["sample_weight"][local_index], dtype=np.float32).reshape(())
+        current_scalar = np.asarray(
+            arrays["timeline_scalar_feats"][current_index], dtype=np.float64
+        )
+        current_match_distance = torch.tensor(
+            float(current_scalar[2]), dtype=torch.float32
+        )
 
         return {
             "history_evidence": torch.from_numpy(window.history_evidence),
@@ -404,6 +410,7 @@ class PackedShutrackDataset(Dataset):
             "safe_gate_target": torch.from_numpy(safe_gate),
             "valid_channels": torch.from_numpy(valid),
             "sample_weight": torch.from_numpy(weight),
+            "current_match_distance": current_match_distance,
             "sequence": sequence,
             "track_id": track_id,
             "segment_id": segment_id,
@@ -449,6 +456,7 @@ class PackedShutrackDataset(Dataset):
             "safe_gate_target": np.zeros((count, 2), np.float32),
             "valid_channels": np.zeros((count, 2), np.bool_),
             "sample_weight": np.zeros((count,), np.float32),
+            "current_match_distance": np.zeros((count,), np.float32),
         }
         track_ids = np.zeros(count, np.int64)
         segment_ids = np.zeros(count, np.int64)
@@ -502,12 +510,22 @@ class PackedShutrackDataset(Dataset):
                     if self.competition_enabled
                     else np.zeros((safe_index.size, COMPETITION_DIM), np.float32)
                 )
+                match_distance = scalar[:, 2].astype(np.float32)
                 evidence[~valid] = 0.0
                 competition[~valid] = 0.0
-                return evidence, competition, track, detection, has_detection, valid
+                match_distance[~valid] = 0.0
+                return (
+                    evidence,
+                    competition,
+                    track,
+                    detection,
+                    has_detection,
+                    valid,
+                    match_distance,
+                )
 
             for history_position in range(history):
-                evidence, _, track, detection, has_detection, valid = gather(
+                evidence, _, track, detection, has_detection, valid, _ = gather(
                     history_position
                 )
                 out["history_evidence"][rows, history_position] = evidence
@@ -523,6 +541,7 @@ class PackedShutrackDataset(Dataset):
                 current_detection,
                 current_has_detection,
                 current_valid,
+                current_match_distance,
             ) = gather(history)
             if not bool((current_valid & current_has_detection).all()):
                 bad = int((~(current_valid & current_has_detection)).sum())
@@ -535,6 +554,7 @@ class PackedShutrackDataset(Dataset):
             out["current_track"][rows] = current_track
             out["current_detection"][rows] = current_detection
             out["current_has_detection"][rows] = current_has_detection
+            out["current_match_distance"][rows] = current_match_distance
             out["safe_gate_target"][rows] = np.asarray(
                 arrays["safe_gate_target"][local], dtype=np.float32
             )
