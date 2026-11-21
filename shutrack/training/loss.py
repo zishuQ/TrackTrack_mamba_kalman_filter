@@ -233,6 +233,7 @@ def motion_box_diou_loss(
     batch: Mapping[str, torch.Tensor],
     *,
     weight: float = 1.0,
+    harm_weight: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Supervise the motion gate by interpolated next-frame box DIoU.
 
@@ -241,7 +242,13 @@ def motion_box_diou_loss(
     motion gate interpolates them linearly in box space (verified against the
     online path), and the loss is ``1 - DIoU`` against the same identity's
     t+1 GT box.  Events without a valid GT box are masked out.
+
+    Optional harm_weight reweights only events where the fixed g=1 endpoint
+    has worse GT DIoU loss than g=0 (tolerance 1e-6). It changes importance,
+    never assigns a target gate. Default 1 preserves the original path.
     """
+    if not math.isfinite(float(harm_weight)) or float(harm_weight) < 1.0:
+        raise ValueError("harm_weight must be finite and >= 1")
     gate = torch.sigmoid(outputs["gate_logits"].float())[:, 0]
     box0 = batch["pred_box_g0"].float()
     box1 = batch["pred_box_g1"].float()
@@ -264,6 +271,23 @@ def motion_box_diou_loss(
         "valid_ratio": mask.mean().detach(),
         "diou_at_gate_mean": ((elementwise * mask).sum() / denominator).detach(),
     }
+    if float(harm_weight) != 1.0:
+        with torch.no_grad():
+            loss0 = 1.0 - _diou_xyxy(box0, target)
+            loss1 = 1.0 - _diou_xyxy(box1, target)
+            harmful = valid & (loss1 > loss0 + 1e-6)
+            effective_weights = mask * (1.0 + (float(harm_weight) - 1.0) * harmful.float())
+            effective_sum = effective_weights.sum().clamp_min(1.0)
+        weighted_loss = (elementwise * effective_weights).sum() / effective_sum
+        components.update({
+            "loss": weighted_loss * float(weight),
+            "diou_loss": weighted_loss.detach(),
+            "unweighted_diou_loss": loss.detach(),
+            "harm_fraction": (harmful.float().sum() / denominator).detach(),
+            "harm_weight_share": (
+                (effective_weights * harmful.float()).sum() / effective_sum
+            ).detach(),
+        })
     return components["loss"], components
 
 
@@ -339,6 +363,37 @@ def gated_appearance_template(
     full = beta.unsqueeze(-1) * template0 + (1.0 - beta).unsqueeze(-1) * detection
     blended = (1.0 - gate).unsqueeze(-1) * template0 + gate.unsqueeze(-1) * full
     return blended / blended.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+
+
+def appearance_column_loss(
+    outputs, batch, *, alpha=0.95, tau=0.1, hinge=False, components=None,
+    tensor_statistics=False,
+):
+    """Train the previous write against the strongest eligible rival track.
+
+    ``hinge=False`` keeps the original softplus penalty; ``hinge=True`` uses
+    ``relu`` so events whose correct track already costs no more than the
+    rival contribute neither loss nor gradient.
+    """
+    gate = torch.sigmoid(outputs["gate_logits"].float()[:, 1])
+    updated = gated_appearance_template(batch["current_track"], batch["current_detection"],
+                                        batch["column_score"], gate, alpha=alpha)
+    # Match cos_distance and the clipping applied by iterative_assignment.
+    distance = (1 - (updated * batch["column_positive"]).sum(-1)).clamp(0, 1)
+    cost = (batch["column_offset"] + 0.5 * distance).clamp(0, 1)
+    margin = (cost - batch["column_rival"]) / tau
+    penalty = F.relu(margin) if hinge else F.softplus(margin)
+    valid = batch["column_valid"].float()
+    loss = (penalty * valid).sum() / max(1, gate.numel())
+    if components is not None:
+        valid_count = valid.sum().detach()
+        active_count = ((margin > 0) & (valid > 0)).sum().detach()
+        # Training defers these statistics until epoch end to avoid CUDA syncs.
+        components["valid"] = valid_count if tensor_statistics else int(valid_count)
+        components["active"] = active_count if tensor_statistics else int(active_count)
+        components["margin"] = margin.detach()
+        components["valid_mask"] = valid.detach() > 0
+    return loss
 
 
 def appearance_rank_loss(

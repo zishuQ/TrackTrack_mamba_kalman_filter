@@ -125,6 +125,12 @@ def make_parser():
         action="store_true",
         help="Print HOTA/MOTA/IDF1/DetA/AssA for each evaluated sequence.",
     )
+    parser.add_argument(
+        "--eval-json",
+        type=str,
+        default="",
+        help="Optional path to save the combined and per-sequence eval summary as JSON.",
+    )
 
     # For trackers
     parser.add_argument("--min_len", type=int, default=3)
@@ -619,9 +625,13 @@ def run():
         print('Evaluating...')
         eval_tracker = trackers_to_eval + '_post' if args.use_post else trackers_to_eval
         if args.sequences:
-            evaluate_sequences(args, eval_tracker, args.dataset, args.sequences)
+            summary = evaluate_sequences(args, eval_tracker, args.dataset, args.sequences)
         else:
-            evaluate(args, eval_tracker, args.dataset)
+            summary = evaluate(args, eval_tracker, args.dataset)
+        eval_json = getattr(args, 'eval_json', '')
+        if eval_json:
+            Path(eval_json).parent.mkdir(parents=True, exist_ok=True)
+            Path(eval_json).write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
 
     # Logging
     print(total_count / total_time, flush=True)

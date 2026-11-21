@@ -15,6 +15,7 @@ from shutrack.models.encoders import (
 )
 from shutrack.models.hce import HCE
 from shutrack.models.rsc import RSC
+from shutrack.models.query_controller import QueryHCE, QueryRSC
 from shutrack.schema import (
     ARCHITECTURE_NAME,
     ARCHITECTURE_VERSION,
@@ -37,6 +38,7 @@ class ShutrackV2Config:
     context_size: int = CONTEXT_SIZE
     competition_enabled: bool = True
     appearance_match_input: bool = False
+    architecture_variant: str = "legacy"
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -52,6 +54,10 @@ class ShutrackV2Model(nn.Module):
                 f"SHUTrack requires context_size={CONTEXT_SIZE}, got "
                 f"{config.context_size}"
             )
+        if config.architecture_variant not in ("legacy", "query_film_bilinear"):
+            raise ValueError(f"Unknown architecture_variant: {config.architecture_variant!r}")
+        if config.architecture_variant == "query_film_bilinear" and config.appearance_match_input:
+            raise ValueError("query_film_bilinear does not support appearance_match_input")
         self.config = config
         self.evidence_encoder = EvidenceEncoder(
             d_model=config.d_model, ff_dim=config.ff_dim
@@ -62,6 +68,20 @@ class ShutrackV2Model(nn.Module):
             d_model=config.d_model,
             ff_dim=config.ff_dim,
         )
+        if config.architecture_variant == "query_film_bilinear":
+            self.competition_encoder = None  # Competition modulates RSC queries.
+            self.event_fusion = nn.Sequential(
+                nn.Linear(2 * config.d_model, config.d_model),
+                nn.LayerNorm(config.d_model),
+            )
+            self.hce = QueryHCE(
+                d_model=config.d_model, n_heads=config.n_heads,
+                n_layers=config.hce_layers, ff_dim=config.ff_dim, dropout=config.dropout,
+            )
+            self.rsc = QueryRSC(
+                d_model=config.d_model, competition_enabled=config.competition_enabled,
+            )
+            return
         self.competition_encoder = (
             CompetitionEncoder(d_model=config.d_model, ff_dim=config.ff_dim)
             if config.competition_enabled
@@ -147,6 +167,13 @@ class ShutrackV2Model(nn.Module):
             raise ValueError(
                 "current_has_detection must contain one flag per sample"
             )
+        if self.config.architecture_variant == "query_film_bilinear":
+            return self._forward_query(
+                history_evidence, history_track, history_detection, history_mask,
+                history_has_detection, current_evidence, current_track,
+                current_detection, current_competition, current_has_detection,
+                history_reset,
+            )
 
         history_tokens = self.event_norm(
             self.appearance_encoder(
@@ -195,6 +222,34 @@ class ShutrackV2Model(nn.Module):
             current_match_distance=current_match_distance,
         )
 
+    def _forward_query(
+        self, history_evidence, history_track, history_detection, history_mask,
+        history_has_detection, current_evidence, current_track, current_detection,
+        current_competition, current_has_detection, history_reset,
+    ):
+        batch_size = history_evidence.shape[0]
+        history_appearance = self.appearance_encoder(
+            history_track.reshape(-1, self.reid_dim),
+            history_detection.reshape(-1, self.reid_dim),
+            history_has_detection.reshape(-1),
+        ).reshape(batch_size, HISTORY_SIZE, self.config.d_model)
+        history_events = self.event_fusion(torch.cat([
+            self.evidence_encoder(history_evidence), history_appearance,
+        ], dim=-1))
+        current_appearance = self.appearance_encoder(
+            current_track, current_detection, current_has_detection.reshape(-1).bool(),
+        )
+        # A missing current detection must not contribute appearance content.
+        current_appearance = current_appearance.masked_fill(
+            ~current_has_detection.reshape(-1, 1).bool(), 0.0,
+        )
+        current_event = self.event_fusion(torch.cat([
+            self.evidence_encoder(current_evidence), current_appearance,
+        ], dim=-1))
+        queries = self.rsc.make_queries(current_event, current_competition)
+        readouts = self.hce(history_events, history_mask, queries, history_reset)
+        return self.rsc(queries, readouts)
+
     def parameter_report(self) -> dict[str, int]:
         counts = {
             "total": sum(p.numel() for p in self.parameters()),
@@ -207,6 +262,8 @@ class ShutrackV2Model(nn.Module):
                 p.numel() for p in self.appearance_encoder.parameters()
             ),
         }
+        if self.config.architecture_variant == "query_film_bilinear":
+            counts["event_fusion"] = sum(p.numel() for p in self.event_fusion.parameters())
         if self.competition_encoder is not None:
             counts["competition_encoder"] = sum(
                 p.numel() for p in self.competition_encoder.parameters()

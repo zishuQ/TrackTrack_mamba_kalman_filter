@@ -15,6 +15,8 @@ same interval.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import get_context
 import json
 import sys
 from pathlib import Path
@@ -49,38 +51,32 @@ class StateCapturePilot(SequencePilot):
         self.prototypes = {}
 
     def install_hooks(self) -> None:
-        from trackers import tracker as tracker_module
+        from trackers.track import Track
+        from shutrack.integration.tracktrack import ShutrackTrackerAdapter
+        from paired_missing import capture_detection_pool
 
-        super().install_hooks()
-        current_update = tracker_module.Tracker.update
-        current_no_det = tracker_module.Tracker.update_without_detections
+        self._restore = []
+        capture_detection_pool(self, ShutrackTrackerAdapter)
         pilot = self
 
-        def update(tracker_self, dets, dets_95):
-            result = current_update(tracker_self, dets, dets_95)
-            pilot._capture(tracker_self)
-            return result
+        def wrap(original):
+            def update(track, frame, detection, *args, **kwargs):
+                index = int(getattr(detection, "frame_detection_index", -1))
+                tid = int(track.track_id)
+                before = pilot.vote.resolve_before_current(pilot.sequence, tid)
+                identity = pilot.det_gt.get((frame, index), (-1, 0.0))[0]
+                result = original(track, frame, detection, *args, **kwargs)
+                pilot.vote.add_current_observation(pilot.sequence, tid, identity)
+                pilot.events.append({"frame_t": frame, "track_id": tid, "detection_index": index,
+                                     "target_gt_before": before})
+                pilot.states[(frame, tid)] = track.mean.copy()
+                return result
+            return update
 
-        def update_no_det(tracker_self):
-            result = current_no_det(tracker_self)
-            pilot._capture(tracker_self)
-            return result
-
-        tracker_module.Tracker.update = update
-        tracker_module.Tracker.update_without_detections = update_no_det
-        self._restore = [
-            (tracker_module.Tracker, "update", current_update),
-            (tracker_module.Tracker, "update_without_detections", current_no_det),
-        ] + self._restore
-
-    def _capture(self, tracker) -> None:
-        frame = int(tracker.frame_id)
-        for track in tracker.tracks:
-            if track.mean is None:
-                continue
-            self.states[(frame, int(track.track_id))] = np.asarray(
-                track.mean, dtype=np.float64
-            ).copy()
+        for name in ("update", "update_with_gates"):
+            original = getattr(Track, name)
+            self._restore.append((Track, name, original))
+            setattr(Track, name, wrap(original))
 
 
 def box_metrics(pred: np.ndarray, gt: np.ndarray, img_w: float, img_h: float) -> dict:
@@ -113,32 +109,26 @@ def box_metrics(pred: np.ndarray, gt: np.ndarray, img_w: float, img_h: float) ->
 def replay_states(sequence, split, checkpoint, out_dir):
     pilot = StateCapturePilot(sequence, split, checkpoint, out_dir)
     pilot.run_replay()
-    events: dict[tuple[int, int], tuple[int, np.ndarray]] = {}
+    events = {}
+    assigned = {}
     for record in pilot.events:
-        gt_id = int(record.get("detection_gt_id", -1))
-        if gt_id < 0 or int(record.get("detection_index", -1)) < 0:
-            continue
         frame = int(record["frame_t"])
-        track_id = int(record["track_id"])
-        state = pilot.states.get((frame, track_id))
-        if state is None:
+        index = int(record["detection_index"])
+        gt_id = pilot.unique_gt.get((frame, index))
+        if gt_id is None:
             continue
-        key = (frame, gt_id)
-        count = int(record.get("observation_count", 0))
-        previous = events.get(key)
-        if previous is None or count >= previous[0]:
-            events[key] = (count, state)
-    detections: dict[int, set[int]] = {}
-    for frame_index in range(pilot.det_cache.num_frames):
-        frame = frame_index + 1
-        detections[frame] = {
-            int(entry["gt_id"])
-            for entry in pilot.frame_matches(frame_index)
-            if entry["gt_id"] >= 0 and entry["iou"] >= 0.5
-        }
+        track_id = int(record["track_id"])
+        assigned.setdefault((frame, gt_id), set()).add(track_id)
+        if record.get("target_gt_before") != gt_id:
+            continue
+        state = pilot.states.get((frame, track_id))
+        if state is not None:
+            events[(frame, gt_id, index)] = (track_id, state)
     result = {
-        "events": {key: value[1] for key, value in events.items()},
-        "detections": detections,
+        "events": events,
+        "assigned": assigned,
+        "detections": pilot.visible,
+        "clear_visible": pilot.clear_visible,
         "gt": pilot.gt,
         "warps": pilot.warps,
         "kf": pilot.kf,
@@ -172,12 +162,94 @@ def summarize_paired(values: list[float]) -> dict:
     }
 
 
+def empty_metrics(checkpoints):
+    collected = {
+        name: {gap: {"center": [], "size": [], "iou": []} for gap in GAPS}
+        for name in checkpoints
+    }
+    recovery = {name: {gap: {"observable": 0, "same_track": 0} for gap in GAPS}
+                for name in checkpoints}
+    return collected, recovery
+
+
+def measure_sequence(job):
+    import torch
+    torch.set_num_threads(1)
+    sequence, checkpoints, log_root = job
+    collected, recovery = empty_metrics(checkpoints)
+    group_data = {}
+    reference = None
+    for name, checkpoint in checkpoints.items():
+        data = replay_states(sequence, "val", checkpoint, log_root)
+        group_data[name] = data
+        if reference is None:
+            reference = data
+    shared = set(group_data[next(iter(checkpoints))]["events"])
+    for name in checkpoints:
+        shared &= set(group_data[name]["events"])
+    gt = reference["gt"]
+    warps = reference["warps"]
+    detections = reference["detections"]
+    kf = reference["kf"]
+    img_w = reference["img_w"]
+    img_h = reference["img_h"]
+    frame_count = reference["frame_count"]
+    sequence_rows = {gap: 0 for gap in GAPS}
+    used = set()
+    for frame, gt_id, det_index in sorted(shared):
+        if (frame, gt_id) in used:
+            continue
+        if any(len(data["assigned"].get((frame, gt_id), ())) != 1 for data in group_data.values()):
+            continue
+        used.add((frame, gt_id))
+        first_return = frame + 1
+        while (first_return <= frame_count and gt_id in gt.get(first_return, {})
+               and gt_id not in detections.get(first_return, set())):
+            first_return += 1
+        observable = first_return <= frame_count and gt_id in reference["clear_visible"].get(first_return, set())
+        for gap in GAPS:
+            target_frame = frame + gap
+            if target_frame > frame_count:
+                continue
+            gt_box = gt.get(target_frame, {}).get(gt_id)
+            if gt_box is None or first_return <= target_frame:
+                continue
+            if any(
+                gt_id in detections.get(frame + step, set())
+                for step in range(1, gap + 1)
+            ):
+                continue
+            if any((frame + step) not in warps for step in range(1, gap + 1)):
+                continue
+            sequence_rows[gap] += 1
+            for name in checkpoints:
+                start_id, state = group_data[name]["events"][(frame, gt_id, det_index)]
+                if observable:
+                    recovery[name][gap]["observable"] += 1
+                    return_ids = group_data[name]["assigned"].get((first_return, gt_id), set())
+                    recovery[name][gap]["same_track"] += int(return_ids == {start_id})
+                mean = np.asarray(state, dtype=np.float64)
+                covariance = np.zeros((8, 8), dtype=np.float64)
+                for step in range(1, gap + 1):
+                    mean, covariance = warp_predict(
+                        mean, covariance, warps[frame + step], kf
+                    )
+                metrics = box_metrics(
+                    mean_to_box(mean), np.asarray(gt_box), img_w, img_h
+                )
+                for key in ("center", "size", "iou"):
+                    collected[name][gap][key].append(metrics[key])
+    print(f"{sequence}: shared={len(shared)} rows={sequence_rows}", flush=True)
+    return sequence, sequence_rows, collected, recovery
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", action="append", required=True, help="name=path")
     parser.add_argument("--sequences-file", default=str(VAL_MAP))
     parser.add_argument("--only", nargs="*", default=None)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--workers", type=int, default=1)
     parser.add_argument(
         "--log-root",
         default=str(
@@ -201,66 +273,21 @@ def main() -> None:
         checkpoints[name] = Path(path)
     log_root = Path(args.log_root)
 
-    collected = {
-        name: {gap: {"center": [], "size": [], "iou": []} for gap in GAPS}
-        for name in checkpoints
-    }
+    collected, recovery = empty_metrics(checkpoints)
     per_sequence = {}
-    for sequence in sequences:
-        group_data = {}
-        reference = None
-        for name, checkpoint in checkpoints.items():
-            data = replay_states(sequence, "val", checkpoint, log_root)
-            group_data[name] = data
-            if reference is None:
-                reference = data
-        shared = set(group_data[next(iter(checkpoints))]["events"])
-        for name in checkpoints:
-            shared &= set(group_data[name]["events"])
-        gt = reference["gt"]
-        warps = reference["warps"]
-        detections = reference["detections"]
-        kf = reference["kf"]
-        img_w = reference["img_w"]
-        img_h = reference["img_h"]
-        frame_count = reference["frame_count"]
-        sequence_rows = {gap: 0 for gap in GAPS}
-        for frame, gt_id in sorted(shared):
-            for gap in GAPS:
-                target_frame = frame + gap
-                if target_frame > frame_count:
-                    continue
-                gt_box = gt.get(target_frame, {}).get(gt_id)
-                if gt_box is None:
-                    continue
-                if any(
-                    gt_id in detections.get(frame + step, set())
-                    for step in range(1, gap + 1)
-                ):
-                    continue
-                if any((frame + step) not in warps for step in range(1, gap + 1)):
-                    continue
-                sequence_rows[gap] += 1
-                for name in checkpoints:
-                    mean = np.asarray(group_data[name]["events"][(frame, gt_id)], dtype=np.float64)
-                    covariance = np.zeros((8, 8), dtype=np.float64)
-                    for step in range(1, gap + 1):
-                        mean, covariance = warp_predict(
-                            mean, covariance, warps[frame + step], kf
-                        )
-                    metrics = box_metrics(
-                        mean_to_box(mean), np.asarray(gt_box), img_w, img_h
-                    )
-                    for key in ("center", "size", "iou"):
-                        collected[name][gap][key].append(metrics[key])
-        per_sequence[sequence] = sequence_rows
-        print(
-            f"{sequence}: shared={len(shared)} rows="
-            + ",".join(f"{gap}:{sequence_rows[gap]}" for gap in GAPS),
-            flush=True,
-        )
+    jobs = [(sequence, checkpoints, log_root) for sequence in sequences]
+    with ProcessPoolExecutor(max_workers=args.workers, mp_context=get_context("spawn")) as pool:
+        for sequence, counts, values, recoveries in pool.map(measure_sequence, jobs):
+            per_sequence[sequence] = counts
+            for name in checkpoints:
+                for gap in GAPS:
+                    for metric, items in values[name][gap].items():
+                        collected[name][gap][metric].extend(items)
+                    for key, count in recoveries[name][gap].items():
+                        recovery[name][gap][key] += count
 
-    output = {"groups": {}, "paired_vs": {}, "per_sequence_rows": per_sequence}
+    output = {"protocol": "verified_identity_same_detection_v2", "recovery": recovery,
+              "groups": {}, "paired_vs": {}, "per_sequence_rows": per_sequence}
     names = list(checkpoints)
     for name in names:
         output["groups"][name] = {

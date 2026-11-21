@@ -124,6 +124,7 @@ def build_model(dataset: PackedShutrackDataset, config: Mapping[str, Any]) -> Sh
         appearance_proj_dim=int(config.get("appearance_proj_dim", 64)),
         competition_enabled=bool(config.get("competition_enabled", True)),
         appearance_match_input=bool(config.get("appearance_match_input", False)),
+        architecture_variant=str(config.get("architecture_variant", "legacy")),
     )
     return ShutrackV2Model(model_config)
 
@@ -250,6 +251,7 @@ def _validate_resume_contract(
     mismatches: dict[str, Any] = {}
     checkpoint_model_config = dict(checkpoint["model_config"])
     checkpoint_model_config.setdefault("appearance_match_input", False)
+    checkpoint_model_config.setdefault("architecture_variant", "legacy")
     if checkpoint_model_config != model.config.as_dict():
         mismatches["model_config"] = (
             checkpoint_model_config,

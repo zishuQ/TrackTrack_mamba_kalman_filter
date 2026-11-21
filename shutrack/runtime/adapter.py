@@ -457,17 +457,26 @@ class ShutrackRuntime:
     ) -> list[np.ndarray]:
         if not items:
             return []
-        windows = [self.window_for(track_id, evidence) for track_id, evidence in items]
-        batch = stack_windows(windows)
-        tensors = {
-            key: torch.from_numpy(value).to(self.device)
-            for key, value in batch.items()
-        }
-        if not bool(getattr(self.model.config, "appearance_match_input", False)):
-            tensors.pop("current_match_distance", None)
-        with torch.inference_mode():
-            outputs = self.model(**tensors)
-        gates = outputs["gates"].float().cpu().numpy()
+        if self.config.disable_kf_gate and self.config.disable_ema_gate:
+            # Full-write data collection forces both gates to 1.0, so the
+            # model output is never used. Keep building windows (the pilot's
+            # hook captures them for training) but skip the forward and the
+            # tensor stacking entirely.
+            for track_id, evidence in items:
+                self.window_for(track_id, evidence)
+            gates = np.ones((len(items), 2), dtype=np.float32)
+        else:
+            windows = [self.window_for(track_id, evidence) for track_id, evidence in items]
+            batch = stack_windows(windows)
+            tensors = {
+                key: torch.from_numpy(value).to(self.device)
+                for key, value in batch.items()
+            }
+            if not bool(getattr(self.model.config, "appearance_match_input", False)):
+                tensors.pop("current_match_distance", None)
+            with torch.inference_mode():
+                outputs = self.model(**tensors)
+            gates = outputs["gates"].float().cpu().numpy()
         if not np.isfinite(gates).all():
             raise FloatingPointError("SHUTrack produced non-finite gates")
         results: list[np.ndarray] = []

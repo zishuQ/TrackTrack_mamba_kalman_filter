@@ -119,8 +119,52 @@ class PredictCapturePilot(SequencePilot):
         ] + self._restore
 
 
+def sequence_list(root: Path) -> set[str]:
+    return {path.parent.name for path in root.glob("*/samples.npz")}
+
+
+def official_trainval() -> set[str]:
+    metadata_path = MAIN / "outputs/agentguard/train_data/SportsMOT/metadata.json"
+    if not metadata_path.is_file():
+        return set()
+    metadata = json.loads(metadata_path.read_text())
+    val_map = WORKTREE / "3. Tracker/trackeval/seqmap/sportsmot/val.txt"
+    val = {
+        line.strip().split()[0]
+        for line in val_map.read_text().splitlines()
+        if line.strip() and line.strip() != "name"
+    }
+    return set(metadata["train_sequences"]) | val
+
+
 def data_alignment() -> dict:
+    expected = official_trainval()
+    new_list = sequence_list(NEW)
+    old_list = sequence_list(OLD)
+    reasons: list[str] = []
+    if not expected:
+        reasons.append("official trainval sequence list is empty or missing")
+    missing_new = sorted(expected - new_list)
+    extra_new = sorted(new_list - expected)
+    missing_old = sorted(expected - old_list)
+    extra_old = sorted(old_list - expected)
+    if not new_list:
+        reasons.append("new data directory has no sequences")
+    if missing_new:
+        reasons.append(f"new data missing {len(missing_new)} sequences: {missing_new[:5]}")
+    if extra_new:
+        reasons.append(f"new data has {len(extra_new)} unexpected sequences: {extra_new[:5]}")
+    if missing_old:
+        reasons.append(f"old data missing {len(missing_old)} sequences: {missing_old[:5]}")
+    if extra_old:
+        reasons.append(f"old data has {len(extra_old)} unexpected sequences: {extra_old[:5]}")
+    if len(new_list) != len(expected):
+        reasons.append(f"new sequence count {len(new_list)} != expected {len(expected)}")
+
     totals = {
+        "expected_sequences": len(expected),
+        "new_sequences": len(new_list),
+        "old_sequences": len(old_list),
         "sequences": 0,
         "samples": 0,
         "row_mismatch": 0,
@@ -128,22 +172,42 @@ def data_alignment() -> dict:
         "center_endpoint_mismatch": 0,
         "gt_center_mismatch": 0,
         "mask_mismatch": 0,
+        "key_mismatch": 0,
         "size_adj_valid": 0,
         "size_central_valid": 0,
         "size_shared": 0,
         "size_label_abs_sum": [0.0, 0.0],
         "velocity4_mid_error_max": 0.0,
         "box_mid_error_max": 0.0,
+        "reasons": reasons,
     }
-    for samples_path in sorted(NEW.glob("*/samples.npz")):
-        sequence = samples_path.parent.name
-        old_path = OLD / sequence / "samples.npz"
-        if not old_path.is_file():
+    required_files = (
+        "samples.npz",
+        "event_evidence.npy",
+        "event_track.npy",
+        "event_detection_index.npy",
+        "event_has_detection.npy",
+        "summary.json",
+    )
+    for sequence in sorted(expected & new_list & old_list):
+        missing_files = [
+            name for name in required_files if not (NEW / sequence / name).is_file()
+        ]
+        if missing_files:
+            reasons.append(f"{sequence}: missing shard files {missing_files}")
             continue
-        old = np.load(old_path)
-        new = np.load(samples_path)
+        old = np.load(OLD / sequence / "samples.npz")
+        new = np.load(NEW / sequence / "samples.npz")
         totals["sequences"] += 1
         totals["samples"] += int(new["frame"].size)
+        if old["frame"].size != new["frame"].size:
+            reasons.append(
+                f"{sequence}: sample count {new['frame'].size} != old {old['frame'].size}"
+            )
+            continue
+        if not np.array_equal(old["keys_json"], new["keys_json"]):
+            totals["key_mismatch"] += 1
+            reasons.append(f"{sequence}: event keys differ")
         same_rows = all(
             np.array_equal(old[key], new[key])
             for key in ("frame", "track_id", "detection_index", "gt_id", "window_indices")
@@ -169,18 +233,32 @@ def data_alignment() -> dict:
         )
         same_labels = all(np.array_equal(old[key], new[key]) for key in label_keys)
         totals["label_mismatch"] += 0 if same_labels else 1
-        totals["center_endpoint_mismatch"] += (
-            0
-            if np.array_equal(old["kf_velocity_g0"], new["kf_velocity4_g0"][:, :2])
+        same_center = (
+            np.array_equal(old["kf_velocity_g0"], new["kf_velocity4_g0"][:, :2])
             and np.array_equal(old["kf_velocity_g1"], new["kf_velocity4_g1"][:, :2])
-            else 1
         )
-        totals["gt_center_mismatch"] += (
-            0 if np.array_equal(old["gt_velocity"], new["gt_velocity4"][:, :2]) else 1
-        )
-        totals["mask_mismatch"] += (
-            0 if np.array_equal(old["speed_valid"], new["size_adj_valid"]) else 1
-        )
+        same_gt = np.array_equal(old["gt_velocity"], new["gt_velocity4"][:, :2])
+        same_mask = np.array_equal(old["speed_valid"], new["size_adj_valid"])
+        totals["center_endpoint_mismatch"] += 0 if same_center else 1
+        totals["gt_center_mismatch"] += 0 if same_gt else 1
+        totals["mask_mismatch"] += 0 if same_mask else 1
+        mismatched = [
+            name
+            for name, failed in (
+                ("rows", not same_rows),
+                ("labels", not same_labels),
+                ("centre endpoints", not same_center),
+                ("GT centres", not same_gt),
+                ("masks", not same_mask),
+            )
+            if failed
+        ]
+        if mismatched:
+            reasons.append(
+                f"{sequence}: "
+                + ", ".join(mismatched)
+                + " differ from the previous round"
+            )
         adj = new["size_adj_valid"].astype(bool)
         central = new["size_central_valid"].astype(bool)
         shared = adj & central
@@ -194,7 +272,7 @@ def data_alignment() -> dict:
             )
             totals["size_label_abs_sum"][0] += float(difference[:, 0].sum())
             totals["size_label_abs_sum"][1] += float(difference[:, 1].sum())
-        summary = json.loads((samples_path.parent / "summary.json").read_text())
+        summary = json.loads((NEW / sequence / "summary.json").read_text())
         if summary.get("kf_velocity4_mid_error_max") is not None:
             totals["velocity4_mid_error_max"] = max(
                 totals["velocity4_mid_error_max"], summary["kf_velocity4_mid_error_max"]
@@ -207,13 +285,15 @@ def data_alignment() -> dict:
         totals["size_label_mean_abs_diff"] = [
             value / totals["size_shared"] for value in totals["size_label_abs_sum"]
         ]
-    totals["data_aligned"] = (
-        totals["row_mismatch"] == 0
-        and totals["label_mismatch"] == 0
-        and totals["center_endpoint_mismatch"] == 0
-        and totals["gt_center_mismatch"] == 0
-        and totals["mask_mismatch"] == 0
-    )
+    if totals["samples"] == 0:
+        reasons.append("validated shard set contains zero samples")
+    if len(new_list) != len(expected):
+        reasons.append(
+            f"validated {len(new_list)} new sequences, expected {len(expected)}"
+        )
+    totals["data_aligned"] = not reasons and totals["sequences"] == len(expected)
+    if not totals["data_aligned"] and not reasons:
+        reasons.append("sequence validation incomplete")
     return totals
 
 
@@ -472,13 +552,21 @@ def batch_checks(checkpoint: Path) -> dict:
 
 def main() -> None:
     torch.set_num_threads(4)
+    data = data_alignment()
+    out = NEW_ROOT / "speed4_validation.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if not data["data_aligned"]:
+        out.write_text(json.dumps({"data": data}, indent=2, sort_keys=True) + "\n")
+        print(json.dumps(data, indent=2, sort_keys=True))
+        raise SystemExit(
+            "data alignment failed: " + "; ".join(data["reasons"])
+        )
     checkpoint = Path(INIT_CKPT)
     report = {
-        "data": data_alignment(),
+        "data": data,
         "online_spot": online_spot_check(checkpoint),
         "batch": batch_checks(checkpoint),
     }
-    out = NEW_ROOT / "speed4_validation.json"
     out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(json.dumps(report, indent=2, sort_keys=True))
     print("saved", out)

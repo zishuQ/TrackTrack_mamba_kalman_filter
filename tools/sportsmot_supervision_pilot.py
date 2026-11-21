@@ -19,12 +19,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import mmap as mmap_module
+import os
 import sys
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from pathlib import Path
 
 import numpy as np
+from paired_collection_io import (
+    atomic_json, atomic_npz, atomic_track_copy, block_rows, close_mapping, drop_pages,
+)
 
 WORKTREE = Path(__file__).resolve().parents[1]
 MAIN = WORKTREE
@@ -60,7 +65,7 @@ DEFAULT_CKPT = (
 DEFAULT_OUT = (
     MAIN / "outputs/agentguard/experiments/shutrack_a_supervision_pilot_20261118"
 )
-GT_ROOT = Path("/home/shang/datasets/SportsMOT/dataset")
+GT_ROOT = Path.home() / "datasets/SportsMOT/dataset"
 SEQUENCES = ("v_9MHDmAMxO5I_c003", "v_00HRwkvvjtQ_c007", "v_00HRwkvvjtQ_c011")
 FUTURE_FRAMES = 5
 
@@ -77,6 +82,74 @@ def iou_xyxy(a: np.ndarray, b: np.ndarray) -> float:
     return 0.0 if union <= 0.0 else inter / union
 
 
+def bind_gt_box(
+    box: np.ndarray, gt_boxes: dict[int, np.ndarray], threshold: float = 0.5
+) -> tuple[int, float]:
+    """Return (gt_id, true max IoU); bind only when max IoU >= threshold."""
+    best_id = -1
+    best_iou = 0.0
+    for gt_id, gt_box in gt_boxes.items():
+        value = iou_xyxy(box, gt_box)
+        if value > best_iou:
+            best_iou = value
+            best_id = int(gt_id)
+    if best_iou < float(threshold):
+        best_id = -1
+    return best_id, float(best_iou)
+
+
+def pairwise_gt_iou(boxes, gt_boxes):
+    """The label-side non-inclusive IoU convention, vectorized in float64."""
+    a = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
+    b = np.asarray(gt_boxes, dtype=np.float64).reshape(-1, 4)
+    if not len(a) or not len(b):
+        return np.zeros((len(a), len(b)), dtype=np.float64)
+    width = np.maximum(0.0, np.minimum(a[:, None, 2], b[None, :, 2])
+                       - np.maximum(a[:, None, 0], b[None, :, 0]))
+    height = np.maximum(0.0, np.minimum(a[:, None, 3], b[None, :, 3])
+                        - np.maximum(a[:, None, 1], b[None, :, 1]))
+    intersection = width * height
+    area_a = np.maximum(0.0, a[:, 2] - a[:, 0]) * np.maximum(0.0, a[:, 3] - a[:, 1])
+    area_b = np.maximum(0.0, b[:, 2] - b[:, 0]) * np.maximum(0.0, b[:, 3] - b[:, 1])
+    union = area_a[:, None] + area_b[None, :] - intersection
+    result = np.zeros_like(union)
+    np.divide(intersection, union, out=result, where=union > 0.0)
+    return result
+
+
+def bind_gt_boxes(boxes, gt_boxes, threshold=0.5):
+    identities = list(gt_boxes)
+    boxes = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
+    if not identities:
+        return [(-1, 0.0) for _ in boxes]
+    overlaps = pairwise_gt_iou(boxes, list(gt_boxes.values()))
+    # argmax retains insertion-order tie breaking, as the original strict > loop.
+    best = overlaps.argmax(axis=1)
+    scores = overlaps[np.arange(len(boxes)), best]
+    return [(int(identities[index]) if score >= threshold and score > 0 else -1,
+             float(score)) for index, score in zip(best, scores)]
+
+
+def max_box_iou(boxes: np.ndarray, others: np.ndarray) -> np.ndarray:
+    """Per-row max IoU of ``boxes`` against any box in ``others``."""
+    if boxes.size == 0:
+        return np.zeros(0, dtype=np.float64)
+    if others.size == 0:
+        return np.zeros(boxes.shape[0], dtype=np.float64)
+    a = np.asarray(boxes, dtype=np.float64)
+    b = np.asarray(others, dtype=np.float64)
+    ax1, ay1, ax2, ay2 = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
+    bx1, by1, bx2, by2 = b[:, 0], b[:, 1], b[:, 2], b[:, 3]
+    inter_w = np.maximum(0.0, np.minimum(ax2[:, None], bx2[None, :]) - np.maximum(ax1[:, None], bx1[None, :]))
+    inter_h = np.maximum(0.0, np.minimum(ay2[:, None], by2[None, :]) - np.maximum(ay1[:, None], by1[None, :]))
+    inter = inter_w * inter_h
+    area_a = np.maximum(0.0, ax2 - ax1) * np.maximum(0.0, ay2 - ay1)
+    area_b = np.maximum(0.0, bx2 - bx1) * np.maximum(0.0, by2 - by1)
+    union = area_a[:, None] + area_b[None, :] - inter
+    ious = np.where(union > 0, inter / union, 0.0)
+    return ious.max(axis=1)
+
+
 def diou_xyxy(a: np.ndarray, b: np.ndarray) -> float:
     iou = iou_xyxy(a, b)
     ax1, ay1, ax2, ay2 = map(float, a)
@@ -89,9 +162,81 @@ def diou_xyxy(a: np.ndarray, b: np.ndarray) -> float:
     return iou - ((acx - bcx) ** 2 + (acy - bcy) ** 2) / max(c2, 1e-9)
 
 
-def load_gt(sequence: str, split: str) -> dict[int, dict[int, np.ndarray]]:
+def find_appearance_pair(
+    pilot,
+    frame: int,
+    target: int,
+    current_index: int,
+    future_frames: int = FUTURE_FRAMES,
+):
+    """Earliest future frame with both a same-GT positive and a competitor.
+
+    The positive and the competitor come from the same frame; the detection
+    being written is never used as either.  Returns None when the whole
+    window has no valid pair.
+    """
+    for step in range(1, future_frames + 1):
+        fid = frame + step
+        if fid > pilot.frame_count:
+            break
+        candidates = [
+            entry
+            for entry in pilot.frame_matches(fid - 1)
+            if entry["gt_id"] == int(target)
+            and entry["iou"] >= 0.5
+            and entry["index"] != int(current_index)
+        ]
+        if not candidates:
+            continue
+        candidate = max(candidates, key=lambda item: item["iou"])
+        frame_competitors = [
+            entry
+            for entry in pilot.frame_matches(fid - 1)
+            if entry["gt_id"] not in (-1, int(target))
+            and entry["iou"] >= 0.5
+            and iou_xyxy(entry["box"], candidate["box"]) >= 0.3
+            and entry["index"] != int(current_index)
+        ]
+        if frame_competitors:
+            return candidate, fid, frame_competitors
+    return None
+
+
+def recovered_detection_rows(
+    target_array: np.ndarray | None,
+    source_array: np.ndarray | None,
+    source_indices: np.ndarray | None,
+    det_thr: float,
+) -> list[tuple[int, np.ndarray]]:
+    """Rows entering the online matching pool as dets_del_high.
+
+    Reuses the tracker's own ``find_deleted_detections`` (inclusive +1 pixel
+    IoU) and keeps the original source-cache indices.  Empty target frames are
+    handled like the online path: no association call means no recovered pool.
+    """
+    if target_array is None or len(target_array) == 0:
+        return []
+    if source_array is None or len(source_array) == 0 or source_indices is None:
+        return []
+    from trackers.utils import find_deleted_detections
+
+    dets_del, indices = find_deleted_detections(
+        np.ascontiguousarray(target_array),
+        np.ascontiguousarray(source_array),
+        source_indices=np.asarray(source_indices, dtype=np.int64),
+        return_indices=True,
+    )
+    return [
+        (int(index), row)
+        for row, index in zip(dets_del, indices)
+        if float(row[4]) > float(det_thr)
+    ]
+
+
+def load_gt(sequence: str, split: str, dataset: str = "SportsMOT") -> dict[int, dict[int, np.ndarray]]:
     frames: dict[int, dict[int, np.ndarray]] = {}
-    path = GT_ROOT / split / sequence / "gt" / "gt.txt"
+    root = GT_ROOT if dataset == "SportsMOT" else (Path.home() / "datasets") / dataset
+    path = root / ("train" if split == "all" else split) / sequence / "gt" / "gt.txt"
     for line in path.read_text().splitlines():
         fields = line.split(",")
         if len(fields) < 6:
@@ -105,8 +250,9 @@ def load_gt(sequence: str, split: str) -> dict[int, dict[int, np.ndarray]]:
     return frames
 
 
-def load_warps(sequence: str) -> dict[int, np.ndarray]:
-    path = WORKTREE / "3. Tracker" / "trackers" / "cmc" / f"GMC-sportsmot-{sequence}.txt"
+def load_warps(sequence: str, dataset: str = "SportsMOT") -> dict[int, np.ndarray]:
+    name = f"sportsmot-{sequence}" if dataset == "SportsMOT" else sequence.removesuffix("-FRCNN")
+    path = WORKTREE / "3. Tracker" / "trackers" / "cmc" / f"GMC-{name}.txt"
     warps: dict[int, np.ndarray] = {}
     with path.open() as handle:
         for index, line in enumerate(handle):
@@ -172,16 +318,17 @@ def mean_to_box(mean: np.ndarray) -> np.ndarray:
 
 
 class SequencePilot:
-    def __init__(self, sequence: str, split: str, checkpoint: Path, out_dir: Path, max_frames: int = 0):
+    def __init__(self, sequence: str, split: str, checkpoint: Path, out_dir: Path, max_frames: int = 0, dataset: str = "SportsMOT"):
         self.sequence = sequence
         self.split = split
+        self.dataset = dataset
         self.checkpoint = checkpoint
         self.out_dir = out_dir / sequence
         self.max_frames = max_frames
-        self.gt = load_gt(sequence, split)
-        self.warps = load_warps(sequence)
+        self.gt = load_gt(sequence, split, dataset)
+        self.warps = load_warps(sequence, dataset)
         self.events: list[dict] = []
-        self.adapter_events: dict[tuple[int, int], dict] = {}
+        self.adapter_events: set[tuple[int, int]] = set()
         self.windows: dict[tuple[int, int], dict] = {}
         self.window_frames: dict[tuple[int, int], list[int]] = {}
         self.frame_det_index: dict[tuple[int, int], int] = {}
@@ -193,6 +340,28 @@ class SequencePilot:
         self.kf = None
         self.frame_matches_precomputed = False
         self.store_rank_features = True
+        self.det_thr = 0.55
+        # Low-memory replay: labels/diagnostics/rank features are finalized one
+        # frame after the event (the column probe has consumed the record by
+        # then), window arrays are registered incrementally, and heavy
+        # per-event state (snapshot/window/features) is released immediately.
+        self.lean = False
+        self.lean_rows: list[dict] = []
+        self.lean_event_index: dict[tuple[int, int], int] = {}
+        self.lean_event_evidence: list[np.ndarray] = []
+        self.lean_event_track: list[np.ndarray] = []
+        self.lean_event_det: list[int] = []
+        self.lean_event_has: list[bool] = []
+        self._lean_cursor = 0
+        # Large lean sequences stream event tracks to disk instead of holding
+        # ~8 KB per event in RAM.
+        self.lean_track_memmap = None
+        self.lean_track_path: Path | None = None
+        self.lean_track_count = 0
+        self.lean_rank_memmaps = None
+        self.lean_rank_paths: list[Path] = []
+        self.lean_rank_count = 0
+        self._rank_final_handles = []
 
     # ------------------------------------------------------------------
     def frame_matches(self, frame_index: int) -> list[dict]:
@@ -201,29 +370,39 @@ class SequencePilot:
             return cached
         frame_id = frame_index + 1
         entries: list[dict] = []
-        indices = self.det_cache.get_frame(frame_index, view="target")["detection_indices"]
+        target_view = self.det_cache.get_frame(frame_index, view="target")
+        indices = target_view["detection_indices"]
         array = self.det_cache.get_frame_array(frame_index, view="target")
         gt_boxes = self.gt.get(frame_id, {})
+        rows: list[tuple[int, np.ndarray]] = []
         if array is not None:
-            for row, global_index in zip(array, indices):
-                box = np.asarray(row[:4], dtype=np.float64)
-                score = float(row[4])
-                best_id, best_iou = -1, 0.5
-                for gt_id, gt_box in gt_boxes.items():
-                    value = iou_xyxy(box, gt_box)
-                    if value > best_iou:
-                        best_iou = value
-                        best_id = int(gt_id)
-                entries.append(
-                    {
-                        "index": int(global_index),
-                        "box": box,
-                        "score": score,
-                        "gt_id": best_id,
-                        "iou": float(best_iou),
-                    }
+            rows.extend(zip(indices, array))
+            # Recovered detections (dets_del_high) enter the same online
+            # matching pool as the target view.  Selection reuses the tracker's
+            # own find_deleted_detections so the inclusive +1 pixel IoU matches
+            # the online path exactly; empty target frames add nothing.
+            source_view = self.det_cache.get_frame(frame_index, view="source")
+            source_indices = source_view["detection_indices"]
+            source_array = self.det_cache.get_frame_array(frame_index, view="source")
+            rows.extend(
+                recovered_detection_rows(
+                    array, source_array, source_indices, self.det_thr
                 )
-                self.det_gt[(frame_id, int(global_index))] = (best_id, float(best_iou))
+            )
+        bindings = bind_gt_boxes([row[:4] for _, row in rows], gt_boxes)
+        for (global_index, row), (best_id, best_iou) in zip(rows, bindings):
+            box = np.asarray(row[:4], dtype=np.float64)
+            score = float(row[4])
+            entries.append(
+                {
+                    "index": int(global_index),
+                    "box": box,
+                    "score": score,
+                    "gt_id": best_id,
+                    "iou": best_iou,
+                }
+            )
+            self.det_gt[(frame_id, int(global_index))] = (best_id, best_iou)
         self.frame_matches_cache[frame_index] = entries
         return entries
 
@@ -239,19 +418,50 @@ class SequencePilot:
         )
 
     def build_prototypes(self) -> None:
-        features: dict[int, list[np.ndarray]] = defaultdict(list)
+        # Retain indices, not every identity's full ReID observations.
+        feature_indices: dict[int, list[int]] = defaultdict(list)
         for frame_index in range(self.det_cache.num_frames):
             for entry in self.frame_matches(frame_index):
                 if entry["gt_id"] >= 0 and entry["iou"] >= 0.7 and entry["score"] >= 0.6:
-                    det = self.det_cache.get_detection(entry["index"])
-                    features[entry["gt_id"]].append(
-                        np.asarray(det["feature"], dtype=np.float32).reshape(-1)
-                    )
-        self.prototypes = {
-            gt_id: IdentityPrototypeBuilder.build_prototype(values)
-            for gt_id, values in features.items()
-            if len(values) >= 3
-        }
+                    feature_indices[entry["gt_id"]].append(entry["index"])
+            if frame_index % 25 == 0:
+                self._memory_guard(frame_index)
+                self._progress("prototype-bind", frame_index + 1, self.det_cache.num_frames)
+        self.prototypes = {}
+        for gt_id, indices in feature_indices.items():
+            if len(indices) >= 3:
+                # Same row order, float32 inputs and original float64 algorithm.
+                values = np.asarray(
+                    self.det_cache.features[np.asarray(indices)], dtype=np.float32,
+                )
+                self.prototypes[gt_id] = IdentityPrototypeBuilder.build_prototype(list(values))
+                del values
+                drop_pages(self.det_cache.features)
+                self._packing_guard()
+
+
+    def _oracle_indices(self, frame_index):
+        """Cache only indices for the bounded future-frame window, never ReID."""
+        cache = getattr(self, "_oracle_index_cache", None)
+        if cache is None:
+            cache = self._oracle_index_cache = OrderedDict()
+        if frame_index in cache:
+            cache.move_to_end(frame_index)
+            return cache[frame_index]
+        gt = self.gt.get(frame_index + 1, {})
+        start, end = map(int, self.det_cache.frame_offsets[frame_index:frame_index + 2])
+        result = {}
+        if gt and end > start:
+            identities = list(gt)
+            overlaps = pairwise_gt_iou(self.det_cache.boxes[start:end], list(gt.values()))
+            best = overlaps.argmax(axis=0)
+            scores = overlaps[best, np.arange(len(identities))]
+            result = {int(gid): start + int(index)
+                      for gid, index, score in zip(identities, best, scores) if score > 0.3}
+        cache[frame_index] = result
+        while len(cache) > FUTURE_FRAMES + 3:
+            cache.popitem(last=False)
+        return result
 
     def future_context(self, frame_id: int, target_gt_id: int):
         current_gt = self.gt.get(frame_id, {}).get(target_gt_id)
@@ -270,21 +480,7 @@ class SequencePilot:
                 gt_count += 1
             oracle = None
             if gt_box is not None:
-                frame_index = fid - 1
-                array = self.det_cache.get_frame_array(frame_index, view="source")
-                indices = self.det_cache.get_frame(frame_index, view="source")[
-                    "detection_indices"
-                ]
-                best_iou = 0.3
-                best_index = -1
-                if array is not None and len(array) > 0:
-                    for row, global_index in zip(array, indices):
-                        value = iou_xyxy(
-                            gt_box, np.asarray(row[:4], dtype=np.float64)
-                        )
-                        if value > best_iou:
-                            best_iou = value
-                            best_index = int(global_index)
+                best_index = self._oracle_indices(fid - 1).get(int(target_gt_id), -1)
                 if best_index >= 0:
                     oracle = self.detection_observation(best_index)
                     oracle_count += 1
@@ -340,7 +536,11 @@ class SequencePilot:
             pilot.vote.add_current_observation(pilot.sequence, track.track_id, gt_id_match)
             pilot.frame_det_index[(int(track.track_id), int(frame_id))] = det_index
             pilot.track_events[int(track.track_id)].append(
-                (int(frame_id), int(gt_id_match), snapshot.feature.reshape(-1).copy())
+                (
+                    int(frame_id),
+                    int(gt_id_match),
+                    None if pilot.lean else snapshot.feature.reshape(-1).copy(),
+                )
             )
             record = {
                 "sequence": pilot.sequence,
@@ -361,7 +561,11 @@ class SequencePilot:
                 "detection_box": det_box.tolist(),
                 "detection_score": det_score,
                 "detection_feature": None,
-                "pre_feature": snapshot.feature.reshape(-1).astype(np.float32).tolist(),
+                "pre_feature": (
+                    snapshot.feature.reshape(-1).astype(np.float32)
+                    if pilot.lean
+                    else snapshot.feature.reshape(-1).astype(np.float32).tolist()
+                ),
                 "snapshot": snapshot,
                 "detection_measurement": np.asarray(detection.cxcywh, dtype=np.float64).tolist(),
                 "mean_prior": np.asarray(snapshot.mean, dtype=np.float64).copy(),
@@ -370,6 +574,10 @@ class SequencePilot:
             }
             pilot.events.append(record)
             pilot._compute_motion_endpoints(record)
+            if pilot.lean:
+                key = (int(track.track_id), int(frame_id))
+                record["_window"] = pilot.windows.pop(key, None)
+                record["_window_frames"] = pilot.window_frames.pop(key, None)
             return record
 
         def track_update(self, frame_id, detection):
@@ -397,10 +605,8 @@ class SequencePilot:
             event = original_build_event(
                 adapter_self, track, detection, track_idx, det_idx, *args, **kwargs
             )
-            pilot.adapter_events[(int(adapter_self.frame_id), int(track.track_id))] = {
-                "evidence": event.evidence,
-                "detection_index": int(getattr(detection, "frame_detection_index", -1)),
-            }
+            # Only membership is used. Do not retain EventEvidence/ReID arrays.
+            pilot.adapter_events.add((int(adapter_self.frame_id), int(track.track_id)))
             return event
 
         tracker_module.Tracker.update = tracker_update
@@ -420,9 +626,14 @@ class SequencePilot:
             (ShutrackTrackerAdapter, "build_matched_event", original_build_event),
         ]
 
+        if getattr(self, "protocol", {}).get("gap3"):
+            from paired_missing import capture_detection_pool
+            capture_detection_pool(self, ShutrackTrackerAdapter)
+
     def remove_hooks(self):
         for owner, name, original in getattr(self, "_restore", []):
             setattr(owner, name, original)
+        self._restore = []
 
     def _compute_motion_endpoints(self, record: dict) -> None:
         frame_id = record["frame_t"]
@@ -540,7 +751,9 @@ class SequencePilot:
                     [gt_t2[2] - gt_t2[0], gt_t2[3] - gt_t2[1]], dtype=np.float64
                 )
                 size_t_in_t1 = rot @ size_t
-                size_t2_in_t1 = rot_t2.T @ size_t2
+                if not np.isfinite(rot_t2).all() or np.linalg.cond(rot_t2) > 1e8:
+                    return  # Only the optional central label is invalid.
+                size_t2_in_t1 = np.linalg.solve(rot_t2, size_t2)
                 central = (size_t2_in_t1 - size_t_in_t1) / 2.0
                 record["gt_size_velocity_central"] = [
                     float(central[0] / float(self.img_w)),
@@ -549,6 +762,114 @@ class SequencePilot:
                 record["size_central_valid"] = True
         else:
             record["gt_velocity"] = None
+
+    # ------------------------------------------------------------------
+    def _progress(self, stage, position, total, *, force=False):
+        now = time.monotonic()
+        if not force and now - getattr(self, "_last_progress", 0.0) < 10.0:
+            return
+        self._last_progress = now
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        status = {
+            "sequence": self.sequence, "stage": stage,
+            "position": int(position), "total": int(total),
+            "events": len(self.events), "samples": len(self.lean_rows),
+            "rss_gib": round(self._current_rss_gb(), 3),
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        atomic_json(self.out_dir / "collection_progress.json", status)
+        print("[collection] " + json.dumps(status), flush=True)
+
+    def _packing_guard(self):
+        limit = float(os.environ.get("SHUTRACK_MAX_RSS_GB", "16"))
+        if self._current_rss_gb() <= limit:
+            return
+        cache = getattr(self, "det_cache", None)
+        if cache is not None:
+            drop_pages(cache.features)
+        for array in getattr(self, "lean_rank_memmaps", None) or ():
+            drop_pages(array, flush=True)
+        drop_pages(getattr(self, "lean_track_memmap", None), flush=True)
+        for array, _ in self._rank_final_handles:
+            drop_pages(array, flush=True)
+        rss = self._current_rss_gb()
+        if rss > limit + 1.0:
+            raise MemoryError(f"collection memory guard: RSS {rss:.1f} GiB > {limit:.1f} GiB")
+
+    def _current_rss_gb(self) -> float:
+        try:
+            with open("/proc/self/status") as handle:
+                for line in handle:
+                    if line.startswith("VmRSS:"):
+                        return int(line.split()[1]) / (1024 * 1024)
+        except OSError:
+            pass
+        return 0.0
+
+    def _drop_mapping(self, obj) -> None:
+        mapping = getattr(obj, "_mmap", None)
+        if mapping is not None:
+            try:
+                mapping.madvise(mmap_module.MADV_DONTNEED)
+            except (BufferError, ValueError, OSError):
+                pass
+
+    def _release_file_pages(self, path) -> None:
+        try:
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
+
+    def _memory_guard(self, frame_index: int) -> None:
+        """Bound page cache and fail cleanly before the host is exhausted.
+
+        MOT20-05 maps a 7.4 GB feature file and streams a 7.9 GB event-track
+        file. Dirty scratch pages are flushed and dropped every 50 frames;
+        feature pages are dropped every 200 frames even without visible guest
+        pressure, because the guest cannot see the Windows host's free memory.
+        """
+        if self.lean_track_memmap is not None and frame_index % 50 == 0:
+            try:
+                self.lean_track_memmap.flush()
+                self._drop_mapping(self.lean_track_memmap)
+            except (BufferError, ValueError, OSError):
+                pass
+        if frame_index % 200 == 0:
+            self._drop_mapping(self.det_cache.features)
+            if self.lean_rank_memmaps is not None:
+                for rank_memmap in self.lean_rank_memmaps:
+                    try:
+                        rank_memmap.flush()
+                        self._drop_mapping(rank_memmap)
+                    except (BufferError, ValueError, OSError):
+                        pass
+        if frame_index % 1000 == 0:
+            try:
+                import ctypes
+
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except (OSError, AttributeError):
+                pass
+        limit = float(os.environ.get("SHUTRACK_MAX_RSS_GB", "16"))
+        rss = self._current_rss_gb()
+        if rss > limit:
+            self._drop_mapping(self.det_cache.features)
+            if self.lean_track_memmap is not None:
+                try:
+                    self.lean_track_memmap.flush()
+                    self._drop_mapping(self.lean_track_memmap)
+                except (BufferError, ValueError, OSError):
+                    pass
+            rss = self._current_rss_gb()
+            if rss > limit + 1.0:
+                raise MemoryError(
+                    f"memory guard: process RSS {rss:.1f} GB exceeds "
+                    f"{limit:.1f} GB; aborting before the host is exhausted"
+                )
 
     # ------------------------------------------------------------------
     def run_replay(self) -> None:
@@ -562,20 +883,24 @@ class SequencePilot:
         self.warps_online = {}
         self.replay_track_ids = set()
         args = run_module.make_parser().parse_args([])
-        args.dataset = "SportsMOT"
+        args.dataset = self.dataset
         args.mode = self.split
         args.sequences = [self.sequence]
         args.seed = 10000
         args.kf_type = "nsa"
         args.agentguard_mode = "shutrack-v2"
         args.shutrack_checkpoint = str(self.checkpoint)
+        if getattr(self, "protocol", {}).get("full_write"):
+            args.agentguard_disable_kf_gate = True
+            args.agentguard_disable_ema_gate = True
         args.agentguard_device = "cpu"
         args.detection_cache_root = str(DEFAULT_CACHE)
         args.skip_eval = True
         args.torch_num_threads = 4
         args.torch_num_interop_threads = 1
         run_module.set_parameters(args, self.sequence, self.split)
-        seqinfo = GT_ROOT / self.split / self.sequence / "seqinfo.ini"
+        self.det_thr = float(getattr(args, "det_thr", 0.55))
+        seqinfo = Path(args.data_path) / self.sequence / "seqinfo.ini"
         for line in seqinfo.read_text().splitlines():
             if line.startswith("frameRate"):
                 args.max_time_lost = int(line.split("=")[-1]) * 2
@@ -592,7 +917,30 @@ class SequencePilot:
             run_module._sequence_detection_cache_dir(args, self.sequence),
             frame_array_cache_size=4,
         )
+        if self.lean:
+            self.out_dir.mkdir(parents=True, exist_ok=True)
+            capacity = int(self.det_cache.num_detections)
+            width = int(self.det_cache.reid_dim)
+            self.lean_track_path = self.out_dir / "event_track_scratch.npy"
+            self.lean_track_memmap = np.lib.format.open_memmap(
+                self.lean_track_path, mode="w+", dtype=np.float32,
+                shape=(capacity, width),
+            )
+            self.lean_track_count = 0
+            self.lean_rank_memmaps = []
+            self.lean_rank_paths = []
+            for rank_name in ("template0", "detection", "positive", "competitor"):
+                rank_path = self.out_dir / f"rank_{rank_name}_scratch.npy"
+                self.lean_rank_paths.append(rank_path)
+                self.lean_rank_memmaps.append(
+                    np.lib.format.open_memmap(
+                        rank_path, mode="w+", dtype=np.float16,
+                        shape=(capacity, width),
+                    )
+                )
+            self.lean_rank_count = 0
         try:
+            self._progress("prototypes", 0, self.det_cache.num_frames, force=True)
             self.build_prototypes()
             self.install_hooks()
             try:
@@ -612,11 +960,22 @@ class SequencePilot:
                         tracker.update(det_frame, det_frame_95)
                     else:
                         tracker.update_without_detections()
+                    if self.lean:
+                        self._lean_finalize_until(int(frame_index))
+                    self._memory_guard(int(frame_index))
+                    self._progress("replay", frame_index + 1, frame_count)
+                if self.lean:
+                    self._lean_finalize_until(int(self.frame_count))
             finally:
                 self.remove_hooks()
         except Exception:
             self.det_cache.close()
             raise
+        if getattr(self, "protocol", {}).get("full_write") and any(
+            r["motion_gate"] is not None and (r["motion_gate"] != 1.0 or r["appearance_gate"] != 1.0)
+            for r in self.events
+        ):
+            raise RuntimeError("Baseline replay applied a learned gate")
         mismatches = [
             float(np.max(np.abs(self.warps_online[frame] - self.warps[frame])))
             for frame in self.warps_online
@@ -624,22 +983,69 @@ class SequencePilot:
         ]
         self.warp_error = max(mismatches) if mismatches else float("nan")
 
+    def _materialize_rank_arrays(self, mature, rank_rows):
+        """Reorder streamed rank rows into sample order on disk, chunk-wise."""
+        order = np.asarray(
+            [int(mature[int(row)]["rank_index"]) for row in rank_rows], dtype=np.int64
+        )
+        finals = []
+        chunk = block_rows(self.det_cache.reid_dim, np.float16)
+        for slot, scratch in enumerate(self.lean_rank_memmaps):
+            final_path = self.out_dir / f"rank_final_{slot}.npy"
+            final = np.lib.format.open_memmap(
+                final_path, mode="w+", dtype=np.float16,
+                shape=(rank_rows.size, scratch.shape[1]),
+            )
+            self._rank_final_handles.append((final, final_path))
+            for start in range(0, rank_rows.size, chunk):
+                end = min(start + chunk, rank_rows.size)
+                final[start:end] = scratch[order[start:end]]
+                drop_pages(final, flush=True)
+                drop_pages(scratch, flush=True)
+                self._packing_guard()
+            final.flush()
+            finals.append(final)
+        return finals
+
+    def _cleanup_rank_final(self) -> None:
+        handles = self._rank_final_handles
+        self._rank_final_handles = []
+        for final, path in handles:
+            try:
+                close_mapping(final)
+            except (BufferError, ValueError, OSError):
+                pass
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def write_compact(self, data_root: Path) -> dict:
         """Save a compact, mmap-friendly training shard for this sequence."""
         sequence_dir = Path(data_root) / self.sequence
         sequence_dir.mkdir(parents=True, exist_ok=True)
-        mature = [
-            record
-            for record in self.events
-            if (record["frame_t"], record["track_id"]) in self.adapter_events
-            and (record["track_id"], record["frame_t"]) in self.windows
-        ]
+        if self.lean:
+            mature = list(self.lean_rows)
+        else:
+            mature = [
+                record
+                for record in self.events
+                if (record["frame_t"], record["track_id"]) in self.adapter_events
+                and (record["track_id"], record["frame_t"]) in self.windows
+            ]
         mature.sort(key=lambda record: (record["frame_t"], record["track_id"]))
-        event_index: dict[tuple[int, int], int] = {}
-        event_evidence: list[np.ndarray] = []
-        event_track: list[np.ndarray] = []
-        event_det: list[int] = []
-        event_has: list[bool] = []
+        if self.lean:
+            event_index = self.lean_event_index
+            event_evidence = self.lean_event_evidence
+            event_track = self.lean_event_track
+            event_det = self.lean_event_det
+            event_has = self.lean_event_has
+        else:
+            event_index = {}
+            event_evidence = []
+            event_track = []
+            event_det = []
+            event_has = []
 
         def register(key, evidence, track, det_index, has_detection):
             if key in event_index:
@@ -652,11 +1058,17 @@ class SequencePilot:
             event_has.append(bool(has_detection))
             return index
 
-        count = len(mature)
+        sample_count = len(mature)
+        count = sample_count
         window_indices = np.full((count, 5), -1, dtype=np.int64)
         current_event_index = np.zeros(count, dtype=np.int64)
         current_competition = np.zeros((count, 3), dtype=np.float32)
         for row, record in enumerate(mature):
+            if self.lean:
+                window_indices[row] = record["window_indices"]
+                current_event_index[row] = record["current_event_index"]
+                current_competition[row] = record["current_competition"]
+                continue
             key = (record["track_id"], record["frame_t"])
             window = self.windows[key]
             frames = self.window_frames[key]
@@ -687,10 +1099,38 @@ class SequencePilot:
                 [bool(record.get("rank_valid", False)) for record in mature], dtype=np.bool_
             )
             rank_rows = np.nonzero(rank_valid)[0]
+            final_rank = None
+            if (
+                self.lean
+                and self.lean_rank_memmaps is not None
+                and rank_rows.size
+            ):
+                final_rank = self._materialize_rank_arrays(mature, rank_rows)
 
             def stack_rank(key: str) -> np.ndarray:
                 if rank_rows.size == 0:
                     return np.zeros((0, 2048), dtype=np.float16)
+                if final_rank is not None:
+                    slot = {
+                        "pre_feature": 0,
+                        "det_feature": 1,
+                        "rank_positive_feature": 2,
+                        "rank_competitor_feature": 3,
+                    }[key]
+                    return final_rank[slot]
+                if self.lean:
+                    source_key = {
+                        "pre_feature": "rank_template0",
+                        "det_feature": "rank_detection",
+                        "rank_positive_feature": "rank_positive_feature",
+                        "rank_competitor_feature": "rank_competitor_feature",
+                    }[key]
+                    return np.stack(
+                        [
+                            np.asarray(mature[index][source_key], dtype=np.float16)
+                            for index in rank_rows
+                        ]
+                    )
                 return np.stack(
                     [
                         np.asarray(mature[index][key], dtype=np.float32)
@@ -699,9 +1139,21 @@ class SequencePilot:
                 ).astype(np.float16)
 
             rank_template0 = stack_rank("pre_feature")
+            if self.lean:
+                for index in rank_rows:
+                    mature[index].pop("rank_template0", None)
             rank_detection = stack_rank("det_feature")
+            if self.lean:
+                for index in rank_rows:
+                    mature[index].pop("rank_detection", None)
             rank_positive = stack_rank("rank_positive_feature")
+            if self.lean:
+                for index in rank_rows:
+                    mature[index].pop("rank_positive_feature", None)
             rank_competitor = stack_rank("rank_competitor_feature")
+            if self.lean:
+                for index in rank_rows:
+                    mature[index].pop("rank_competitor_feature", None)
             rank_score = np.asarray(
                 [float(mature[index].get("detection_score", 0.0)) for index in rank_rows],
                 dtype=np.float32,
@@ -883,15 +1335,37 @@ class SequencePilot:
                 ]
             ),
         }
-        np.savez(sequence_dir / "samples.npz", **arrays)
+        if getattr(self, "protocol", {}).get("anchor"):
+            arrays["anchor_identity"] = np.asarray([bool(r.get("anchor_identity")) for r in mature])
+        if getattr(self, "protocol", {}).get("gap3"):
+            from paired_missing import third_frame_targets
+            arrays.update(third_frame_targets(self, mature))
+        if hasattr(self, "column_counts"):
+            if self.column_counts["actual_mismatch"]:
+                raise ValueError(f"Column replay differs from actual assignment: {self.column_counts}")
+            for key in ("column_det", "column_offset", "column_rival"):
+                default = -1 if key == "column_det" else 0.0
+                dtype = np.int64 if key == "column_det" else np.float32
+                arrays[key] = np.asarray([r.get(key, default) for r in mature], dtype=dtype)
+            arrays["column_score"] = np.asarray([r["detection_score"] for r in mature], dtype=np.float32)
+        self._progress("write-samples", 0, 1, force=True)
+        atomic_npz(sequence_dir / "samples.npz", arrays, guard=self._packing_guard)
+        self._cleanup_rank_final()
         np.save(
             sequence_dir / "event_evidence.npy",
             np.stack(event_evidence) if event_evidence else np.zeros((0, 13), np.float32),
         )
-        np.save(
-            sequence_dir / "event_track.npy",
-            np.stack(event_track) if event_track else np.zeros((0, 1), np.float32),
-        )
+        if self.lean_track_memmap is not None:
+            self._progress("write-event-track", 0, self.lean_track_count, force=True)
+            atomic_track_copy(
+                sequence_dir / "event_track.npy", self.lean_track_memmap,
+                int(self.lean_track_count), guard=self._packing_guard,
+            )
+        else:
+            np.save(
+                sequence_dir / "event_track.npy",
+                np.stack(event_track) if event_track else np.zeros((0, 1), np.float32),
+            )
         np.save(
             sequence_dir / "event_detection_index.npy",
             np.asarray(event_det, dtype=np.int64),
@@ -902,8 +1376,12 @@ class SequencePilot:
         )
         summary = {
             "sequence": self.sequence,
+            "protocol": getattr(self, "protocol", None),
+            "column_counts": getattr(self, "column_counts", None),
+            "gap3_rows": int(arrays["gap3_valid"].sum()) if "gap3_valid" in arrays else None,
+            "anchored_rows": sum(bool(rec.get("anchor_identity")) for rec in mature),
             "split": self.split,
-            "samples": count,
+            "samples": sample_count,
             "events": len(event_evidence),
             "frames": int(self.frame_count),
             "valid_motion": int(arrays["valid_motion"].sum()),
@@ -935,90 +1413,135 @@ class SequencePilot:
             "prototypes": len(self.prototypes),
             "complete": True,
         }
-        (sequence_dir / "summary.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True) + "\n"
-        )
+        atomic_json(sequence_dir / "summary.json", summary)
+        self._progress("complete", self.frame_count, self.frame_count, force=True)
+        for name in (
+            "samples.npz",
+            "event_evidence.npy",
+            "event_track.npy",
+            "event_detection_index.npy",
+            "event_has_detection.npy",
+        ):
+            self._release_file_pages(sequence_dir / name)
         return summary
 
     def close(self) -> None:
+        """Best-effort cleanup, safe after partial setup and repeated calls."""
+        self.remove_hooks()
+        self._cleanup_rank_final()
+        for array in getattr(self, "lean_rank_memmaps", None) or ():
+            try:
+                close_mapping(array)
+            except (BufferError, ValueError, OSError):
+                pass
+        self.lean_rank_memmaps = None
+        for path in getattr(self, "lean_rank_paths", []):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self.lean_rank_paths = []
+        array = getattr(self, "lean_track_memmap", None)
+        self.lean_track_memmap = None
+        if array is not None:
+            try:
+                close_mapping(array)
+            except (BufferError, ValueError, OSError):
+                pass
+        path = getattr(self, "lean_track_path", None)
+        self.lean_track_path = None
+        if path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
         cache = getattr(self, "det_cache", None)
+        self.det_cache = None
         if cache is not None:
             cache.close()
-            self.det_cache = None
 
     # ------------------------------------------------------------------
+    def _label_record(self, record: dict) -> bool:
+        """Compute rollout labels for one mature event; True if computed."""
+        target = record["target_gt_before"]
+        if record["detection_index"] < 0 or target is None:
+            record["labels_valid"] = False
+            return False
+        current_gt, future_gt, future_oracle, future_warps, gt_count, oracle_count = (
+            self.future_context(record["frame_t"], int(target))
+        )
+        if current_gt is None:
+            record["labels_valid"] = False
+            return False
+        snapshot: TrackStateSnapshot = record["snapshot"]
+        candidate = DetectionObservation(
+            detection_index=record["detection_index"],
+            box=np.asarray(record["detection_box"], dtype=np.float64),
+            score=float(record["detection_score"]),
+            feature=np.asarray(record["det_feature"], dtype=np.float64).reshape(1, -1),
+            source=0,
+            class_id=1,
+        )
+        ctx = RolloutContext(
+            frame_id=record["frame_t"],
+            target_gt_id=int(target),
+            pre_update_state=snapshot,
+            current_candidate=candidate,
+            current_gt_box=current_gt,
+            future_gt_boxes=future_gt,
+            future_oracle_detections=future_oracle,
+            future_warp_matrices=future_warps,
+            identity_prototype=self.prototypes.get(int(target)),
+        )
+        valid_motion = True
+        valid_appearance = self.prototypes.get(int(target)) is not None
+        b_m = b_a = 0.0
+        m_valid = a_valid = 0
+        try:
+            b_m, _, _, m_mask = compute_motion_benefit(
+                ctx, NSAKalmanFilter(), future_frames=FUTURE_FRAMES, include_current=True
+            )
+            m_valid = int(np.asarray(m_mask, dtype=bool).sum())
+            valid_motion = m_valid > 0
+        except Exception:
+            valid_motion = False
+            b_m = 0.0
+        try:
+            b_a, _, _, _, _, a_mask = compute_appearance_benefit(
+                ctx, future_frames=FUTURE_FRAMES, include_current=True
+            )
+            a_valid = int(np.asarray(a_mask, dtype=bool).sum())
+            valid_appearance = valid_appearance and a_valid > 0
+        except Exception:
+            valid_appearance = False
+            b_a = 0.0
+        record.update(
+            {
+                "labels_valid": bool(valid_motion or valid_appearance),
+                "motion_benefit": float(b_m),
+                "appearance_benefit": float(b_a),
+                "valid_motion": bool(valid_motion),
+                "valid_appearance": bool(valid_appearance),
+                "motion_valid_count": int(m_valid),
+                "appearance_valid_count": int(a_valid),
+                "gt_coverage": float(gt_count / (FUTURE_FRAMES + 1)),
+                "oracle_detection_coverage": float(oracle_count / FUTURE_FRAMES),
+            }
+        )
+        return True
+
     def compute_labels(self) -> None:
+        if self.lean:
+            self.tau_motion = 0.1
+            self.tau_appearance = 0.1
+            return
         label_rows = []
         for record in self.events:
-            target = record["target_gt_before"]
             mature = (record["frame_t"], record["track_id"]) in self.adapter_events
-            if not mature or record["detection_index"] < 0:
+            if not mature:
                 continue
-            if target is None:
-                record["labels_valid"] = False
-                continue
-            current_gt, future_gt, future_oracle, future_warps, gt_count, oracle_count = (
-                self.future_context(record["frame_t"], int(target))
-            )
-            if current_gt is None:
-                record["labels_valid"] = False
-                continue
-            snapshot: TrackStateSnapshot = record["snapshot"]
-            candidate = DetectionObservation(
-                detection_index=record["detection_index"],
-                box=np.asarray(record["detection_box"], dtype=np.float64),
-                score=float(record["detection_score"]),
-                feature=np.asarray(record["det_feature"], dtype=np.float64).reshape(1, -1),
-                source=0,
-                class_id=1,
-            )
-            ctx = RolloutContext(
-                frame_id=record["frame_t"],
-                target_gt_id=int(target),
-                pre_update_state=snapshot,
-                current_candidate=candidate,
-                current_gt_box=current_gt,
-                future_gt_boxes=future_gt,
-                future_oracle_detections=future_oracle,
-                future_warp_matrices=future_warps,
-                identity_prototype=self.prototypes.get(int(target)),
-            )
-            valid_motion = True
-            valid_appearance = self.prototypes.get(int(target)) is not None
-            b_m = b_a = 0.0
-            m_valid = a_valid = 0
-            try:
-                b_m, _, _, m_mask = compute_motion_benefit(
-                    ctx, NSAKalmanFilter(), future_frames=FUTURE_FRAMES, include_current=True
-                )
-                m_valid = int(np.asarray(m_mask, dtype=bool).sum())
-                valid_motion = m_valid > 0
-            except Exception:
-                valid_motion = False
-                b_m = 0.0
-            try:
-                b_a, _, _, _, _, a_mask = compute_appearance_benefit(
-                    ctx, future_frames=FUTURE_FRAMES, include_current=True
-                )
-                a_valid = int(np.asarray(a_mask, dtype=bool).sum())
-                valid_appearance = valid_appearance and a_valid > 0
-            except Exception:
-                valid_appearance = False
-                b_a = 0.0
-            record.update(
-                {
-                    "labels_valid": bool(valid_motion or valid_appearance),
-                    "motion_benefit": float(b_m),
-                    "appearance_benefit": float(b_a),
-                    "valid_motion": bool(valid_motion),
-                    "valid_appearance": bool(valid_appearance),
-                    "motion_valid_count": int(m_valid),
-                    "appearance_valid_count": int(a_valid),
-                    "gt_coverage": float(gt_count / (FUTURE_FRAMES + 1)),
-                    "oracle_detection_coverage": float(oracle_count / FUTURE_FRAMES),
-                }
-            )
-            label_rows.append(record)
+            if self._label_record(record):
+                label_rows.append(record)
         motion_benefits = [
             row["motion_benefit"] for row in label_rows if row.get("valid_motion")
         ]
@@ -1094,6 +1617,9 @@ class SequencePilot:
 
     # ------------------------------------------------------------------
     def appearance_diagnostics(self) -> None:
+        if self.lean:
+            # Computed per event during the replay; see _diagnose_record_lean.
+            return
         # Latest track template per GT id before each frame is reconstructed
         # from the event stream.
         gt_templates: dict[int, list[tuple[int, np.ndarray]]] = defaultdict(list)
@@ -1129,33 +1655,12 @@ class SequencePilot:
             template1 = ema_update(
                 template0, det_feature, float(record["detection_score"]), 0.95
             )
-            positive = None
-            positive_frame = None
-            for step in range(1, FUTURE_FRAMES + 1):
-                fid = frame + step
-                if fid > self.frame_count:
-                    break
-                candidates = [
-                    entry
-                    for entry in self.frame_matches(fid - 1)
-                    if entry["gt_id"] == int(target) and entry["iou"] >= 0.5
-                ]
-                if candidates:
-                    positive = max(candidates, key=lambda item: item["iou"])
-                    positive_frame = fid
-                    break
-            if positive is None:
+            found = find_appearance_pair(
+                self, frame, int(target), int(record["detection_index"])
+            )
+            if found is None:
                 continue
-            competitors = [
-                entry
-                for entry in self.frame_matches(positive_frame - 1)
-                if entry["gt_id"] not in (-1, int(target))
-                and entry["iou"] >= 0.5
-                and iou_xyxy(entry["box"], positive["box"]) >= 0.3
-            ]
-            if not competitors:
-                record["appearance_positive_frame"] = int(positive_frame)
-                continue
+            positive, positive_frame, competitors = found
             positive_feature = np.asarray(
                 self.det_cache.get_detection(positive["index"])["feature"], dtype=np.float64
             )
@@ -1232,8 +1737,172 @@ class SequencePilot:
                 }
             )
 
+    def _diagnose_record_lean(self, record: dict) -> None:
+        """Per-event appearance/rank fields for the low-memory replay path."""
+        target = record.get("target_gt_before")
+        record["appearance_diag_valid"] = False
+        if target is None:
+            return
+        frame = record["frame_t"]
+        template0 = np.asarray(record["pre_feature"], dtype=np.float64)
+        det_feature = np.asarray(record["det_feature"], dtype=np.float64)
+        template1 = ema_update(template0, det_feature, float(record["detection_score"]), 0.95)
+        found = find_appearance_pair(self, frame, int(target), int(record["detection_index"]))
+        if found is None:
+            return
+        positive, positive_frame, competitors = found
+        positive_feature = np.asarray(
+            self.det_cache.get_detection(positive["index"])["feature"], dtype=np.float64
+        )
+        competitor = min(
+            competitors,
+            key=lambda entry: cosine_distance(
+                template0,
+                np.asarray(
+                    self.det_cache.get_detection(entry["index"])["feature"],
+                    dtype=np.float64,
+                ),
+            ),
+        )
+        competitor_feature = np.asarray(
+            self.det_cache.get_detection(competitor["index"])["feature"], dtype=np.float64
+        )
+        d0_pos = cosine_distance(template0, positive_feature)
+        d0_comp = cosine_distance(template0, competitor_feature)
+        d1_pos = cosine_distance(template1, positive_feature)
+        d1_comp = cosine_distance(template1, competitor_feature)
+        if self.store_rank_features:
+            record["rank_valid"] = True
+            record["rank_positive_feature"] = positive_feature.astype(np.float32).copy()
+            record["rank_competitor_feature"] = competitor_feature.astype(np.float32).copy()
+        record.update(
+            {
+                "appearance_diag_valid": True,
+                "appearance_positive_frame": int(positive_frame),
+                "appearance_positive_index": int(positive["index"]),
+                "appearance_positive_iou": float(positive["iou"]),
+                "appearance_competitor_index": int(competitor["index"]),
+                "appearance_competitor_gt_id": int(competitor["gt_id"]),
+                "appearance_competitor_iou": float(competitor["iou"]),
+                "appearance_d0_positive": d0_pos,
+                "appearance_d0_competitor": d0_comp,
+                "appearance_score_template0": float(d0_comp - d0_pos),
+                "appearance_d1_positive": d1_pos,
+                "appearance_d1_competitor": d1_comp,
+                "appearance_score_template1": float(d1_comp - d1_pos),
+                "appearance_contested": [],
+                "identity_mismatch_frame": None,
+                "identity_recovery_frame": None,
+            }
+        )
+
+    # ------------------------------------------------------------------
+    def _lean_register(self, key, evidence, track, det_index, has_detection) -> int:
+        index = self.lean_event_index.get(key)
+        if index is not None:
+            return index
+        index = len(self.lean_event_evidence)
+        self.lean_event_index[key] = index
+        self.lean_event_evidence.append(np.asarray(evidence, dtype=np.float32))
+        if self.lean_track_memmap is not None:
+            if index >= self.lean_track_memmap.shape[0]:
+                raise RuntimeError("lean event capacity exceeded")
+            self.lean_track_memmap[index] = np.asarray(track, dtype=np.float32)
+            self.lean_track_count = max(self.lean_track_count, index + 1)
+        else:
+            self.lean_event_track.append(np.asarray(track, dtype=np.float32))
+        self.lean_event_det.append(int(det_index))
+        self.lean_event_has.append(bool(has_detection))
+        return index
+
+    def _lean_finalize_until(self, last_frame: int) -> None:
+        while self._lean_cursor < len(self.events):
+            record = self.events[self._lean_cursor]
+            if int(record["frame_t"]) > int(last_frame):
+                break
+            self._lean_finalize_record(record)
+            self._lean_cursor += 1
+
+    def _lean_finalize_record(self, record: dict) -> None:
+        key = (int(record["track_id"]), int(record["frame_t"]))
+        mature = (record["frame_t"], record["track_id"]) in self.adapter_events
+        window = record.pop("_window", None)
+        frames = record.pop("_window_frames", None)
+        if mature and window is not None and record["detection_index"] >= 0:
+            self._label_record(record)
+            self._diagnose_record_lean(record)
+            pad = 5 - len(frames)
+            window_indices = np.full(5, -1, dtype=np.int64)
+            for slot in range(5):
+                if bool(window.history_mask[slot]):
+                    continue
+                history_frame = frames[slot - pad]
+                window_indices[slot] = self._lean_register(
+                    (record["track_id"], history_frame),
+                    window.history_evidence[slot],
+                    window.history_track[slot],
+                    self.frame_det_index.get((record["track_id"], history_frame), -1),
+                    window.history_has_detection[slot],
+                )
+            record["window_indices"] = window_indices
+            record["current_event_index"] = self._lean_register(
+                key,
+                window.current_evidence,
+                window.current_track,
+                record["detection_index"],
+                window.current_has_detection,
+            )
+            record["current_competition"] = np.asarray(
+                window.current_competition, dtype=np.float32
+            )
+            if record.get("rank_valid"):
+                template0 = np.asarray(
+                    record["pre_feature"], dtype=np.float32
+                ).astype(np.float16)
+                detection = np.asarray(
+                    record["det_feature"], dtype=np.float32
+                ).astype(np.float16)
+                positive = np.asarray(
+                    record["rank_positive_feature"], dtype=np.float32
+                ).astype(np.float16)
+                competitor = np.asarray(
+                    record["rank_competitor_feature"], dtype=np.float32
+                ).astype(np.float16)
+                if self.lean_rank_memmaps is not None:
+                    rank_index = self.lean_rank_count
+                    if rank_index >= self.lean_rank_memmaps[0].shape[0]:
+                        raise RuntimeError("lean rank capacity exceeded")
+                    for rank_memmap, value in zip(
+                        self.lean_rank_memmaps,
+                        (template0, detection, positive, competitor),
+                    ):
+                        rank_memmap[rank_index] = value
+                    record["rank_index"] = rank_index
+                    self.lean_rank_count = rank_index + 1
+                    record.pop("rank_positive_feature", None)
+                    record.pop("rank_competitor_feature", None)
+                else:
+                    record["rank_template0"] = template0
+                    record["rank_detection"] = detection
+                    record["rank_positive_feature"] = positive
+                    record["rank_competitor_feature"] = competitor
+            self.lean_rows.append(record)
+        for field in (
+            "snapshot",
+            "pre_feature",
+            "det_feature",
+            "mean_prior",
+            "cov_prior",
+            "detection_measurement",
+            "_window",
+            "_window_frames",
+        ):
+            record.pop(field, None)
+
     # ------------------------------------------------------------------
     def write_outputs(self) -> dict:
+        if self.lean:
+            raise RuntimeError("write_outputs is unavailable in low-memory (lean) mode")
         self.out_dir.mkdir(parents=True, exist_ok=True)
         event_path = self.out_dir / "events.jsonl"
         with event_path.open("w") as handle:

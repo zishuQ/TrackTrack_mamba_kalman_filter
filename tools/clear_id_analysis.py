@@ -89,6 +89,7 @@ def assignments(
         gt_ids = sorted(gt_frames[frame])
         tracks = track_frames.get(frame, {})
         track_ids = sorted(tracks)
+        matching_performed = bool(gt_ids) and bool(track_ids)
         gt_boxes = np.stack([gt_frames[frame][g] for g in gt_ids]) if gt_ids else np.zeros((0, 4))
         track_boxes = np.stack([tracks[t] for t in track_ids]) if track_ids else np.zeros((0, 4))
         ious = iou_matrix(gt_boxes, track_boxes)
@@ -108,7 +109,10 @@ def assignments(
                 if score[row, col] > 0.0 + eps:
                     mapping[gt_ids[row]] = track_ids[col]
         result[frame] = mapping
-        previous = mapping
+        # TrackEval does not reset prev_timestep_tracker_id on frames with no
+        # GT or no tracker detections; continuity carries over the gap.
+        if matching_performed:
+            previous = mapping
     return result
 
 

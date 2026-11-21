@@ -14,6 +14,7 @@ Checks on real samples from three sequences:
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import sys
@@ -92,6 +93,9 @@ def parameter_grad_norm(model, inputs, loss_fn):
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", type=Path, default=NEW_ROOT / "rank_speed_validation.json")
+    args = parser.parse_args()
     torch.set_num_threads(4)
     model, _ = load_shutrack_checkpoint(INIT_CKPT, map_location="cpu")
     model.eval()
@@ -264,7 +268,7 @@ def main() -> None:
                 for gate_value in (0.0, 0.5, 1.0):
                     gate_tensor = torch.full((t0.shape[0],), gate_value)
                     updated = gated_appearance_template(t0, det, score, gate_tensor)
-                    margin = (updated * competitor).sum(-1) - (updated * positive).sum(-1)
+                    margin = (updated * positive).sum(-1) - (updated * competitor).sum(-1)
                     margins[gate_value] = margin.detach().numpy()
                 margins = {key: value[~np.isnan(value)] for key, value in margins.items()}
                 improved = int(np.sum(margins[1.0] > margins[0.0]))
@@ -403,7 +407,7 @@ def main() -> None:
     totals["rank_gradients_finite"] = totals["rank_grad_nonfinite"] == 0
     totals["speed_gradients_finite"] = totals["speed_grad_nonfinite"] == 0
     report["totals"] = totals
-    out = NEW_ROOT / "rank_speed_validation.json"
+    out = args.output
     out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(json.dumps(report, indent=2, sort_keys=True))
     print("saved", out)
