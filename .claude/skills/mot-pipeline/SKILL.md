@@ -26,11 +26,13 @@ Paths are relative to the repo root (`TrackTrack/`).
 ```bash
 .venv/bin/python .claude/skills/mot-pipeline/mot_pipeline.py status
 .venv/bin/python .claude/skills/mot-pipeline/mot_pipeline.py verify
+.venv/bin/python .claude/skills/mot-pipeline/mot_pipeline.py quota --dataset MOT17
 ```
 
 `status` prints each dataset's official best and every experiment with its
 HOTA, submission IDs, status and checkpoint presence. `verify` checks every
-ledger path.
+ledger path. `quota` queries `can_make_submission` for both accounts and stores
+the result under `submission_quota` in the ledger.
 
 Official bests:
 

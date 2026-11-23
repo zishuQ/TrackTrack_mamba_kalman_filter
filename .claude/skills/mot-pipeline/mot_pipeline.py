@@ -964,6 +964,29 @@ def cmd_report(args):
     print(json.dumps(report, indent=2, ensure_ascii=False), flush=True)
 
 
+# ---------------------------------------------------------------- quota -----
+def cmd_quota(args):
+    ledger = load_ledger()
+    protocol = dataset_protocol(ledger, args.dataset)
+    result = {}
+    for account, token_file in TOKENS:
+        if not token_file.is_file():
+            result[account] = {"can": False, "reason": "missing token file"}
+            continue
+        token = token_file.read_text().strip()
+        try:
+            can = _curl_json(token, f"/api/can_make_submission/{protocol['phase']}/")
+            result[account] = {"can": bool(can.get("can")), "reason": can.get("reason")}
+        except Exception as exc:  # noqa: BLE001
+            result[account] = {"can": None, "reason": str(exc)[:200]}
+    ledger.setdefault("submission_quota", {})[args.dataset] = {
+        "checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "phase": protocol["phase"], "accounts": result}
+    save_ledger(ledger)
+    print(json.dumps({"dataset": args.dataset, "phase": protocol["phase"],
+                      "accounts": result}, indent=2), flush=True)
+
+
 # ----------------------------------------------------------------- main -----
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
@@ -1050,6 +1073,10 @@ def main():
     rep.add_argument("--dataset", choices=("MOT20", "MOT17"), required=True)
     rep.add_argument("--experiment", required=True)
     rep.set_defaults(func=cmd_report)
+
+    quota = sub.add_parser("quota", help="query Codabench submission eligibility per account")
+    quota.add_argument("--dataset", choices=("MOT20", "MOT17"), required=True)
+    quota.set_defaults(func=cmd_quota)
 
     args = parser.parse_args()
     # Defaults that mirror the verified recipes.

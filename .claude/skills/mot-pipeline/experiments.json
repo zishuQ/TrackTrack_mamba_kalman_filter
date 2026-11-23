@@ -643,5 +643,21 @@
     "mot20_continue": "recipes/mot20_continue.json",
     "mot17_finetune": "recipes/mot17_finetune.json",
     "mot17_continue": "recipes/mot17_continue.json"
+  },
+  "submission_quota": {
+    "MOT17": {
+      "checked_at": "2026-11-23 14:07:37",
+      "phase": "16382",
+      "accounts": {
+        "jojo0": {
+          "can": false,
+          "reason": "Reached maximum allowed submissions for today for this phase"
+        },
+        "shangqingnie": {
+          "can": true,
+          "reason": null
+        }
+      }
+    }
   }
 }
