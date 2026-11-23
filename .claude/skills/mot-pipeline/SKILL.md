@@ -1,24 +1,30 @@
 ---
 name: mot-pipeline
-description: Run, resume, or audit the MOT17/MOT20 SHUTrack pipeline — propose parameter candidates from history, train or reuse weights, evaluate, run test+post, package, submit to Codabench with duplicate protection, and generate comparison reports. Reads and updates the experiment ledger with configs, official scores and submission IDs.
+description: Run, resume, or audit the MOT17/MOT20 SHUTrack pipeline — autonomously analyze history, pick the next tuning candidate, train or reuse weights, evaluate, run test+post, package, submit to Codabench (one per dataset per day) with duplicate protection, and write daily decision reports. Reads and updates the experiment ledger with configs, official scores and submission IDs.
 ---
 
 # MOT17/MOT20 pipeline
 
-This skill freezes the verified MOT17/MOT20 workflow: candidate selection from
-history, training (scratch / fine-tune / low-LR continuation), mid-checkpoint
-evaluation, test+post, package validation, Codabench submission, result
-recording and reporting.
+This skill freezes the verified MOT17/MOT20 workflow: autonomous candidate
+selection from history, training (scratch / fine-tune / low-LR continuation),
+mid-checkpoint evaluation, test+post, package validation, Codabench submission,
+result recording and reporting.
+
+The tuning loop is: analyze the last official score → propose a hypothesis →
+select the next candidate from the dataset space → execute → analyze the new
+official score → update the search direction.
 
 Paths are relative to the repo root (`TrackTrack/`).
 
 ## Files
 
-- `mot_pipeline.py` — the driver (dry-run by default).
-- `experiments.json` — the ledger: protocols, recipes, configs, official
-  scores, submission IDs and report indexes. Updated in place with a
+- `mot_pipeline.py` — the stage driver (dry-run by default).
+- `mot_tuner.py` — the autonomous decision loop (dry-run by default).
+- `experiments.json` — the ledger: protocols, configs, official scores,
+  submission IDs, search state and history. Updated in place with a
   `.json.bak` copy.
-- `recipes/` — verified base recipes (locked fields + tunables).
+- `recipes/` — verified base recipes and per-dataset search spaces
+  (`mot20_space.json`, `mot17_space.json`).
 - `templates/report.md` — report layout.
 
 ## Status (start here)
@@ -41,15 +47,65 @@ Official bests:
 | MOT20 | formal_e100 (epoch_100) | 66.637 | 1063086 (jojo0) |
 | MOT17 | formal_e50 (epoch_050) | 67.827 | 1063098 (jojo0) |
 
+## Autonomous tuning loop (mot_tuner.py)
+
+```bash
+# analyze history, select the next candidate and write the daily report (no run)
+.venv/bin/python .claude/skills/mot-pipeline/mot_tuner.py --dataset MOT20
+
+# propose -> train/reuse -> test -> package -> submit -> poll -> analyze -> report
+.venv/bin/python .claude/skills/mot-pipeline/mot_tuner.py --dataset MOT20 --execute
+```
+
+One invocation advances one daily decision step. The loop:
+
+1. Polls any non-terminal submission and records its official score.
+2. Analyzes the last candidate against its baseline: `improve` (> +0.02 HOTA),
+   `degrade` (< -0.02) or `neutral`, plus AssA/DetA/IDF1/MOTA/IDSW/Frag deltas.
+3. Chooses the next untested candidate from `recipes/mot20_space.json` /
+   `mot17_space.json` (config-hash dedupe against the ledger).
+4. On `--execute`: checks the daily budget and both accounts' quota, proposes,
+   runs the stages serially, polls the score, updates the search state.
+
+Search policy (generic, dataset-agnostic):
+
+- Numeric axis improves → keep the direction and move to the next step size
+  from the new best; degrades → probe the opposite direction at the same
+  step; fails both ways → next axis. Neutral → next step.
+- Choice axis (`kf_type`, `post_tau`, `post_interval`, `min_len`,
+  `max_time_lost`) → next value; `continue_lr` → next LR; `reproduce_seed` →
+  one seed rerun of the best training recipe.
+- The best official HOTA always stays the base of the next candidate, and the
+  best config is never overwritten.
+
+Budget rules:
+
+- At most one official submission per dataset per calendar day
+  (`submitted_at` in the ledger). When the budget is used, `--execute` exits
+  after writing the report; dry runs still show the plan.
+- `can_make_submission` is checked for both accounts; `submit` falls back
+  jojo0 → shangqingnie and refuses duplicates.
+- Pending submissions are polled instead of resubmitted; a proposed-but-not-run
+  candidate is resumed with the same name.
+
+Daily report:
+`outputs/agentguard/experiments/mot_pipeline_runs/daily/<date>_<dataset>.md`
+with the official best, cumulative evidence table, candidate rationale and
+expected effect, config, official result, delta vs baseline, rule-based result
+analysis and the next direction.
+
 ## Propose a candidate
 
 Parameters are restricted to a whitelist; everything else is locked.
 
-- Tunable: `mode`, `epochs`, `shards`, `lr`, `batch_size`, `init`, `source`,
-  `allow_partial_cycles`.
+- Tunable training: `mode`, `epochs`, `shards`, `lr`, `batch_size`, `seed`,
+  `init`, `source`, `allow_partial_cycles`.
+- Tunable inference: `det_thr`, `init_thr`, `match_thr`, `kf_type`,
+  `post_interval`, `post_tau`, `penalty_p`, `penalty_q`, `reduce_step`,
+  `tai_thr`, `min_len`, `min_box_area`, `max_time_lost`.
 - Locked: data splits, train/val/test sequences, data roots, architecture,
-  appearance projection, seed, weight decay, snapshot cadence, rank/column
-  weights, optimizer and losses.
+  appearance projection, weight decay, snapshot cadence, rank/column weights,
+  optimizer and losses.
 
 ```bash
 .venv/bin/python .claude/skills/mot-pipeline/mot_pipeline.py propose \
@@ -163,6 +219,10 @@ rule-based suggestions.
 
 - Append experiments; never delete or rewrite history.
 - Keep `official_best` as the highest recorded HOTA per dataset.
+- `search` per dataset records the loop state (`axis_index`, `step_index`,
+  `direction`, `tried_both`, baseline, pending) and the scored history used by
+  the daily report. The tuner owns it; hand edits are allowed but must keep
+  `config_hash` values intact.
 - Phases: MOT20 10050/16383/20804; MOT17 10049/16382/20803.
 - Tokens stay outside the repo: `~/.config/codabench/token` (jojo0),
   `~/.config/codabench/token_edge` (shangqingnie); never print them.
@@ -183,6 +243,10 @@ checkpoint/post/zip, `submit` is skipped as a duplicate, and `report` compares
 - `missing zip`: run package first. `already submitted`: inspect with
   `status`; do not force a duplicate. `can_make=false`: wait or use the other
   token. `manifest.json` missing: wrong split cache (MOT uses `all`).
+- `max_time_lost` defaults to `2*frameRate` from `seqinfo.ini`; the tunable
+  override (`--max-time-lost-override`, fixed frames) wins over that value.
+- Inference-threshold axes apply a uniform value to all sequences; the
+  per-sequence MOT17/MOT20 recipe is otherwise kept.
 - Session policy: this skill does not create cron/scheduled tasks and does not
   choose session startup/resume; invoke it manually.
 

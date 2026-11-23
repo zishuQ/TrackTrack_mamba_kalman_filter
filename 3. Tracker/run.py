@@ -148,6 +148,20 @@ def make_parser():
         choices=["nsa", "kf", "ekf", "ukf"],
         help="Classical Kalman filter variant. 'nsa' preserves the TrackTrack baseline.",
     )
+    # Optional inference overrides (defaults keep the per-dataset recipes).
+    parser.add_argument("--det-thr", dest="det_thr_override", type=float, default=None)
+    parser.add_argument("--init-thr", dest="init_thr_override", type=float, default=None)
+    parser.add_argument("--match-thr", dest="match_thr_override", type=float, default=None)
+    parser.add_argument("--post-interval", dest="post_interval_override", type=float, default=None)
+    parser.add_argument("--post-tau", dest="post_tau_override", type=float, default=None)
+    parser.add_argument("--post-n-min", dest="post_n_min_override", type=int, default=None)
+    parser.add_argument("--post-n-dti", dest="post_n_dti_override", type=int, default=None)
+    parser.add_argument("--max-time-lost-override", dest="max_time_lost_override",
+                        type=float, default=None,
+                        help="Fixed lost-track buffer; otherwise 2*frameRate from seqinfo.ini")
+    parser.add_argument("--aflink-thr-t", dest="aflink_thr_t_override", type=int, nargs=2, default=None)
+    parser.add_argument("--aflink-thr-s", dest="aflink_thr_s_override", type=float, default=None)
+    parser.add_argument("--aflink-thr-p", dest="aflink_thr_p_override", type=float, default=None)
 
     # Robustness test: noise injection
     parser.add_argument("--noise-pos-std", type=float, default=0.0,
@@ -386,6 +400,8 @@ def track_mmap_sequences(data_path, result_folder, mode):
                     args.img_w = int(s_i.split('=')[-1])
                 if 'imHeight' in s_i:
                     args.img_h = int(s_i.split('=')[-1])
+        if args.max_time_lost_override is not None:
+            args.max_time_lost = args.max_time_lost_override
 
         seq_cache_dir = _sequence_detection_cache_dir(args, vid_name)
         det_cache = SequenceDetectionCache(seq_cache_dir, frame_array_cache_size=4)
@@ -498,6 +514,8 @@ def track(detections, detections_95, data_path, result_folder, mode):
                     args.img_w = int(s_i.split('=')[-1])
                 if 'imHeight' in s_i:
                     args.img_h = int(s_i.split('=')[-1])
+        if args.max_time_lost_override is not None:
+            args.max_time_lost = args.max_time_lost_override
 
         if not hasattr(args, 'img_w'):
             raise ValueError("Image dimensions not set. Ensure seqinfo.ini is read.")
@@ -604,18 +622,26 @@ def run():
                 model = PostLinker()
                 model.load_state_dict(torch.load('./AFLink/AFLink_epoch20.pth'))
                 aflink_dataset = LinkData('', '')
-                
+
                 linker = AFLink(path_in=path_in, path_out=path_out, model=model, dataset=aflink_dataset,
-                                thrT=(0, 20), thrS=100, thrP=0.05)
+                                thrT=tuple(getattr(args, 'aflink_thr_t_override', None) or (0, 20)),
+                                thrS=float(getattr(args, 'aflink_thr_s_override', None) or 100),
+                                thrP=float(getattr(args, 'aflink_thr_p_override', None) or 0.05))
                 linker.link()
-            
+
             # Linear Interpolation for SportsMOT (based on MixSort, ICCV 2023)
             elif 'sports' in args.dataset.lower():
-                linear_interpolation_only(path_in, path_out, n_min=5, n_dti=20)
-        
+                linear_interpolation_only(
+                    path_in, path_out,
+                    n_min=int(getattr(args, 'post_n_min_override', None) or 5),
+                    n_dti=int(getattr(args, 'post_n_dti_override', None) or 20))
+
             # Gaussian Interpolation for MOT (pedestrian scenes)
             elif 'mot' in args.dataset.lower():
-                gb_interpolation(path_in, path_out, interval=30, tau=12)
+                gb_interpolation(
+                    path_in, path_out,
+                    interval=int(getattr(args, 'post_interval_override', None) or 30),
+                    tau=float(getattr(args, 'post_tau_override', None) or 12))
             else:
                 # If no filter hits, copy plain results to post folder to avoid missing files in evaluation.
                 shutil.copy(path_in, path_out)

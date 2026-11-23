@@ -107,6 +107,14 @@ def set_parameters(args, vid_name, mode):
         args.init_thr = 0.60
         args.match_thr = 0.80 if mode != 'test' else 0.60
 
+    # Optional per-experiment overrides; None keeps the dataset recipe.
+    for source, target in (("det_thr_override", "det_thr"),
+                           ("init_thr_override", "init_thr"),
+                           ("match_thr_override", "match_thr")):
+        value = getattr(args, source, None)
+        if value is not None:
+            setattr(args, target, value)
+
 
 def write_results(filename, results):
     # Set save format

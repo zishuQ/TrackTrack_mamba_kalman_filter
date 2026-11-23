@@ -1,0 +1,167 @@
+{
+  "dataset": "MOT20",
+  "baseline_inference": {
+    "det_thr": 0.4,
+    "init_thr": 0.4,
+    "match_thr": 0.55,
+    "kf_type": "nsa",
+    "post_interval": 30,
+    "post_tau": 12
+  },
+  "training_defaults": {
+    "shards": 4,
+    "batch_size": 1024,
+    "seed": 42
+  },
+  "axes": [
+    {
+      "name": "match_thr",
+      "kind": "inference",
+      "param": "match_thr",
+      "steps": [
+        0.03,
+        0.06
+      ],
+      "hypothesis": "Association threshold controls ID switches vs missed reassociations.",
+      "expected": "HOTA +0.02..0.10 if IDSW dominates; AssA/DetA may move the other way."
+    },
+    {
+      "name": "det_thr",
+      "kind": "inference",
+      "param": "det_thr",
+      "steps": [
+        0.03,
+        0.06
+      ],
+      "hypothesis": "Detection threshold trades recall for precision.",
+      "expected": "Higher: fewer false tracks; lower: more recall. HOTA change depends on DetA vs AssA."
+    },
+    {
+      "name": "init_thr",
+      "kind": "inference",
+      "param": "init_thr",
+      "steps": [
+        0.03,
+        0.05
+      ],
+      "hypothesis": "Track-init threshold changes short-track noise.",
+      "expected": "Higher: cleaner IDs, risk missed starts; lower: more coverage."
+    },
+    {
+      "name": "post_tau",
+      "kind": "inference",
+      "param": "post_tau",
+      "type": "choice",
+      "values": [
+        8,
+        10,
+        16,
+        20
+      ],
+      "hypothesis": "Gaussian interpolation width controls gap filling.",
+      "expected": "Smaller tau: more conservative fill; larger tau: longer/softer fills."
+    },
+    {
+      "name": "post_interval",
+      "kind": "inference",
+      "param": "post_interval",
+      "type": "choice",
+      "values": [
+        20,
+        40
+      ],
+      "hypothesis": "Maximum interpolation interval.",
+      "expected": "Larger interval recovers longer gaps but risks wrong IDs."
+    },
+    {
+      "name": "kf_type",
+      "kind": "inference",
+      "param": "kf_type",
+      "type": "choice",
+      "values": [
+        "kf",
+        "ekf",
+        "ukf"
+      ],
+      "hypothesis": "Kalman variant changes motion response.",
+      "expected": "Variant best for MOT pedestrian motion may differ from NSA."
+    },
+    {
+      "name": "penalty_p",
+      "kind": "inference",
+      "param": "penalty_p",
+      "steps": [
+        0.05
+      ],
+      "hypothesis": "Association penalty for track age/score."
+    },
+    {
+      "name": "penalty_q",
+      "kind": "inference",
+      "param": "penalty_q",
+      "steps": [
+        0.1
+      ],
+      "hypothesis": "Association penalty balance."
+    },
+    {
+      "name": "reduce_step",
+      "kind": "inference",
+      "param": "reduce_step",
+      "steps": [
+        0.05
+      ],
+      "hypothesis": "Penalty decay step."
+    },
+    {
+      "name": "tai_thr",
+      "kind": "inference",
+      "param": "tai_thr",
+      "steps": [
+        0.05
+      ],
+      "hypothesis": "Track-aware association threshold."
+    },
+    {
+      "name": "min_len",
+      "kind": "inference",
+      "param": "min_len",
+      "type": "choice",
+      "values": [
+        2,
+        5
+      ],
+      "hypothesis": "Minimum track length for output."
+    },
+    {
+      "name": "max_time_lost",
+      "kind": "inference",
+      "param": "max_time_lost",
+      "type": "choice",
+      "values": [
+        20,
+        45,
+        90
+      ],
+      "hypothesis": "Lost-track lifetime."
+    },
+    {
+      "name": "continue_lr",
+      "kind": "continue",
+      "lr_values": [
+        5e-06,
+        2e-05
+      ],
+      "epochs": 50,
+      "hypothesis": "Continue from the best checkpoint with a lower LR and a fresh cosine.",
+      "expected": "Small HOTA gain if the baseline is under-trained; risk of drift."
+    },
+    {
+      "name": "reproduce_seed",
+      "kind": "reproduce",
+      "seed": 43,
+      "hypothesis": "Reproduce the best training recipe with a different seed.",
+      "expected": "Estimate seed noise before promoting small gains."
+    }
+  ]
+}

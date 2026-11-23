@@ -41,7 +41,15 @@
         "dataset_flag": "mot20",
         "expected_test_files": 4,
         "final_checkpoint_dir": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints",
-        "midpoint_checkpoint_dir": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/shutrack_architecture_night_20261120/ablation/MOT20/groups/appearance_row_column/checkpoints"
+        "midpoint_checkpoint_dir": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/shutrack_architecture_night_20261120/ablation/MOT20/groups/appearance_row_column/checkpoints",
+        "baseline_inference": {
+          "det_thr": 0.4,
+          "init_thr": 0.4,
+          "match_thr": 0.55,
+          "kf_type": "nsa",
+          "post_interval": 30,
+          "post_tau": 12
+        }
       },
       "official_best": {
         "experiment": "formal_e100",
@@ -72,7 +80,9 @@
           "submissions": {
             "jojo0": {
               "id": 1063086,
-              "status": "Finished"
+              "status": "Finished",
+              "submitted_at": "2026-11-21 21:39:29",
+              "scored_at": "2026-11-21 21:39:29"
             }
           },
           "artifacts": {
@@ -93,6 +103,7 @@
             "shards": 4,
             "lr": 0.0001,
             "batch_size": 1024,
+            "seed": 42,
             "init": null,
             "source": null,
             "allow_partial_cycles": false
@@ -103,12 +114,14 @@
             "epochs": 100,
             "shards": 4,
             "lr": 0.0001,
+            "seed": 42,
             "batch_size": 1024,
             "allow_partial_cycles": false,
             "init": null,
             "source": null
           },
-          "config_hash": "1b8dec4e528c6f09"
+          "config_hash": "a608789fff7838cb",
+          "seed": 42
         },
         "midpoint_selection": {
           "kind": "validation-midpoint",
@@ -155,7 +168,9 @@
           "submissions": {
             "jojo0": {
               "id": 1064223,
-              "status": "Finished"
+              "status": "Finished",
+              "submitted_at": "2026-11-22 22:53:39",
+              "scored_at": "2026-11-22 22:53:39"
             }
           },
           "artifacts": {
@@ -188,7 +203,9 @@
           "submissions": {
             "shangqingnie": {
               "id": 1064320,
-              "status": "Finished"
+              "status": "Finished",
+              "submitted_at": "2026-11-23 00:48:56",
+              "scored_at": "2026-11-23 00:48:56"
             }
           },
           "artifacts": {
@@ -228,7 +245,9 @@
           "submissions": {
             "jojo0": {
               "id": 1064623,
-              "status": "Finished"
+              "status": "Finished",
+              "submitted_at": "2026-11-23 11:59:55",
+              "scored_at": "2026-11-23 11:59:55"
             }
           },
           "artifacts": {
@@ -251,6 +270,7 @@
             "shards": 4,
             "lr": 1e-05,
             "batch_size": 1024,
+            "seed": 42,
             "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
             "source": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
             "allow_partial_cycles": true
@@ -261,12 +281,14 @@
             "epochs": 50,
             "shards": 4,
             "lr": 1e-05,
+            "seed": 42,
             "batch_size": 1024,
             "allow_partial_cycles": true,
             "init": null,
             "source": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt"
           },
-          "config_hash": "b5d74c3291f94856"
+          "config_hash": "66174e61a2485efa",
+          "seed": 42
         },
         "hist_replay_lowlr": {
           "kind": "continue",
@@ -283,7 +305,8 @@
             "shards": 4,
             "lr": 1e-05,
             "batch_size": 1024,
-            "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+            "seed": 42,
+            "init": null,
             "source": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
             "allow_partial_cycles": true
           },
@@ -293,12 +316,13 @@
             "epochs": 50,
             "shards": 4,
             "lr": 1e-05,
+            "seed": 42,
             "batch_size": 1024,
             "allow_partial_cycles": true,
             "init": null,
             "source": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt"
           },
-          "config_hash": "b5d74c3291f94856",
+          "config_hash": "66174e61a2485efa",
           "base_experiment": "lowlr_continue",
           "change_reason": "historical replay validation; expect reuse of lowlr_continue",
           "status": "complete",
@@ -307,9 +331,11 @@
           "report": {
             "md": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/mot_pipeline_runs/hist_replay_lowlr/report.md",
             "json": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/mot_pipeline_runs/hist_replay_lowlr/report.json"
-          }
+          },
+          "seed": 42
         }
-      }
+      },
+      "search": {}
     },
     "MOT17": {
       "protocol": {
@@ -342,7 +368,15 @@
         "dataset_flag": "mot17",
         "expected_test_files": 21,
         "final_checkpoint_dir": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT17/groups/appearance_row_column/checkpoints",
-        "midpoint_checkpoint_dir": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/shutrack_architecture_night_20261120/ablation/MOT17/groups_new/appearance_row_column/checkpoints"
+        "midpoint_checkpoint_dir": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/shutrack_architecture_night_20261120/ablation/MOT17/groups_new/appearance_row_column/checkpoints",
+        "baseline_inference": {
+          "det_thr": 0.6,
+          "init_thr": 0.7,
+          "match_thr": 0.7,
+          "kf_type": "nsa",
+          "post_interval": 30,
+          "post_tau": 12
+        }
       },
       "official_best": {
         "experiment": "formal_e50",
@@ -374,7 +408,9 @@
           "submissions": {
             "jojo0": {
               "id": 1063098,
-              "status": "Finished"
+              "status": "Finished",
+              "submitted_at": "2026-11-21 21:54:34",
+              "scored_at": "2026-11-21 21:54:34"
             }
           },
           "artifacts": {
@@ -394,6 +430,7 @@
             "shards": 1,
             "lr": 1e-05,
             "batch_size": 1024,
+            "seed": 42,
             "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
             "source": null,
             "allow_partial_cycles": false
@@ -404,12 +441,14 @@
             "epochs": 50,
             "shards": 1,
             "lr": 1e-05,
+            "seed": 42,
             "batch_size": 1024,
             "allow_partial_cycles": false,
             "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
             "source": null
           },
-          "config_hash": "28c9cf1cb92680a3"
+          "config_hash": "fe45bd4de8d515dc",
+          "seed": 42
         },
         "midpoint_selection": {
           "kind": "validation-midpoint",
@@ -460,7 +499,9 @@
           "submissions": {
             "jojo0": {
               "id": 1064234,
-              "status": "Finished"
+              "status": "Finished",
+              "submitted_at": "2026-11-22 23:11:08",
+              "scored_at": "2026-11-22 23:11:08"
             }
           },
           "artifacts": {
@@ -499,7 +540,9 @@
           "submissions": {
             "shangqingnie": {
               "id": 1064329,
-              "status": "Finished"
+              "status": "Finished",
+              "submitted_at": "2026-11-23 01:05:42",
+              "scored_at": "2026-11-23 01:05:42"
             }
           },
           "artifacts": {
@@ -520,6 +563,7 @@
             "shards": 1,
             "lr": 1e-05,
             "batch_size": 1024,
+            "seed": 42,
             "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_080.pt",
             "source": null,
             "allow_partial_cycles": false
@@ -530,12 +574,14 @@
             "epochs": 50,
             "shards": 1,
             "lr": 1e-05,
+            "seed": 42,
             "batch_size": 1024,
             "allow_partial_cycles": false,
             "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_080.pt",
             "source": null
           },
-          "config_hash": "f457fed714bddd0e"
+          "config_hash": "9dad58e866192f0b",
+          "seed": 42
         },
         "lowlr_continue": {
           "kind": "continue",
@@ -560,7 +606,9 @@
           "submissions": {
             "jojo0": {
               "id": 1064624,
-              "status": "Finished"
+              "status": "Finished",
+              "submitted_at": "2026-11-23 12:00:11",
+              "scored_at": "2026-11-23 12:00:11"
             }
           },
           "artifacts": {
@@ -583,6 +631,7 @@
             "shards": 1,
             "lr": 1e-06,
             "batch_size": 1024,
+            "seed": 42,
             "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT17/groups/appearance_row_column/checkpoints/epoch_050.pt",
             "source": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT17/groups/appearance_row_column/checkpoints/epoch_050.pt",
             "allow_partial_cycles": false
@@ -593,14 +642,17 @@
             "epochs": 50,
             "shards": 1,
             "lr": 1e-06,
+            "seed": 42,
             "batch_size": 1024,
             "allow_partial_cycles": false,
             "init": null,
             "source": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT17/groups/appearance_row_column/checkpoints/epoch_050.pt"
           },
-          "config_hash": "07f16cacf0b21dd7"
+          "config_hash": "ffc322156f749270",
+          "seed": 42
         }
-      }
+      },
+      "search": {}
     }
   },
   "parameter_policy": {
@@ -610,6 +662,7 @@
       "shards",
       "lr",
       "batch_size",
+      "seed",
       "init",
       "source",
       "allow_partial_cycles"
@@ -621,7 +674,6 @@
       "data_root",
       "architecture_variant",
       "appearance_proj_dim",
-      "seed",
       "weight_decay",
       "snapshot_every",
       "rank_weight",
@@ -632,10 +684,27 @@
       "loss"
     ],
     "rules": [
-      "Only tunable keys may be overridden by propose.",
-      "Data splits, architecture, cache, optimizer and losses are locked.",
+      "Only tunable training keys and inference_tunable keys may be overridden by propose.",
+      "Do not mix training and inference overrides in one candidate.",
+      "Data splits, architecture, cache, supervision and losses are locked.",
       "Every candidate records base_experiment, change_reason and config_hash.",
-      "A candidate whose config_hash matches a completed experiment reuses that checkpoint instead of retraining."
+      "A candidate whose config_hash matches a completed experiment reuses that checkpoint/artifacts.",
+      "One Codabench submission per dataset per day; official HOTA is the primary selection metric."
+    ],
+    "inference_tunable": [
+      "det_thr",
+      "init_thr",
+      "kf_type",
+      "match_thr",
+      "max_time_lost",
+      "min_box_area",
+      "min_len",
+      "penalty_p",
+      "penalty_q",
+      "post_interval",
+      "post_tau",
+      "reduce_step",
+      "tai_thr"
     ]
   },
   "recipes": {
@@ -659,5 +728,9 @@
         }
       }
     }
+  },
+  "spaces": {
+    "MOT20": "recipes/mot20_space.json",
+    "MOT17": "recipes/mot17_space.json"
   }
 }

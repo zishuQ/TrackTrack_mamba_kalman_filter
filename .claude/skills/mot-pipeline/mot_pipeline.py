@@ -88,8 +88,17 @@ def sha256(path):
 
 
 TRAINING_MODES = ("scratch", "finetune", "continue")
-TUNABLE = ("mode", "epochs", "shards", "lr", "batch_size", "init", "source",
-           "allow_partial_cycles")
+TUNABLE = ("mode", "epochs", "shards", "lr", "batch_size", "seed", "init",
+           "source", "allow_partial_cycles")
+INFERENCE_FLAGS = {
+    "det_thr": "--det-thr", "init_thr": "--init-thr", "match_thr": "--match-thr",
+    "kf_type": "--kf-type", "post_interval": "--post-interval",
+    "post_tau": "--post-tau", "penalty_p": "--penalty_p",
+    "penalty_q": "--penalty_q", "reduce_step": "--reduce_step",
+    "tai_thr": "--tai_thr", "min_len": "--min_len",
+    "min_box_area": "--min_box_area", "max_time_lost": "--max-time-lost-override",
+}
+INT_INFERENCE = {"min_len", "post_interval"}
 
 
 def repo_rel(path):
@@ -110,7 +119,7 @@ def canonical_config(dataset, params):
         raise SystemExit(f"mode must be one of {TRAINING_MODES}")
     config = {"dataset": dataset, "mode": mode,
               "epochs": int(params["epochs"]), "shards": int(params["shards"]),
-              "lr": float(params["lr"]),
+              "lr": float(params["lr"]), "seed": int(params.get("seed", 42)),
               "batch_size": int(params.get("batch_size", 1024)),
               "allow_partial_cycles": bool(params.get("allow_partial_cycles", False)),
               "init": None, "source": None}
@@ -130,6 +139,7 @@ def experiment_params(entry):
     return {"mode": entry.get("kind"), "epochs": entry.get("epochs"),
             "shards": entry.get("shards"), "lr": entry.get("lr"),
             "batch_size": entry.get("batch_size", 1024),
+            "seed": entry.get("seed", 42),
             "init": entry.get("init") or entry.get("source_checkpoint"),
             "source": entry.get("source") or entry.get("source_checkpoint"),
             "allow_partial_cycles": entry.get("allow_partial_cycles", False)}
@@ -270,7 +280,8 @@ def cmd_train(args):
             "--groups-root", str(groups),
             "--batch-size", str(getattr(args, "batch_size", 1024) or 1024),
             "--lr", str(args.lr),
-            "--weight-decay", "1e-4", "--seed", "42", "--shards", str(args.shards),
+            "--weight-decay", "1e-4", "--seed", str(getattr(args, "seed", None) or 42),
+            "--shards", str(args.shards),
             "--max-epochs", str(args.epochs), "--snapshot-every", "20",
             "--rank-weight", "18", "--rank-alpha", "0.95", "--rank-tau", "0.1",
             "--column-weight", "50", "--appearance-proj-dim", "256",
@@ -310,7 +321,8 @@ def cmd_train(args):
         save_state(name, state)
         entry = ledger["datasets"][args.dataset]["experiments"].setdefault(name, {})
         entry.update({"kind": args.mode, "epochs": args.epochs, "shards": args.shards,
-                      "lr": args.lr, "checkpoint": str(final_ckpt.relative_to(ROOT)),
+                      "lr": args.lr, "seed": getattr(args, "seed", None) or 42,
+                      "batch_size": getattr(args, "batch_size", None) or 1024, "checkpoint": str(final_ckpt.relative_to(ROOT)),
                       "source_checkpoint": args.source, "init": args.init})
         save_ledger(ledger)
 
@@ -391,12 +403,12 @@ def cmd_test(args):
         print(f"[{name}] test already complete: {post_existing}", flush=True)
         return
     checkpoint = Path(args.checkpoint).expanduser().resolve() if args.checkpoint else None
-    if checkpoint is None:
-        exp = ledger["datasets"][args.dataset]["experiments"].get(name) or {}
-        if exp.get("checkpoint"):
-            checkpoint = ROOT / exp["checkpoint"]
+    exp = ledger["datasets"][args.dataset]["experiments"].get(name) or {}
+    if checkpoint is None and exp.get("checkpoint"):
+        checkpoint = ROOT / exp["checkpoint"]
     if checkpoint is None or not checkpoint.is_file():
         raise SystemExit(f"missing checkpoint for {name}")
+    inference = exp.get("inference") or {}
     out_dir = experiment_dir(name) / "test/tracking"
     out_dir.mkdir(parents=True, exist_ok=True)
     command = [str(PY), "-u", "run.py", "--dataset", args.dataset,
@@ -410,6 +422,10 @@ def cmd_test(args):
                "--agentguard-stats-output", str(experiment_dir(name) / "test/gates.jsonl"),
                "--use_post", "--skip-eval",
                "--torch-num-threads", "4", "--torch-num-interop-threads", "1"]
+    for key, value in inference.items():
+        flag = INFERENCE_FLAGS.get(key)
+        if flag:
+            command += [flag, str(value)]
     run_or_print(name, "test", command, args.execute, cwd=TRACKER)
     if not args.execute:
         return
@@ -453,7 +469,13 @@ def cmd_package(args):
         return
     post = Path(args.post_dir).expanduser().resolve() if args.post_dir else None
     if post is None:
-        post = Path(state["results"]["test"]["post_dir"])
+        post = (state.get("results", {}).get("test") or {}).get("post_dir")
+    if post is None:
+        if not args.execute:
+            print(f"[{name}] pending test; dry run", flush=True)
+            return
+        raise SystemExit(f"{name}: missing post dir")
+    post = Path(post)
     zip_path = experiment_dir(name) / "submissions" / f"{args.dataset}.zip"
     command = [str(PY), str(MAKE_PACKAGE), "--source", str(post),
                "--zip", str(zip_path), "--expected-count", str(protocol["expected_test_files"])]
@@ -534,6 +556,9 @@ def cmd_submit(args):
     zip_path = Path(args.zip).expanduser().resolve() if args.zip else Path(
         (state.get("results", {}).get("package") or {}).get("zip", ""))
     if not zip_path.is_file():
+        if not args.execute:
+            print(f"[{name}] pending package; dry run", flush=True)
+            return
         raise SystemExit(f"missing zip: {zip_path}")
     record = experiment_dir(name) / "submissions" / f"{args.dataset}_submission.json"
     state_file = experiment_dir(name) / "submissions" / "submission_state.json"
@@ -621,9 +646,13 @@ def cmd_submit(args):
 def self_record(ledger, dataset, name, account, payload, record):
     scores = _scores(payload)
     entry = ledger["datasets"][dataset]["experiments"].setdefault(name, {})
+    previous = (entry.get("submissions") or {}).get(account, {})
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
     entry.setdefault("submissions", {})[account] = {
         "id": payload.get("id"), "status": payload.get("status"), "scores": scores,
-        "record": str(record)}
+        "record": str(record),
+        "submitted_at": previous.get("submitted_at") or now,
+        "scored_at": now if payload.get("status") not in NON_TERMINAL else None}
     official = entry.get("official_scores") or {}
     entry["official_scores"] = scores or official
     save_ledger(ledger)
@@ -647,13 +676,14 @@ def cmd_record(args):
 
 # -------------------------------------------------------------- propose -----
 def _parse_set(items):
+    allowed = set(TUNABLE) | set(INFERENCE_FLAGS)
     overrides = {}
     for item in items or []:
         if "=" not in item:
             raise SystemExit(f"--set expects key=value, got {item}")
         key, value = item.split("=", 1)
-        if key not in TUNABLE:
-            raise SystemExit(f"{key} is not tunable; allowed: {', '.join(TUNABLE)}")
+        if key not in allowed:
+            raise SystemExit(f"{key} is not tunable; allowed: {', '.join(sorted(allowed))}")
         overrides[key] = value
     return overrides
 
@@ -665,11 +695,68 @@ def cmd_propose(args):
     if args.experiment in experiments:
         raise SystemExit(f"{args.experiment}: experiment already exists")
     base = experiments.get(args.base)
-    if not base or base.get("kind") not in TRAINING_MODES:
-        raise SystemExit("--base must be a training experiment (scratch/finetune/continue)")
+    if not base:
+        raise SystemExit("--base must exist in the ledger")
+    overrides = _parse_set(args.set)
+    inference_keys = set(overrides) & set(INFERENCE_FLAGS)
+    training_keys = set(overrides) - set(INFERENCE_FLAGS)
+    if inference_keys and training_keys:
+        raise SystemExit("do not mix training and inference overrides in one candidate")
+
+    if inference_keys:
+        checkpoint = base.get("checkpoint")
+        if not checkpoint:
+            best_name = ledger["datasets"][dataset]["official_best"]["experiment"]
+            checkpoint = (experiments.get(best_name) or {}).get("checkpoint")
+        if not checkpoint or not (ROOT / checkpoint).is_file():
+            raise SystemExit("inference candidate needs a base with an existing checkpoint")
+        baseline = ledger["datasets"][dataset]["protocol"].get("baseline_inference", {})
+        inference = dict(base.get("inference") or baseline)
+        for key, raw in overrides.items():
+            if key == "kf_type":
+                inference[key] = raw
+            elif key in INT_INFERENCE:
+                inference[key] = int(raw)
+            else:
+                inference[key] = float(raw)
+        inference = dict(sorted(inference.items()))
+        config = {"dataset": dataset, "kind": "inference",
+                  "checkpoint_sha": sha256(ROOT / checkpoint)[:32],
+                  "inference": inference}
+        base_config = {"dataset": dataset, "kind": "inference",
+                       "checkpoint_sha": sha256(ROOT / checkpoint)[:32],
+                       "inference": dict(sorted((base.get("inference") or baseline).items()))}
+        diff = {key: {"base": base_config.get(key), "new": config.get(key)}
+                for key in config if base_config.get(key) != config.get(key)}
+        digest = config_hash(config)
+        reuse = None
+        for name, experiment in experiments.items():
+            if experiment.get("config_hash") != digest:
+                continue
+            source = experiment.get("checkpoint")
+            if source and (ROOT / source).is_file():
+                reuse = name
+                break
+        entry = {"kind": "inference", "checkpoint": repo_rel(checkpoint),
+                 "inference": inference,
+                 "params": {"mode": "inference", "inference": inference},
+                 "config": config, "config_hash": digest,
+                 "base_experiment": args.base, "change_reason": args.reason,
+                 "status": "proposed", "reuse_from": reuse,
+                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+        experiments[args.experiment] = entry
+        save_ledger(ledger)
+        print(json.dumps({"experiment": args.experiment, "kind": "inference",
+                          "config": config, "diff_vs_base": diff,
+                          "config_hash": digest, "reuse_from": reuse,
+                          "reason": args.reason}, indent=2, ensure_ascii=False), flush=True)
+        return
+
+    if base.get("kind") not in TRAINING_MODES:
+        raise SystemExit("--base must be a training experiment for training overrides")
     params = experiment_params(base)
-    for key, raw in _parse_set(args.set).items():
-        if key in ("epochs", "shards", "batch_size"):
+    for key, raw in overrides.items():
+        if key in ("epochs", "shards", "batch_size", "seed"):
             params[key] = int(raw)
         elif key == "lr":
             params[key] = float(raw)
@@ -705,6 +792,7 @@ def cmd_propose(args):
             break
     entry = {"kind": config["mode"], "epochs": config["epochs"],
              "shards": config["shards"], "lr": config["lr"],
+             "seed": config["seed"],
              "batch_size": config["batch_size"], "init": config["init"],
              "source": config["source"],
              "allow_partial_cycles": config["allow_partial_cycles"],
@@ -742,6 +830,30 @@ def cmd_run(args):
     bad = set(stages) - {"train", "test", "package", "submit"}
     if bad:
         raise SystemExit(f"unknown stages: {sorted(bad)}")
+    if entry.get("kind") == "inference":
+        plan = {"kind": "inference", "checkpoint": entry.get("checkpoint"),
+                "inference": entry.get("inference")}
+        if "train" in stages:
+            if args.execute:
+                state = load_state(name)
+                state["stages"]["train"] = {"status": "complete", "reused": True}
+                state["results"]["train"] = {"checkpoint": entry.get("checkpoint"),
+                                             "reused": True}
+                save_state(name, state)
+            plan["train"] = "reuse checkpoint"
+        for stage in [s for s in stages if s != "train"]:
+            command = [str(PY), str(Path(__file__).resolve()), stage,
+                       "--dataset", dataset, "--experiment", name]
+            if args.execute:
+                command.append("--execute")
+            code = subprocess.call(command)
+            if code:
+                raise SystemExit(f"{name}:{stage} failed")
+        if args.execute:
+            entry["status"] = "complete"
+            save_ledger(ledger)
+        print(json.dumps(plan, indent=2, ensure_ascii=False), flush=True)
+        return
     reuse = entry.get("reuse_from")
     print(json.dumps({"experiment": name, "status": entry.get("status"),
                       "reuse_from": reuse, "stages": stages}, indent=2))
@@ -802,7 +914,7 @@ def cmd_run(args):
                    "--dataset", dataset, "--experiment", name]
         if stage == "train":
             params = entry.get("params") or experiment_params(entry)
-            for key in ("mode", "epochs", "shards", "lr", "batch_size", "init", "source"):
+            for key in ("mode", "epochs", "shards", "lr", "batch_size", "seed", "init", "source"):
                 value = params.get(key)
                 if value is not None:
                     command += ["--" + key.replace("_", "-"), str(value)]
@@ -1009,6 +1121,7 @@ def main():
     train.add_argument("--batch-size", type=int)
     train.add_argument("--shards", type=int)
     train.add_argument("--lr", type=float)
+    train.add_argument("--seed", type=int)
     train.add_argument("--init")
     train.add_argument("--source")
     train.add_argument("--allow-partial-cycles", action="store_true")
@@ -1093,6 +1206,8 @@ def main():
             args.shards = defaults[1]
         if args.lr is None:
             args.lr = defaults[2]
+        if getattr(args, "seed", None) is None:
+            args.seed = 42
         if args.mode == "finetune" and not args.init and args.dataset == "MOT17":
             args.init = ("outputs/agentguard/experiments/shutrack_architecture_night_20261120/"
                          "final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt")
