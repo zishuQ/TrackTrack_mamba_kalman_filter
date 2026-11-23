@@ -80,11 +80,13 @@ Search policy (generic, dataset-agnostic):
 
 Budget rules:
 
-- At most one official submission per dataset per calendar day
-  (`submitted_at` in the ledger). When the budget is used, `--execute` exits
-  after writing the report; dry runs still show the plan.
-- `can_make_submission` is checked for both accounts; `submit` falls back
-  jojo0 → shangqingnie and refuses duplicates.
+- At most one official submission per dataset per quota day. The quota day is
+  Codabench's UTC day (00:00–24:00 UTC = 08:00–08:00 CST), and the count is
+  recomputed at every invocation from `submitted_at` against the live clock —
+  there is no stored "used" flag to go stale. When the budget is used,
+  `--execute` exits after writing the report; dry runs still show the plan.
+- `can_make_submission` is queried live for both accounts before any test
+  compute; `submit` falls back jojo0 → shangqingnie and refuses duplicates.
 - Pending submissions are polled instead of resubmitted; a proposed-but-not-run
   candidate is resumed with the same name.
 

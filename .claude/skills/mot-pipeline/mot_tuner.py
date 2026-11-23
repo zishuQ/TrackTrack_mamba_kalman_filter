@@ -17,6 +17,7 @@ import json
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SKILL = Path(__file__).resolve().parent
@@ -74,11 +75,28 @@ def best_training_experiment(ledger, dataset):
     return max(scored) if scored else None
 
 
+def quota_day():
+    """Codabench's daily quota window: 00:00-24:00 UTC (08:00 CST)."""
+    now_utc = datetime.now(timezone.utc)
+    start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start, start + timedelta(days=1)
+
+
+def _submitted_at_utc(stamp):
+    try:
+        return datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
 def submissions_today(ledger, dataset):
+    """Count submissions inside the live quota window, not a cached flag."""
+    start, end = quota_day()
     count = 0
     for entry in experiments(ledger, dataset).values():
         for submission in (entry.get("submissions") or {}).values():
-            if str(submission.get("submitted_at", "")).startswith(today()):
+            moment = _submitted_at_utc(submission.get("submitted_at"))
+            if moment is not None and start <= moment < end:
                 count += 1
     return count
 
@@ -383,7 +401,10 @@ def write_daily(dataset, space, search, ledger, candidate=None, result=None, not
     lines = [f"# Daily tuning report — {dataset} — {today()}", ""]
     if best:
         lines.append(f"- official best: {best[1]} HOTA {best[0]:.3f}")
-    lines.append(f"- daily submissions used today: {submissions_today(ledger, dataset)}")
+    start, end = quota_day()
+    lines.append(f"- submissions in current quota day "
+                 f"({start:%m-%d %H:%M}–{end:%m-%d %H:%M} UTC): "
+                 f"{submissions_today(ledger, dataset)}")
     if note:
         lines += ["", f"> {note}"]
     history = search.get("history") or []
@@ -524,7 +545,7 @@ def tuner(args):
     if not args.execute:
         note = "dry run; pass --execute to run and submit"
         if budget_used:
-            note += " (daily submission budget already used; execution would wait until tomorrow)"
+            note += " (current quota day already has a submission; the quota window resets at 08:00 local)"
         path = write_daily(dataset, space, search, ledger, candidate=candidate,
                            result=result, note=note)
         print(json.dumps({"candidate": {key: candidate.get(key) for key in
