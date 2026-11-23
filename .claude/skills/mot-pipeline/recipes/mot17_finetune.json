@@ -1,0 +1,39 @@
+{
+  "name": "mot17_finetune",
+  "dataset": "MOT17",
+  "mode": "finetune",
+  "params": {
+    "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+    "epochs": 50,
+    "shards": 1,
+    "lr": 1e-05,
+    "batch_size": 1024,
+    "allow_partial_cycles": false
+  },
+  "tunable": [
+    "epochs",
+    "shards",
+    "lr",
+    "batch_size",
+    "init",
+    "allow_partial_cycles"
+  ],
+  "locked": [
+    "train_sequences",
+    "val_sequences",
+    "test_sequences",
+    "data_root",
+    "architecture_variant",
+    "appearance_proj_dim",
+    "seed",
+    "weight_decay",
+    "snapshot_every",
+    "rank_weight",
+    "rank_alpha",
+    "rank_tau",
+    "column_weight",
+    "optimizer",
+    "loss"
+  ],
+  "description": "Verified formal MOT17 recipe: init MOT20 epoch_100, 50 single-shard epochs, lr 1e-5, 7 official train sequences."
+}

@@ -1,0 +1,647 @@
+{
+  "schema": 1,
+  "updated_at": "2026-11-23",
+  "scope": "MOT17/MOT20 SHUTrack D-supervision: validation, training, test+post, package, Codabench submission, ledger/resume.",
+  "accounts": {
+    "jojo0": "~/.config/codabench/token",
+    "shangqingnie": "~/.config/codabench/token_edge"
+  },
+  "submit_rules": {
+    "one_submission_per_result": true,
+    "before_retry_query_existing": true,
+    "fallback_accounts": [
+      "jojo0",
+      "shangqingnie"
+    ],
+    "note": "Never create a second submission for the same experiment; ledger+record files are authoritative."
+  },
+  "datasets": {
+    "MOT20": {
+      "protocol": {
+        "train_sequences": [
+          "MOT20-02",
+          "MOT20-03"
+        ],
+        "val_sequences": [
+          "MOT20-01",
+          "MOT20-05"
+        ],
+        "test_sequences": [
+          "MOT20-04",
+          "MOT20-06",
+          "MOT20-07",
+          "MOT20-08"
+        ],
+        "data_root": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/shutrack_bd_mot_20261120/MOT20/data",
+        "cache_root": "/home/shang/workspace/TrackTrack/outputs/agentguard/detection_cache",
+        "seqinfo_test": "/home/shang/datasets/MOT20/test",
+        "competition": "10050",
+        "phase": "16383",
+        "task": "20804",
+        "dataset_flag": "mot20",
+        "expected_test_files": 4,
+        "final_checkpoint_dir": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints",
+        "midpoint_checkpoint_dir": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/shutrack_architecture_night_20261120/ablation/MOT20/groups/appearance_row_column/checkpoints"
+      },
+      "official_best": {
+        "experiment": "formal_e100",
+        "hota": 66.637,
+        "submission_id": 1063086,
+        "account": "jojo0",
+        "checkpoint": "epoch_100.pt",
+        "epoch": 100
+      },
+      "experiments": {
+        "formal_e100": {
+          "kind": "scratch",
+          "epochs": 100,
+          "shards": 4,
+          "lr": 0.0001,
+          "total_steps": 27100,
+          "warmup_steps": 271,
+          "checkpoint": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+          "official_scores": {
+            "HOTA": 66.637,
+            "AssA": 69.283,
+            "DetA": 64.27,
+            "IDF1": 82.661,
+            "MOTA": 77.752,
+            "IDSW": 635,
+            "Frag": 841
+          },
+          "submissions": {
+            "jojo0": {
+              "id": 1063086,
+              "status": "Finished"
+            }
+          },
+          "artifacts": {
+            "val_summary": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/ablation/MOT20/evals/new/summary.json",
+            "post_dir": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/test/tracking/mot20_test_0.80_archnight_shutrack_v2_post",
+            "zip": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/submissions/MOT20.zip"
+          },
+          "batch_size": 1024,
+          "allow_partial_cycles": false,
+          "init": null,
+          "source": null,
+          "status": "complete",
+          "base_experiment": null,
+          "change_reason": "verified formal MOT20 baseline",
+          "params": {
+            "mode": "scratch",
+            "epochs": 100,
+            "shards": 4,
+            "lr": 0.0001,
+            "batch_size": 1024,
+            "init": null,
+            "source": null,
+            "allow_partial_cycles": false
+          },
+          "config": {
+            "dataset": "MOT20",
+            "mode": "scratch",
+            "epochs": 100,
+            "shards": 4,
+            "lr": 0.0001,
+            "batch_size": 1024,
+            "allow_partial_cycles": false,
+            "init": null,
+            "source": null
+          },
+          "config_hash": "1b8dec4e528c6f09"
+        },
+        "midpoint_selection": {
+          "kind": "validation-midpoint",
+          "checkpoint_source": "ablation/MOT20 (train 02/03, val 01/05)",
+          "evaluated_epochs": [
+            20,
+            40,
+            60,
+            80,
+            100
+          ],
+          "val_hota": {
+            "20": 79.704,
+            "40": 79.636,
+            "60": 79.572,
+            "80": 79.678,
+            "100": 79.608
+          },
+          "best_epoch": 20,
+          "best_val_hota": 79.704,
+          "best_lr": 9.118382907149165e-05,
+          "state_dir": "outputs/agentguard/experiments/mot20_d_midpoints_20261122",
+          "note": "earliest available checkpoint is epoch 20",
+          "status": "complete",
+          "base_experiment": "formal_e100",
+          "change_reason": "validation-only midpoint scan (train 02/03, val 01/05)",
+          "params": {
+            "mode": "validation"
+          }
+        },
+        "midpoint_e20": {
+          "kind": "test",
+          "checkpoint": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_020.pt",
+          "epoch": 20,
+          "official_scores": {
+            "HOTA": 66.512,
+            "AssA": 68.848,
+            "DetA": 64.43,
+            "IDF1": 82.22,
+            "MOTA": 77.879,
+            "IDSW": 616,
+            "Frag": 781
+          },
+          "submissions": {
+            "jojo0": {
+              "id": 1064223,
+              "status": "Finished"
+            }
+          },
+          "artifacts": {
+            "dir": "outputs/agentguard/experiments/shutrack_midpoint_test_20261122/MOT20",
+            "post_dir": "outputs/agentguard/experiments/shutrack_midpoint_test_20261122/MOT20/test/tracking/mot20_test_0.80_midpoint_e20_shutrack_v2_post",
+            "gates": "outputs/agentguard/experiments/shutrack_midpoint_test_20261122/MOT20/test/gates.jsonl",
+            "zip": "outputs/agentguard/experiments/shutrack_midpoint_test_20261122/submissions/MOT20.zip"
+          },
+          "status": "complete",
+          "base_experiment": "midpoint_selection",
+          "change_reason": "apply validation-selected epoch 20 to formal weights",
+          "params": {
+            "mode": "test",
+            "epoch": 20
+          }
+        },
+        "e80": {
+          "kind": "test",
+          "checkpoint": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_080.pt",
+          "epoch": 80,
+          "official_scores": {
+            "HOTA": 66.635,
+            "AssA": 69.2,
+            "DetA": 64.342,
+            "IDF1": 82.518,
+            "MOTA": 77.812,
+            "IDSW": 619,
+            "Frag": 797
+          },
+          "submissions": {
+            "shangqingnie": {
+              "id": 1064320,
+              "status": "Finished"
+            }
+          },
+          "artifacts": {
+            "dir": "outputs/agentguard/experiments/mot_e80_round_20261123/MOT20",
+            "post_dir": "outputs/agentguard/experiments/mot_e80_round_20261123/MOT20/test/tracking/mot20_test_0.80_midpoint_e80_shutrack_v2_post",
+            "gates": "outputs/agentguard/experiments/mot_e80_round_20261123/MOT20/test/gates.jsonl",
+            "zip": "outputs/agentguard/experiments/mot_e80_round_20261123/submissions/MOT20.zip"
+          },
+          "status": "complete",
+          "base_experiment": "midpoint_selection",
+          "change_reason": "apply validation-selected epoch 80 to formal weights",
+          "params": {
+            "mode": "test",
+            "epoch": 80
+          }
+        },
+        "lowlr_continue": {
+          "kind": "continue",
+          "source_checkpoint": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+          "source_epoch": 100,
+          "stage_epochs": 50,
+          "cumulative_epochs": 150,
+          "shards": 4,
+          "lr": 1e-05,
+          "total_steps": 13500,
+          "warmup_steps": 270,
+          "checkpoint": "outputs/agentguard/experiments/mot_lowlr_continue_20261123/mot20/groups/appearance_row_column/checkpoints/epoch_050.pt",
+          "official_scores": {
+            "HOTA": 66.587,
+            "AssA": 69.17,
+            "DetA": 64.276,
+            "IDF1": 82.534,
+            "MOTA": 77.748,
+            "IDSW": 633,
+            "Frag": 804
+          },
+          "submissions": {
+            "jojo0": {
+              "id": 1064623,
+              "status": "Finished"
+            }
+          },
+          "artifacts": {
+            "dir": "outputs/agentguard/experiments/mot_lowlr_continue_20261123/MOT20",
+            "post_dir": "outputs/agentguard/experiments/mot_lowlr_continue_20261123/MOT20/test/tracking/mot20_test_0.80_midpoint_e50_shutrack_v2_post",
+            "gates": "outputs/agentguard/experiments/mot_lowlr_continue_20261123/MOT20/test/gates.jsonl",
+            "zip": "outputs/agentguard/experiments/mot_lowlr_continue_20261123/submissions/MOT20.zip"
+          },
+          "epochs": 50,
+          "batch_size": 1024,
+          "allow_partial_cycles": true,
+          "init": null,
+          "source": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+          "status": "complete",
+          "base_experiment": "formal_e100",
+          "change_reason": "low-LR continuation: weights-only init, preserved normalization, fresh 50-epoch cosine",
+          "params": {
+            "mode": "continue",
+            "epochs": 50,
+            "shards": 4,
+            "lr": 1e-05,
+            "batch_size": 1024,
+            "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+            "source": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+            "allow_partial_cycles": true
+          },
+          "config": {
+            "dataset": "MOT20",
+            "mode": "continue",
+            "epochs": 50,
+            "shards": 4,
+            "lr": 1e-05,
+            "batch_size": 1024,
+            "allow_partial_cycles": true,
+            "init": null,
+            "source": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt"
+          },
+          "config_hash": "b5d74c3291f94856"
+        },
+        "hist_replay_lowlr": {
+          "kind": "continue",
+          "epochs": 50,
+          "shards": 4,
+          "lr": 1e-05,
+          "batch_size": 1024,
+          "init": null,
+          "source": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+          "allow_partial_cycles": true,
+          "params": {
+            "mode": "continue",
+            "epochs": 50,
+            "shards": 4,
+            "lr": 1e-05,
+            "batch_size": 1024,
+            "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+            "source": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+            "allow_partial_cycles": true
+          },
+          "config": {
+            "dataset": "MOT20",
+            "mode": "continue",
+            "epochs": 50,
+            "shards": 4,
+            "lr": 1e-05,
+            "batch_size": 1024,
+            "allow_partial_cycles": true,
+            "init": null,
+            "source": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt"
+          },
+          "config_hash": "b5d74c3291f94856",
+          "base_experiment": "lowlr_continue",
+          "change_reason": "historical replay validation; expect reuse of lowlr_continue",
+          "status": "complete",
+          "reuse_from": "lowlr_continue",
+          "created_at": "2026-11-23 14:06:19",
+          "report": {
+            "md": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/mot_pipeline_runs/hist_replay_lowlr/report.md",
+            "json": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/mot_pipeline_runs/hist_replay_lowlr/report.json"
+          }
+        }
+      }
+    },
+    "MOT17": {
+      "protocol": {
+        "train_sequences": [
+          "MOT17-02-FRCNN",
+          "MOT17-04-FRCNN",
+          "MOT17-05-FRCNN",
+          "MOT17-11-FRCNN",
+          "MOT17-13-FRCNN"
+        ],
+        "val_sequences": [
+          "MOT17-09-FRCNN",
+          "MOT17-10-FRCNN"
+        ],
+        "test_sequences": [
+          "MOT17-01-FRCNN",
+          "MOT17-03-FRCNN",
+          "MOT17-06-FRCNN",
+          "MOT17-07-FRCNN",
+          "MOT17-08-FRCNN",
+          "MOT17-12-FRCNN",
+          "MOT17-14-FRCNN"
+        ],
+        "data_root": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/shutrack_bd_mot_20261120/MOT17/data",
+        "cache_root": "/home/shang/workspace/TrackTrack/outputs/agentguard/detection_cache",
+        "seqinfo_test": "/home/shang/datasets/MOT17/test",
+        "competition": "10049",
+        "phase": "16382",
+        "task": "20803",
+        "dataset_flag": "mot17",
+        "expected_test_files": 21,
+        "final_checkpoint_dir": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT17/groups/appearance_row_column/checkpoints",
+        "midpoint_checkpoint_dir": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/shutrack_architecture_night_20261120/ablation/MOT17/groups_new/appearance_row_column/checkpoints"
+      },
+      "official_best": {
+        "experiment": "formal_e50",
+        "hota": 67.827,
+        "submission_id": 1063098,
+        "account": "jojo0",
+        "checkpoint": "epoch_050.pt",
+        "epoch": 50
+      },
+      "experiments": {
+        "formal_e50": {
+          "kind": "finetune",
+          "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+          "epochs": 50,
+          "shards": 1,
+          "lr": 1e-05,
+          "total_steps": 5200,
+          "warmup_steps": 104,
+          "checkpoint": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT17/groups/appearance_row_column/checkpoints/epoch_050.pt",
+          "official_scores": {
+            "HOTA": 67.827,
+            "AssA": 69.442,
+            "DetA": 66.551,
+            "IDF1": 83.931,
+            "MOTA": 81.888,
+            "IDSW": 837,
+            "Frag": 1344
+          },
+          "submissions": {
+            "jojo0": {
+              "id": 1063098,
+              "status": "Finished"
+            }
+          },
+          "artifacts": {
+            "val_summary": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/ablation/MOT17/evals/new/summary.json",
+            "post_dir": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT17/test/tracking/mot17_test_0.80_archnight_shutrack_v2_post",
+            "zip": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/submissions/MOT17.zip"
+          },
+          "batch_size": 1024,
+          "allow_partial_cycles": false,
+          "source": null,
+          "status": "complete",
+          "base_experiment": null,
+          "change_reason": "verified formal MOT17 recipe: init MOT20 e100, 50 single-shard epochs",
+          "params": {
+            "mode": "finetune",
+            "epochs": 50,
+            "shards": 1,
+            "lr": 1e-05,
+            "batch_size": 1024,
+            "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+            "source": null,
+            "allow_partial_cycles": false
+          },
+          "config": {
+            "dataset": "MOT17",
+            "mode": "finetune",
+            "epochs": 50,
+            "shards": 1,
+            "lr": 1e-05,
+            "batch_size": 1024,
+            "allow_partial_cycles": false,
+            "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+            "source": null
+          },
+          "config_hash": "28c9cf1cb92680a3"
+        },
+        "midpoint_selection": {
+          "kind": "validation-midpoint",
+          "checkpoint_source": "ablation/MOT17 groups_new (200 shard-epochs; train 02/04/05/11/13-FRCNN, val 09/10-FRCNN)",
+          "evaluated_epochs": [
+            40,
+            80,
+            100,
+            120,
+            140,
+            160,
+            200
+          ],
+          "val_hota": {
+            "40": 66.162,
+            "80": 67.266,
+            "100": 67.287,
+            "120": 67.273,
+            "140": 67.138,
+            "160": 67.147,
+            "200": 67.149
+          },
+          "best_epoch": 100,
+          "best_val_hota": 67.287,
+          "best_lr": 5.039466834548568e-06,
+          "state_dir": "outputs/agentguard/experiments/mot17_d_midpoints_20261122",
+          "note": "200 shard-epochs = 50 full passes; best 100 shard-epochs = 25 passes maps to formal epoch 20 (closest saved 20/40/50)",
+          "status": "complete",
+          "base_experiment": "formal_e50",
+          "change_reason": "validation-only midpoint scan (groups_new, 200 shard-epochs)",
+          "params": {
+            "mode": "validation"
+          }
+        },
+        "midpoint_e20": {
+          "kind": "test",
+          "checkpoint": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT17/groups/appearance_row_column/checkpoints/epoch_020.pt",
+          "epoch": 20,
+          "official_scores": {
+            "HOTA": 67.672,
+            "AssA": 68.983,
+            "DetA": 66.696,
+            "IDF1": 83.709,
+            "MOTA": 82.147,
+            "IDSW": 813,
+            "Frag": 1347
+          },
+          "submissions": {
+            "jojo0": {
+              "id": 1064234,
+              "status": "Finished"
+            }
+          },
+          "artifacts": {
+            "dir": "outputs/agentguard/experiments/shutrack_midpoint_test_20261122/MOT17",
+            "post_dir": "outputs/agentguard/experiments/shutrack_midpoint_test_20261122/MOT17/test/tracking/mot17_test_0.80_midpoint_e20_shutrack_v2_post",
+            "gates": "outputs/agentguard/experiments/shutrack_midpoint_test_20261122/MOT17/test/gates.jsonl",
+            "zip": "outputs/agentguard/experiments/shutrack_midpoint_test_20261122/submissions/MOT17.zip"
+          },
+          "status": "complete",
+          "base_experiment": "midpoint_selection",
+          "change_reason": "apply best shard-epoch 100 (25 full passes) to formal epoch 20",
+          "params": {
+            "mode": "test",
+            "epoch": 20
+          }
+        },
+        "e80_from_mot20e80": {
+          "kind": "finetune",
+          "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_080.pt",
+          "source_epoch": 80,
+          "epochs": 50,
+          "shards": 1,
+          "lr": 1e-05,
+          "total_steps": 5200,
+          "warmup_steps": 104,
+          "checkpoint": "outputs/agentguard/experiments/mot_e80_round_20261123/mot17_from_mot20_e80/groups/appearance_row_column/checkpoints/epoch_050.pt",
+          "official_scores": {
+            "HOTA": 67.763,
+            "AssA": 69.298,
+            "DetA": 66.566,
+            "IDF1": 84.026,
+            "MOTA": 81.98,
+            "IDSW": 819,
+            "Frag": 1353
+          },
+          "submissions": {
+            "shangqingnie": {
+              "id": 1064329,
+              "status": "Finished"
+            }
+          },
+          "artifacts": {
+            "dir": "outputs/agentguard/experiments/mot_e80_round_20261123/MOT17",
+            "post_dir": "outputs/agentguard/experiments/mot_e80_round_20261123/MOT17/test/tracking/mot17_test_0.80_midpoint_e50_shutrack_v2_post",
+            "gates": "outputs/agentguard/experiments/mot_e80_round_20261123/MOT17/test/gates.jsonl",
+            "zip": "outputs/agentguard/experiments/mot_e80_round_20261123/submissions/MOT17.zip"
+          },
+          "batch_size": 1024,
+          "allow_partial_cycles": false,
+          "source": null,
+          "status": "complete",
+          "base_experiment": "formal_e50",
+          "change_reason": "retrain MOT17 from MOT20 e80 init, 50 single-shard epochs",
+          "params": {
+            "mode": "finetune",
+            "epochs": 50,
+            "shards": 1,
+            "lr": 1e-05,
+            "batch_size": 1024,
+            "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_080.pt",
+            "source": null,
+            "allow_partial_cycles": false
+          },
+          "config": {
+            "dataset": "MOT17",
+            "mode": "finetune",
+            "epochs": 50,
+            "shards": 1,
+            "lr": 1e-05,
+            "batch_size": 1024,
+            "allow_partial_cycles": false,
+            "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_080.pt",
+            "source": null
+          },
+          "config_hash": "f457fed714bddd0e"
+        },
+        "lowlr_continue": {
+          "kind": "continue",
+          "source_checkpoint": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT17/groups/appearance_row_column/checkpoints/epoch_050.pt",
+          "source_epoch": 50,
+          "stage_epochs": 50,
+          "cumulative_epochs": 100,
+          "shards": 1,
+          "lr": 1e-06,
+          "total_steps": 5200,
+          "warmup_steps": 104,
+          "checkpoint": "outputs/agentguard/experiments/mot_lowlr_continue_20261123/mot17/groups/appearance_row_column/checkpoints/epoch_050.pt",
+          "official_scores": {
+            "HOTA": 67.689,
+            "AssA": 69.206,
+            "DetA": 66.5,
+            "IDF1": 83.851,
+            "MOTA": 81.805,
+            "IDSW": 846,
+            "Frag": 1350
+          },
+          "submissions": {
+            "jojo0": {
+              "id": 1064624,
+              "status": "Finished"
+            }
+          },
+          "artifacts": {
+            "dir": "outputs/agentguard/experiments/mot_lowlr_continue_20261123/MOT17",
+            "post_dir": "outputs/agentguard/experiments/mot_lowlr_continue_20261123/MOT17/test/tracking/mot17_test_0.80_midpoint_e50_shutrack_v2_post",
+            "gates": "outputs/agentguard/experiments/mot_lowlr_continue_20261123/MOT17/test/gates.jsonl",
+            "zip": "outputs/agentguard/experiments/mot_lowlr_continue_20261123/submissions/MOT17.zip"
+          },
+          "epochs": 50,
+          "batch_size": 1024,
+          "allow_partial_cycles": false,
+          "init": null,
+          "source": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT17/groups/appearance_row_column/checkpoints/epoch_050.pt",
+          "status": "complete",
+          "base_experiment": "formal_e50",
+          "change_reason": "low-LR continuation: weights-only init, preserved normalization, fresh 50-epoch cosine",
+          "params": {
+            "mode": "continue",
+            "epochs": 50,
+            "shards": 1,
+            "lr": 1e-06,
+            "batch_size": 1024,
+            "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT17/groups/appearance_row_column/checkpoints/epoch_050.pt",
+            "source": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT17/groups/appearance_row_column/checkpoints/epoch_050.pt",
+            "allow_partial_cycles": false
+          },
+          "config": {
+            "dataset": "MOT17",
+            "mode": "continue",
+            "epochs": 50,
+            "shards": 1,
+            "lr": 1e-06,
+            "batch_size": 1024,
+            "allow_partial_cycles": false,
+            "init": null,
+            "source": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT17/groups/appearance_row_column/checkpoints/epoch_050.pt"
+          },
+          "config_hash": "07f16cacf0b21dd7"
+        }
+      }
+    }
+  },
+  "parameter_policy": {
+    "tunable": [
+      "mode",
+      "epochs",
+      "shards",
+      "lr",
+      "batch_size",
+      "init",
+      "source",
+      "allow_partial_cycles"
+    ],
+    "locked": [
+      "train_sequences",
+      "val_sequences",
+      "test_sequences",
+      "data_root",
+      "architecture_variant",
+      "appearance_proj_dim",
+      "seed",
+      "weight_decay",
+      "snapshot_every",
+      "rank_weight",
+      "rank_alpha",
+      "rank_tau",
+      "column_weight",
+      "optimizer",
+      "loss"
+    ],
+    "rules": [
+      "Only tunable keys may be overridden by propose.",
+      "Data splits, architecture, cache, optimizer and losses are locked.",
+      "Every candidate records base_experiment, change_reason and config_hash.",
+      "A candidate whose config_hash matches a completed experiment reuses that checkpoint instead of retraining."
+    ]
+  },
+  "recipes": {
+    "mot20_scratch": "recipes/mot20_scratch.json",
+    "mot20_continue": "recipes/mot20_continue.json",
+    "mot17_finetune": "recipes/mot17_finetune.json",
+    "mot17_continue": "recipes/mot17_continue.json"
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "name": "mot20_scratch",
+  "dataset": "MOT20",
+  "mode": "scratch",
+  "params": {
+    "epochs": 100,
+    "shards": 4,
+    "lr": 0.0001,
+    "batch_size": 1024,
+    "allow_partial_cycles": false
+  },
+  "tunable": [
+    "epochs",
+    "shards",
+    "lr",
+    "batch_size",
+    "allow_partial_cycles"
+  ],
+  "locked": [
+    "train_sequences",
+    "val_sequences",
+    "test_sequences",
+    "data_root",
+    "architecture_variant",
+    "appearance_proj_dim",
+    "seed",
+    "weight_decay",
+    "snapshot_every",
+    "rank_weight",
+    "rank_alpha",
+    "rank_tau",
+    "column_weight",
+    "optimizer",
+    "loss"
+  ],
+  "description": "Verified formal MOT20 baseline: from scratch, 100 shard-epochs, 4 shards, lr 1e-4, 4 official train sequences."
+}

@@ -1,0 +1,39 @@
+{
+  "name": "mot20_continue",
+  "dataset": "MOT20",
+  "mode": "continue",
+  "params": {
+    "source": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+    "epochs": 50,
+    "shards": 4,
+    "lr": 1e-05,
+    "batch_size": 1024,
+    "allow_partial_cycles": true
+  },
+  "tunable": [
+    "epochs",
+    "shards",
+    "lr",
+    "batch_size",
+    "source",
+    "allow_partial_cycles"
+  ],
+  "locked": [
+    "train_sequences",
+    "val_sequences",
+    "test_sequences",
+    "data_root",
+    "architecture_variant",
+    "appearance_proj_dim",
+    "seed",
+    "weight_decay",
+    "snapshot_every",
+    "rank_weight",
+    "rank_alpha",
+    "rank_tau",
+    "column_weight",
+    "optimizer",
+    "loss"
+  ],
+  "description": "Low-LR continuation: weights-only init, preserved normalization, fresh 50-epoch cosine, 4 shards (partial cycle allowed)."
+}
