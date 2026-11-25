@@ -44,6 +44,10 @@ project skill `.claude/skills/codabench`.
    Full details in the SportsMOT card.
 6. **Submit** — read `.claude/skills/codabench/SKILL.md` first; never submit
    without an explicit user instruction.
+7. **Record the score** — every official test submission, once scored, must be
+   appended to `submissions.json` + `submissions.md` in this skill (ID,
+   account, dataset, experiment, all metrics). This is the project's most
+   important data; never leave a scored submission unrecorded.
 
 ## MOT17/MOT20 ledger and autonomous tuner (MOT only)
 
@@ -54,6 +58,9 @@ project skill `.claude/skills/codabench`.
   until the user explicitly re-enables it — do not start it on your own).
 - `experiments.json` — ledger (protocols, configs, official scores, submission
   IDs, search state). Append-only; keep `experiments.json.bak`.
+- `submissions.json` / `submissions.md` — the full Codabench submission ledger
+  (every official test submission for MOT20/MOT17/SportsMOT/DanceTrack, with
+  scores and submission IDs). Append after every scored submission.
 - `recipes/` — MOT20/MOT17 base recipes and search spaces; `templates/report.md`.
 
 ```bash

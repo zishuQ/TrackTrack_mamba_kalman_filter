@@ -107,3 +107,7 @@ Helper (quota / today / poll):
   poll timeout — keep polling the record with the helper.
 - Do not upload the same package twice; a duplicate is noise on the leaderboard
   and burns the daily quota.
+- **Every scored submission must be recorded** in
+  `.claude/skills/shutrack-pipeline/submissions.json` (+ `submissions.md`):
+  ID, account, dataset, experiment, all official metrics. This is the most
+  important data of the project — record it as soon as the score resolves.

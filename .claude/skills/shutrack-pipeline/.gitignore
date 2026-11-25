@@ -1,4 +1,5 @@
 !experiments.json
+!submissions.json
 !recipes/*.json
 experiments.json.bak
 __pycache__/
