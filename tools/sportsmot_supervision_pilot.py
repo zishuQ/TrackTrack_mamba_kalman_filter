@@ -235,7 +235,12 @@ def recovered_detection_rows(
 
 def load_gt(sequence: str, split: str, dataset: str = "SportsMOT") -> dict[int, dict[int, np.ndarray]]:
     frames: dict[int, dict[int, np.ndarray]] = {}
-    root = GT_ROOT if dataset == "SportsMOT" else (Path.home() / "datasets") / dataset
+    if dataset == "SportsMOT":
+        root = GT_ROOT
+    elif dataset == "DanceTrack":
+        root = WORKTREE / "data/DanceTrack"
+    else:
+        root = (Path.home() / "datasets") / dataset
     path = root / ("train" if split == "all" else split) / sequence / "gt" / "gt.txt"
     for line in path.read_text().splitlines():
         fields = line.split(",")
@@ -251,7 +256,12 @@ def load_gt(sequence: str, split: str, dataset: str = "SportsMOT") -> dict[int, 
 
 
 def load_warps(sequence: str, dataset: str = "SportsMOT") -> dict[int, np.ndarray]:
-    name = f"sportsmot-{sequence}" if dataset == "SportsMOT" else sequence.removesuffix("-FRCNN")
+    if dataset == "SportsMOT":
+        name = f"sportsmot-{sequence}"
+    elif dataset == "DanceTrack":
+        name = "dancetrack-" + sequence.split("dancetrack")[-1]
+    else:
+        name = sequence.removesuffix("-FRCNN")
     path = WORKTREE / "3. Tracker" / "trackers" / "cmc" / f"GMC-{name}.txt"
     warps: dict[int, np.ndarray] = {}
     with path.open() as handle:
@@ -329,6 +339,7 @@ class SequencePilot:
         self.warps = load_warps(sequence, dataset)
         self.events: list[dict] = []
         self.adapter_events: set[tuple[int, int]] = set()
+        self.event_states: dict[tuple[int, int], dict] = {}
         self.windows: dict[tuple[int, int], dict] = {}
         self.window_frames: dict[tuple[int, int], list[int]] = {}
         self.frame_det_index: dict[tuple[int, int], int] = {}
@@ -574,6 +585,16 @@ class SequencePilot:
             }
             pilot.events.append(record)
             pilot._compute_motion_endpoints(record)
+            pilot.event_states[(int(track.track_id), int(frame_id))] = {
+                "mean": np.asarray(record["mean_prior"], dtype=np.float32).copy(),
+                "cov": np.asarray(record["cov_prior"], dtype=np.float32).reshape(-1).copy(),
+                "measurement": np.asarray(record["detection_measurement"], dtype=np.float32),
+                "score": np.float32(record["detection_score"]),
+                "warp": np.asarray(
+                    pilot.warps.get(int(frame_id) + 1, np.zeros((2, 3))),
+                    dtype=np.float32).reshape(-1).copy(),
+                "gap": np.int32(record["gap_before"]),
+            }
             if pilot.lean:
                 key = (int(track.track_id), int(frame_id))
                 record["_window"] = pilot.windows.pop(key, None)
@@ -885,6 +906,8 @@ class SequencePilot:
         args = run_module.make_parser().parse_args([])
         args.dataset = self.dataset
         args.mode = self.split
+        if self.dataset == "DanceTrack":
+            args.data_dir = str(WORKTREE / "data") + os.sep
         args.sequences = [self.sequence]
         args.seed = 10000
         args.kf_type = "nsa"
@@ -1047,6 +1070,14 @@ class SequencePilot:
             event_det = []
             event_has = []
 
+        event_state_mean: list[np.ndarray] = []
+        event_state_cov: list[np.ndarray] = []
+        event_measurement: list[np.ndarray] = []
+        event_score: list[float] = []
+        event_warp: list[np.ndarray] = []
+        event_gap: list[int] = []
+        event_frame: list[int] = []
+
         def register(key, evidence, track, det_index, has_detection):
             if key in event_index:
                 return event_index[key]
@@ -1056,6 +1087,18 @@ class SequencePilot:
             event_track.append(np.asarray(track, dtype=np.float32))
             event_det.append(int(det_index))
             event_has.append(bool(has_detection))
+            state = self.event_states.get(key)
+            event_state_mean.append(
+                np.zeros(8, dtype=np.float32) if state is None else state["mean"])
+            event_state_cov.append(
+                np.zeros(64, dtype=np.float32) if state is None else state["cov"])
+            event_measurement.append(
+                np.zeros(4, dtype=np.float32) if state is None else state["measurement"])
+            event_score.append(0.0 if state is None else float(state["score"]))
+            event_warp.append(
+                np.zeros(6, dtype=np.float32) if state is None else state["warp"])
+            event_gap.append(-1 if state is None else int(state["gap"]))
+            event_frame.append(int(key[1]))
             return index
 
         sample_count = len(mature)
@@ -1092,6 +1135,20 @@ class SequencePilot:
                 window.current_has_detection,
             )
             current_competition[row] = window.current_competition
+
+        event_target_row = np.full(len(event_evidence), -1, dtype=np.int64)
+        for row in range(len(mature)):
+            event_target_row[int(current_event_index[row])] = row
+        ordered_keys: list[tuple[int, int] | None] = [None] * len(event_index)
+        for key, index in event_index.items():
+            ordered_keys[int(index)] = key
+
+        def event_state_array(field, shape, dtype, default):
+            values = []
+            for key in ordered_keys:
+                state = self.event_states.get(key) if key is not None else None
+                values.append(default if state is None else state[field])
+            return np.asarray(values, dtype=dtype).reshape(-1, *shape)
 
         source_ids = {"tracked_lost_unmature": 0, "new_path_unmature": 1, "gated": 2}
         if self.store_rank_features:
@@ -1374,6 +1431,39 @@ class SequencePilot:
             sequence_dir / "event_has_detection.npy",
             np.asarray(event_has, dtype=np.bool_),
         )
+        np.save(
+            sequence_dir / "event_state_mean.npy",
+            event_state_array("mean", (8,), np.float32, np.zeros(8, np.float32)),
+        )
+        np.save(
+            sequence_dir / "event_state_cov.npy",
+            event_state_array("cov", (64,), np.float32, np.zeros(64, np.float32)),
+        )
+        np.save(
+            sequence_dir / "event_det_measurement.npy",
+            event_state_array("measurement", (4,), np.float32, np.zeros(4, np.float32)),
+        )
+        np.save(
+            sequence_dir / "event_det_score.npy",
+            event_state_array("score", (), np.float32, np.float32(0.0)),
+        )
+        np.save(
+            sequence_dir / "event_warp_next.npy",
+            event_state_array("warp", (6,), np.float32, np.zeros(6, np.float32)),
+        )
+        np.save(
+            sequence_dir / "event_gap.npy",
+            event_state_array("gap", (), np.int32, np.int32(-1)),
+        )
+        np.save(
+            sequence_dir / "event_frame.npy",
+            np.asarray([-1 if key is None else int(key[1]) for key in ordered_keys],
+                       dtype=np.int64),
+        )
+        np.save(
+            sequence_dir / "event_target_row.npy",
+            event_target_row,
+        )
         summary = {
             "sequence": self.sequence,
             "protocol": getattr(self, "protocol", None),
@@ -1421,6 +1511,14 @@ class SequencePilot:
             "event_track.npy",
             "event_detection_index.npy",
             "event_has_detection.npy",
+            "event_state_mean.npy",
+            "event_state_cov.npy",
+            "event_det_measurement.npy",
+            "event_det_score.npy",
+            "event_warp_next.npy",
+            "event_gap.npy",
+            "event_frame.npy",
+            "event_target_row.npy",
         ):
             self._release_file_pages(sequence_dir / name)
         return summary

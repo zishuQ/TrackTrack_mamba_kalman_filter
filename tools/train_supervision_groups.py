@@ -28,6 +28,7 @@ import math
 import mmap as mmap_module
 import os
 import random
+import resource
 import sys
 import time
 from pathlib import Path
@@ -62,8 +63,15 @@ from shutrack.training.loss import (
     motion_speed_l1_loss,
 )
 from shutrack.training.train import _load_init_state_with_extension, _seed_everything
+from shutrack.training.defaults import (
+    LEGACY_APPEARANCE_PROJ_DIM, LEGACY_ARCHITECTURE_VARIANT,
+    MAINLINE_APPEARANCE_PROJ_DIM, MAINLINE_ARCHITECTURE_VARIANT,
+    MAINLINE_STAGE_CHUNK_SAMPLES, MAINLINE_STAGE_FEATURES,
+)
 from shutrack.training.paired_pipeline import DeferredMetrics, move_batch, npz_array_view, prepared_batches
-from shutrack.training.feature_staging import release_sequence_pages, staged_sequence_rows
+from shutrack.training.feature_staging import (
+    aligned_stage_chunk_samples, feature_chunks, staged_sequence_rows,
+)
 from paired_training_input import fit_input_statistics, official_sequences
 from shutrack.schema import EVIDENCE_SCALAR_INDICES, COMPETITION_SCALAR_INDICES
 
@@ -164,6 +172,8 @@ class SequenceData:
                 "column_offset",
                 "column_rival",
                 "column_score",
+                "gt_box_t1",
+                "motion_gt_valid",
             )
             if key in self.samples.files
         }
@@ -171,6 +181,12 @@ class SequenceData:
         self.event_track = np.load(self.dir / "event_track.npy", mmap_mode="r")
         self.event_det = np.load(self.dir / "event_detection_index.npy", mmap_mode="r")
         self.event_has = np.load(self.dir / "event_has_detection.npy", mmap_mode="r")
+        for name in ("event_state_mean", "event_state_cov", "event_det_measurement",
+                     "event_det_score", "event_warp_next", "event_gap", "event_frame",
+                     "event_target_row", "gt_box_t0", "gt_valid_t0"):
+            path = self.dir / f"{name}.npy"
+            if path.is_file():
+                setattr(self, name, np.load(path, mmap_mode="r"))
         self.split = split
         self.n = int(self.samples["frame"].shape[0])
         self.cache: SequenceDetectionCache | None = None
@@ -205,6 +221,13 @@ class SequenceData:
             np.asarray(npz_array_view(s, "rank_competitor"), dtype=np.float16),
             np.asarray(npz_array_view(s, "rank_score"), dtype=np.float32),
         )
+
+    def preload(self) -> None:
+        """Copy mapped event and rank arrays into resident RAM."""
+        for attr in ("event_evidence", "event_track", "event_det", "event_has"):
+            setattr(self, attr, np.array(getattr(self, attr)))
+        self.load_rank_arrays()
+        self._rank_arrays = tuple(np.array(array) for array in self._rank_arrays)
 
 
 def batch_tensors(
@@ -424,6 +447,28 @@ def scheduler_lambda(total_steps: int, warmup_steps: int):
         progress = min(max(progress, 0.0), 1.0)
         return 0.5 * (1.0 + math.cos(math.pi * progress))
     return multiplier
+
+
+SHARED_PARAMETER_PREFIXES = (
+    "evidence_encoder.", "appearance_encoder.", "event_fusion.", "hce.",
+)
+
+
+def shared_parameters(model):
+    """Parameters of the trunk both gate losses backprop through."""
+    return [(name, param) for name, param in model.named_parameters()
+            if name.startswith(SHARED_PARAMETER_PREFIXES) and param.requires_grad]
+
+
+def loss_grad_norm(loss, parameters):
+    grads = torch.autograd.grad(loss, [param for _, param in parameters],
+                                retain_graph=True, allow_unused=True)
+    total = 0.0
+    for grad in grads:
+        if grad is not None:
+            total += float(grad.detach().pow(2).sum())
+    return math.sqrt(total)
+
 
 
 def _shard_bounds(n: int, shard: int, shards: int) -> tuple[int, int]:
@@ -677,15 +722,29 @@ def validate_replay_summary(
 
 
 def resolve_model_options(args) -> tuple[str, int]:
-    """Keep the legacy default; the new architecture defaults to the 256 baseline."""
-    variant = getattr(args, "architecture_variant", "legacy")
-    if variant not in ("legacy", "query_film_bilinear"):
+    """Resolve the shared mainline default; legacy runs opt out explicitly."""
+    variant = getattr(args, "architecture_variant", MAINLINE_ARCHITECTURE_VARIANT)
+    if variant not in (LEGACY_ARCHITECTURE_VARIANT, MAINLINE_ARCHITECTURE_VARIANT):
         raise ValueError(f"Unknown architecture_variant: {variant!r}")
     width = getattr(args, "appearance_proj_dim", None)
-    width = int(width) if width is not None else (256 if variant == "query_film_bilinear" else 64)
+    if width is None:
+        width = (MAINLINE_APPEARANCE_PROJ_DIM
+                 if variant == MAINLINE_ARCHITECTURE_VARIANT
+                 else LEGACY_APPEARANCE_PROJ_DIM)
+    width = int(width)
     if width <= 0:
         raise ValueError("appearance_proj_dim must be positive")
     return variant, width
+
+
+def resolve_dropout(args, init_config: dict | None = None) -> float:
+    """An explicit --dropout wins; otherwise an init checkpoint's value carries over."""
+    requested = getattr(args, "dropout", None)
+    if requested is not None:
+        return float(requested)
+    if init_config is not None:
+        return float(init_config.get("dropout", 0.0))
+    return 0.0
 
 
 def train(group: str, args) -> None:
@@ -708,7 +767,16 @@ def train(group: str, args) -> None:
         path.name for path in data_root.iterdir() if (path / "samples.npz").is_file()
     )
     raw_sequence_dirs = set(sequence_dirs)
-    if dataset == "SportsMOT":
+    if dataset == "DanceTrack":
+        split_name = args.split or "train"
+        if split_name not in ("train", "trainval"):
+            raise ValueError(f"DanceTrack supports train/trainval, got {split_name}")
+        expected = official_sequences("train", dataset)
+        if split_name == "trainval":
+            expected |= official_sequences("val", dataset)
+        val_names = official_sequences("val", dataset)
+        expected_split_of = lambda sequence: "val" if sequence in val_names else "train"
+    elif dataset == "SportsMOT":
         split_name = args.split or ("train" if args.from_scratch else "trainval")
         if split_name not in ("train", "trainval"):
             raise ValueError(f"SportsMOT supports train/trainval, got {split_name}")
@@ -759,7 +827,7 @@ def train(group: str, args) -> None:
         raise ValueError("--shards must be positive")
     if sequence_sampling not in ("sample-proportional", "sqrt-size"):
         raise ValueError(f"Unknown sequence sampling: {sequence_sampling}")
-    if epochs_total % shards:
+    if epochs_total % shards and not getattr(args, "allow_partial_cycles", False):
         raise ValueError(
             f"--max-epochs ({epochs_total}) must be divisible by --shards ({shards})"
         )
@@ -787,17 +855,39 @@ def train(group: str, args) -> None:
         data = SequenceData(sequence, split, data_root, dataset)
         datasets[sequence] = data
         targets[sequence] = derive_targets(data.samples, taus)
+    preload_features = bool(getattr(args, "preload_features", False))
+    load_seconds = 0.0
+    preload_rss_gb = None
+    if preload_features:
+        preload_started = time.time()
+        for data in datasets.values():
+            data.preload()
+        load_seconds = time.time() - preload_started
+        preload_rss_gb = round(_process_rss_gb(), 3)
     batch_size = int(args.batch_size)
     epoch_steps = build_schedule(
         datasets, batch_size, epochs_total, shards, sequence_sampling, sampling_power
     )
     total_steps = int(sum(epoch_steps))
-    warmup_steps = int(epoch_steps[0])
+    warmup_override = int(getattr(args, "warmup_steps", -1))
+    warmup_steps = int(epoch_steps[0]) if warmup_override < 0 else warmup_override
+    warmup_steps = max(0, min(warmup_steps, total_steps))
+    stage_features = bool(getattr(args, "stage_features", MAINLINE_STAGE_FEATURES))
+    if preload_features:
+        stage_features = False
+    stage_chunk_samples = aligned_stage_chunk_samples(
+        int(getattr(args, "stage_chunk_samples", MAINLINE_STAGE_CHUNK_SAMPLES)),
+        batch_size,
+    )
+    loading_mode = ("preload" if preload_features else
+                    ("stage" if stage_features else "mmap"))
 
     full_write = bool(
         protocols and json.loads(next(iter(protocols))).get("full_write")
     )
+    dropout = getattr(args, "dropout", None)
     if args.from_scratch:
+        dropout = 0.0 if dropout is None else float(dropout)
         _seed_everything(int(args.seed))
         dims = {seq.event_track.shape[1] for seq in datasets.values()}
         if len(dims) != 1:
@@ -807,6 +897,7 @@ def train(group: str, args) -> None:
                 reid_dim=int(dims.pop()),
                 appearance_proj_dim=appearance_proj_dim,
                 architecture_variant=architecture_variant,
+                dropout=dropout,
             )
         )
         norm_mean, norm_std = fit_input_statistics(datasets)
@@ -818,6 +909,7 @@ def train(group: str, args) -> None:
         _seed_everything(int(args.seed))
         init_model, init_checkpoint = load_shutrack_checkpoint(args.init, map_location="cpu")
         init_config = init_model.config.as_dict()
+        dropout = resolve_dropout(args, init_config)
         init_proj = int(init_config.get("appearance_proj_dim", 64))
         if init_config.get("architecture_variant", "legacy") != architecture_variant:
             raise ValueError("Init checkpoint architecture_variant does not match the requested model; use --from-scratch for a new architecture")
@@ -826,7 +918,7 @@ def train(group: str, args) -> None:
                 f"Init checkpoint appearance_proj_dim={init_proj} does not match "
                 f"--appearance-proj-dim={appearance_proj_dim}"
             )
-        model = ShutrackV2Model(ShutrackV2Config(**init_config))
+        model = ShutrackV2Model(ShutrackV2Config(**{**init_config, "dropout": dropout}))
         _load_init_state_with_extension(model, init_model)
         if full_write:
             # Weights-only initialization on a full-write replay: the source
@@ -861,6 +953,22 @@ def train(group: str, args) -> None:
         optimizer.load_state_dict(payload["optimizer_state_dict"])
         if payload.get("scheduler_state_dict"):
             scheduler.load_state_dict(payload["scheduler_state_dict"])
+        rng_state = payload.get("rng_state")
+        if rng_state:
+            torch.set_rng_state(rng_state["torch"])
+            cuda_state = rng_state.get("cuda") or []
+            if cuda_state and torch.cuda.is_available():
+                try:
+                    torch.cuda.set_rng_state_all(cuda_state)
+                except (RuntimeError, ValueError):
+                    pass
+            if rng_state.get("numpy") is not None:
+                np.random.set_state(rng_state["numpy"])
+            if rng_state.get("python") is not None:
+                random.setstate(rng_state["python"])
+            print("resume rng state: restored", flush=True)
+        else:
+            print("resume rng state: unavailable in checkpoint", flush=True)
         start_epoch = int(payload["epoch"])
         global_step = int(payload["global_step"])
         print(f"resume from epoch {start_epoch} step {global_step}", flush=True)
@@ -904,6 +1012,13 @@ def train(group: str, args) -> None:
         "size_weight": args.size_weight,
         "gap3_weight": args.gap3_weight,
         "snapshot_every": args.snapshot_every,
+        "dropout": dropout,
+        "preload_features": preload_features,
+        "stage_features": stage_features,
+        "stage_chunk_samples": stage_chunk_samples,
+        "loading_mode": loading_mode,
+        "warmup_steps_override": warmup_override,
+        "grad_norm_every": int(getattr(args, "grad_norm_every", 0)),
     }
     if args.resume:
         previous_config = dict(payload.get("training_config") or {})
@@ -921,8 +1036,18 @@ def train(group: str, args) -> None:
         previous_config.setdefault(
             "sampling_replacement", previous_sampling == "sqrt-size"
         )
+        previous_config.setdefault("dropout", 0.0)
+        previous_config.setdefault("preload_features", False)
+        previous_config.setdefault("warmup_steps_override", -1)
+        previous_config.setdefault("grad_norm_every", 0)
         previous_config.setdefault("sequence_counts", config["sequence_counts"])
-        if previous_config != config:
+        loader_keys = ("preload_features", "stage_features", "stage_chunk_samples",
+                       "loading_mode")
+        current_compare = {key: value for key, value in config.items()
+                           if key not in loader_keys}
+        previous_compare = {key: value for key, value in previous_config.items()
+                            if key not in loader_keys}
+        if previous_compare != current_compare:
             raise ValueError("Resume config does not match the original run")
         payload_proj = int((payload.get("model_config") or {}).get("appearance_proj_dim", 64))
         if payload_proj != appearance_proj_dim:
@@ -939,6 +1064,34 @@ def train(group: str, args) -> None:
         log_handle.write(message + "\n")
         log_handle.flush()
 
+    model_param_numel = sum(p.numel() for p in model.parameters())
+    optimizer_param_numel = sum(
+        p.numel() for group_ in optimizer.param_groups for p in group_["params"]
+    )
+    if model_param_numel != optimizer_param_numel:
+        raise RuntimeError("not all model parameters entered the optimizer")
+    dropout_modules = [
+        (name, float(module.p)) for name, module in model.named_modules()
+        if isinstance(module, torch.nn.Dropout) and module.p > 0
+    ]
+    parameter_digest = hashlib.sha256()
+    for parameter_name, parameter in sorted(model.named_parameters()):
+        parameter_digest.update(parameter_name.encode("utf-8"))
+        parameter_digest.update(parameter.detach().cpu().contiguous().numpy().tobytes())
+    log("verification: " + json.dumps({
+        "model_param_numel": model_param_numel,
+        "optimizer_param_numel": optimizer_param_numel,
+        "dropout_modules": dropout_modules,
+        "model_training": model.training,
+        "model_config": model.config.as_dict(),
+        "initial_parameter_sha256": parameter_digest.hexdigest(),
+    }, sort_keys=True))
+    if preload_features:
+        log("preload: " + json.dumps({
+            "seconds": round(load_seconds, 2),
+            "rss_gb": preload_rss_gb,
+        }, sort_keys=True))
+
     prefetch = int(getattr(args, "prefetch", 1))
     pin_memory = device.type == "cuda" and not getattr(args, "no_pin_memory", False)
     compact_reid = not getattr(args, "no_compact_reid", False)
@@ -951,22 +1104,19 @@ def train(group: str, args) -> None:
         + (data.dir / "samples.npz").stat().st_size
         for data in datasets.values()
     )
-    memory_bytes = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
-    requested_staging = getattr(args, "stage_features", None)
-    stage_features = feature_bytes > 0.75 * memory_bytes if requested_staging is None else requested_staging
     log(json.dumps({"start": time.strftime("%Y-%m-%d %H:%M:%S"), **config}, sort_keys=True))
     # Loader options affect execution only, not the resume/training protocol.
     log("pipeline: " + json.dumps({"prefetch": prefetch, "pin_memory": pin_memory,
-                                  "compact_reid": compact_reid, "stage_features": stage_features,
+                                  "compact_reid": compact_reid,
+                                  "loading_mode": loading_mode,
+                                  "stage_features": stage_features,
+                                  "stage_chunk_samples": stage_chunk_samples,
                                   "feature_working_set_gib": feature_bytes / 2**30}))
-    if stage_features:
-        for data in datasets.values():
-            if group in ("appearance_rank", "appearance_row_column", "appearance_rank_speed4"):
-                data.load_rank_arrays()
-            release_sequence_pages(data, discard_cache=True)
     seed_rng = np.random.RandomState(int(args.seed))
+    grad_norm_every = int(getattr(args, "grad_norm_every", 0))
     for epoch in range(start_epoch + 1, epochs_total + 1):
         epoch_started = time.time()
+        probe: dict[str, float] = {}
         _guard_trainer_memory(datasets)
         shard = (epoch - 1) % shards
         order, rows_by_sequence, quotas, shard_counts = plan_phase(
@@ -992,137 +1142,183 @@ def train(group: str, args) -> None:
         column_valid_total = 0
         column_active_total = 0
         accumulator = DeferredMetrics(device)
+        epoch_staging_seconds = 0.0
+        epoch_staging_chunks = 0
+        epoch_staging_peak_bytes = 0
         for sequence in order:
             data = datasets[sequence]
             try:
                 rows = rows_by_sequence[sequence]
                 if rows.size == 0:
                     continue
-                with staged_sequence_rows(data, rows, group, enabled=stage_features) as staged, prepared_batches(
-                    rows, batch_size,
-                    lambda selected: batch_tensors(data, selected, targets[sequence], group,
-                                                  compact_reid=compact_reid),
-                    PAIRED_TENSOR_KEYS,
-                    prefetch=prefetch, pin_memory=pin_memory,
-                ) as batches:
-                    if stage_features:
-                        log("feature stage: " + json.dumps({"sequence": sequence, **staged}))
-                    for batch_rows, cpu_batch in batches:
-                        batch = to_device(cpu_batch, device)
-                        outputs = model(**model_inputs(batch))
-                        extra: dict[str, torch.Tensor | float] = {}
-                        if group in ("appearance_rank", "appearance_row_column"):
-                            motion_loss, motion_components = motion_box_diou_loss(
-                                outputs, batch, harm_weight=motion_harm_weight
+                sequence_staging_seconds = 0.0
+                sequence_staging_chunks = 0
+                sequence_staging_peak_bytes = 0
+                for chunk_rows in feature_chunks(rows, stage_chunk_samples, enabled=stage_features):
+                    with staged_sequence_rows(data, chunk_rows, group, enabled=stage_features) as staged, prepared_batches(
+                        chunk_rows, batch_size,
+                        lambda selected: batch_tensors(data, selected, targets[sequence], group,
+                                                      compact_reid=compact_reid),
+                        PAIRED_TENSOR_KEYS,
+                        prefetch=prefetch, pin_memory=pin_memory,
+                    ) as batches:
+                        if stage_features:
+                            sequence_staging_seconds += staged["seconds"]
+                            sequence_staging_chunks += 1
+                            sequence_staging_peak_bytes = max(
+                                sequence_staging_peak_bytes, staged["bytes"]
                             )
-                            if motion_harm_weight != 1.0:
-                                extra["motion_unweighted_diou"] = motion_components["unweighted_diou_loss"]
-                                extra["motion_harm_fraction"] = motion_components["harm_fraction"]
-                                extra["motion_harm_weight_share"] = motion_components["harm_weight_share"]
-                            appearance_loss, appearance_components = appearance_rank_loss(
-                                outputs,
-                                batch,
-                                alpha=args.rank_alpha,
-                                tau=args.rank_tau,
-                                rank_weight=args.rank_weight,
-                            )
-                            if group == "appearance_row_column":
-                                column_components: dict[str, object] = {}
-                                column = appearance_column_loss(
-                                    outputs, batch, alpha=args.rank_alpha,
-                                    tau=args.rank_tau, hinge=args.column_hinge,
-                                    components=column_components, tensor_statistics=True,
+                        for batch_rows, cpu_batch in batches:
+                            batch = to_device(cpu_batch, device)
+                            outputs = model(**model_inputs(batch))
+                            extra: dict[str, torch.Tensor | float] = {}
+                            if group in ("appearance_rank", "appearance_row_column"):
+                                motion_loss, motion_components = motion_box_diou_loss(
+                                    outputs, batch, harm_weight=motion_harm_weight
                                 )
-                                accumulator.add("column_valid", column_components["valid"])
-                                accumulator.add("column_active", column_components["active"])
-                                appearance_loss = appearance_loss + args.column_weight * column
-                                extra["column_loss"] = column.detach()
-                            loss = motion_loss + appearance_loss
-                            extra["rank_mean"] = appearance_components["rank_mean"]
-                            extra["fallback_mean"] = appearance_components["fallback_mean"]
-                        elif group == "appearance_rank_speed4":
-                            box_loss, motion_components = motion_box_diou_loss(outputs, batch)
-                            speed_loss, speed_components = motion_speed4_l1_loss(
-                                outputs,
-                                batch,
-                                center_weight=args.speed_weight,
-                                size_weight=args.size_weight,
-                            )
-                            motion_loss = box_loss + speed_loss
-                            appearance_loss, appearance_components = appearance_rank_loss(
-                                outputs,
-                                batch,
-                                alpha=args.rank_alpha,
-                                tau=args.rank_tau,
-                                rank_weight=args.rank_weight,
-                            )
-                            loss = motion_loss + appearance_loss
-                            extra["speed_center_l1"] = speed_components["speed_center_l1"]
-                            extra["speed_size_l1"] = speed_components["speed_size_l1"]
-                            extra["rank_mean"] = appearance_components["rank_mean"]
-                            extra["fallback_mean"] = appearance_components["fallback_mean"]
-                        elif group == "motion_diou_speed":
-                            box_loss, motion_components = motion_box_diou_loss(outputs, batch)
-                            speed_loss, speed_components = motion_speed_l1_loss(
-                                outputs, batch, weight=args.speed_weight
-                            )
-                            motion_loss = box_loss + speed_loss
-                            appearance_loss, appearance_components = appearance_soft_loss(outputs, batch)
-                            loss = motion_loss + appearance_loss
-                            extra["speed_l1"] = speed_components["speed_l1"]
-                        elif group == "motion_diou_speed4":
-                            box_loss, motion_components = motion_box_diou_loss(outputs, batch)
-                            speed_loss, speed_components = motion_speed4_l1_loss(
-                                outputs,
-                                batch,
-                                center_weight=args.speed_weight,
-                                size_weight=args.size_weight,
-                            )
-                            motion_loss = box_loss + speed_loss
-                            appearance_loss, appearance_components = appearance_soft_loss(outputs, batch)
-                            loss = motion_loss + appearance_loss
-                            extra["speed_center_l1"] = speed_components["speed_center_l1"]
-                            extra["speed_size_l1"] = speed_components["speed_size_l1"]
-                        elif group in ("motion_diou", "motion_diou_appearance_score", "motion_gap3"):
-                            motion_loss, motion_components = motion_box_diou_loss(outputs, batch)
-                            if group == "motion_gap3":
-                                boxes = batch["gap3_boxes"]
-                                horizon = {"pred_box_g0": boxes[:, 0], "pred_box_g1": boxes[:, 1],
-                                           "gt_box_t1": boxes[:, 2], "motion_gt_valid": batch["gap3_valid"]}
-                                extra_loss, _ = motion_box_diou_loss(outputs, horizon)
-                                motion_loss = motion_loss + args.gap3_weight * extra_loss
-                                extra["gap3_loss"] = extra_loss.detach()
-                            appearance_loss, appearance_components = appearance_soft_loss(outputs, batch)
-                            loss = motion_loss + appearance_loss
-                        else:
-                            loss, components = gate_loss(outputs, batch)
-                            motion_loss = loss
-                            appearance_loss = loss
-                            motion_components = components
-                            appearance_components = components
-                        optimizer.zero_grad(set_to_none=True)
-                        loss.backward()
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                        optimizer.step()
-                        scheduler.step()
-                        global_step += 1
-                        if global_step % 10 == 0:
-                            _guard_trainer_memory(datasets)
-                        count = int(batch_rows.size)
-                        accumulator.add("loss", loss, count)
-                        accumulator.add("motion_loss", motion_loss, count)
-                        accumulator.add("appearance_loss", appearance_loss, count)
-                        totals["samples"] += count
-                        totals["batches"] += 1
-                        for key, value in extra.items():
-                            accumulator.add(key, value, count)
-                        with torch.no_grad():
-                            gate_means = torch.sigmoid(outputs["gate_logits"]).mean(dim=0)
-                        accumulator.add("motion_gate", gate_means[0], count)
-                        accumulator.add("appearance_gate", gate_means[1], count)
-                        gate_count += count
+                                if motion_harm_weight != 1.0:
+                                    extra["motion_unweighted_diou"] = motion_components["unweighted_diou_loss"]
+                                    extra["motion_harm_fraction"] = motion_components["harm_fraction"]
+                                    extra["motion_harm_weight_share"] = motion_components["harm_weight_share"]
+                                appearance_loss, appearance_components = appearance_rank_loss(
+                                    outputs,
+                                    batch,
+                                    alpha=args.rank_alpha,
+                                    tau=args.rank_tau,
+                                    rank_weight=args.rank_weight,
+                                )
+                                if group == "appearance_row_column":
+                                    column_components: dict[str, object] = {}
+                                    column = appearance_column_loss(
+                                        outputs, batch, alpha=args.rank_alpha,
+                                        tau=args.rank_tau, hinge=args.column_hinge,
+                                        components=column_components, tensor_statistics=True,
+                                    )
+                                    accumulator.add("column_valid", column_components["valid"])
+                                    accumulator.add("column_active", column_components["active"])
+                                    appearance_loss = appearance_loss + args.column_weight * column
+                                    extra["column_loss"] = column.detach()
+                                loss = motion_loss + appearance_loss
+                                first_batch = totals["batches"] == 0
+                                if (first_batch and grad_norm_every > 0
+                                        and (epoch == 1 or epoch % grad_norm_every == 0)):
+                                    trunk = shared_parameters(model)
+                                    probe["grad_norm_motion_shared"] = loss_grad_norm(motion_loss, trunk)
+                                    probe["grad_norm_appearance_shared"] = loss_grad_norm(appearance_loss, trunk)
+                                if first_batch and dropout > 0 and epoch == 1:
+                                    cpu_state = torch.get_rng_state()
+                                    cuda_state = (torch.cuda.get_rng_state_all()
+                                                  if device.type == "cuda" else None)
+                                    with torch.no_grad():
+                                        first = model(**model_inputs(batch))["gate_logits"]
+                                        second = model(**model_inputs(batch))["gate_logits"]
+                                    torch.set_rng_state(cpu_state)
+                                    if cuda_state is not None:
+                                        torch.cuda.set_rng_state_all(cuda_state)
+                                    probe["dropout_probe_max_abs_diff"] = float(
+                                        (first - second).abs().max())
+                                extra["rank_mean"] = appearance_components["rank_mean"]
+                                extra["fallback_mean"] = appearance_components["fallback_mean"]
+                            elif group == "appearance_rank_speed4":
+                                box_loss, motion_components = motion_box_diou_loss(outputs, batch)
+                                speed_loss, speed_components = motion_speed4_l1_loss(
+                                    outputs,
+                                    batch,
+                                    center_weight=args.speed_weight,
+                                    size_weight=args.size_weight,
+                                )
+                                motion_loss = box_loss + speed_loss
+                                appearance_loss, appearance_components = appearance_rank_loss(
+                                    outputs,
+                                    batch,
+                                    alpha=args.rank_alpha,
+                                    tau=args.rank_tau,
+                                    rank_weight=args.rank_weight,
+                                )
+                                loss = motion_loss + appearance_loss
+                                extra["speed_center_l1"] = speed_components["speed_center_l1"]
+                                extra["speed_size_l1"] = speed_components["speed_size_l1"]
+                                extra["rank_mean"] = appearance_components["rank_mean"]
+                                extra["fallback_mean"] = appearance_components["fallback_mean"]
+                            elif group == "motion_diou_speed":
+                                box_loss, motion_components = motion_box_diou_loss(outputs, batch)
+                                speed_loss, speed_components = motion_speed_l1_loss(
+                                    outputs, batch, weight=args.speed_weight
+                                )
+                                motion_loss = box_loss + speed_loss
+                                appearance_loss, appearance_components = appearance_soft_loss(outputs, batch)
+                                loss = motion_loss + appearance_loss
+                                extra["speed_l1"] = speed_components["speed_l1"]
+                            elif group == "motion_diou_speed4":
+                                box_loss, motion_components = motion_box_diou_loss(outputs, batch)
+                                speed_loss, speed_components = motion_speed4_l1_loss(
+                                    outputs,
+                                    batch,
+                                    center_weight=args.speed_weight,
+                                    size_weight=args.size_weight,
+                                )
+                                motion_loss = box_loss + speed_loss
+                                appearance_loss, appearance_components = appearance_soft_loss(outputs, batch)
+                                loss = motion_loss + appearance_loss
+                                extra["speed_center_l1"] = speed_components["speed_center_l1"]
+                                extra["speed_size_l1"] = speed_components["speed_size_l1"]
+                            elif group in ("motion_diou", "motion_diou_appearance_score", "motion_gap3"):
+                                motion_loss, motion_components = motion_box_diou_loss(outputs, batch)
+                                if group == "motion_gap3":
+                                    boxes = batch["gap3_boxes"]
+                                    horizon = {"pred_box_g0": boxes[:, 0], "pred_box_g1": boxes[:, 1],
+                                               "gt_box_t1": boxes[:, 2], "motion_gt_valid": batch["gap3_valid"]}
+                                    extra_loss, _ = motion_box_diou_loss(outputs, horizon)
+                                    motion_loss = motion_loss + args.gap3_weight * extra_loss
+                                    extra["gap3_loss"] = extra_loss.detach()
+                                appearance_loss, appearance_components = appearance_soft_loss(outputs, batch)
+                                loss = motion_loss + appearance_loss
+                            else:
+                                loss, components = gate_loss(outputs, batch)
+                                motion_loss = loss
+                                appearance_loss = loss
+                                motion_components = components
+                                appearance_components = components
+                            optimizer.zero_grad(set_to_none=True)
+                            loss.backward()
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                            optimizer.step()
+                            scheduler.step()
+                            global_step += 1
+                            if global_step % 10 == 0:
+                                _guard_trainer_memory(datasets)
+                            count = int(batch_rows.size)
+                            accumulator.add("loss", loss, count)
+                            accumulator.add("motion_loss", motion_loss, count)
+                            accumulator.add("appearance_loss", appearance_loss, count)
+                            totals["samples"] += count
+                            totals["batches"] += 1
+                            for key, value in extra.items():
+                                accumulator.add(key, value, count)
+                            with torch.no_grad():
+                                gate_means = torch.sigmoid(outputs["gate_logits"]).mean(dim=0)
+                            accumulator.add("motion_gate", gate_means[0], count)
+                            accumulator.add("appearance_gate", gate_means[1], count)
+                            gate_count += count
+                if stage_features:
+                    epoch_staging_seconds += sequence_staging_seconds
+                    epoch_staging_chunks += sequence_staging_chunks
+                    epoch_staging_peak_bytes = max(
+                        epoch_staging_peak_bytes, sequence_staging_peak_bytes
+                    )
+                    log("feature stage: " + json.dumps({
+                        "sequence": sequence, "chunks": sequence_staging_chunks,
+                        "seconds": sequence_staging_seconds,
+                        "peak_chunk_bytes": sequence_staging_peak_bytes,
+                    }))
             except Exception:
                 raise
+        if totals["batches"] != epoch_steps[epoch - 1] or totals["samples"] != sum(quotas.values()):
+            raise RuntimeError(
+                f"Epoch {epoch} differs from the sample plan: "
+                f"{totals['batches']}/{epoch_steps[epoch - 1]} batches, "
+                f"{totals['samples']}/{sum(quotas.values())} samples"
+            )
         sums = accumulator.summary()
         for name in ("loss", "motion_loss", "appearance_loss"):
             totals[name] = sums.get(name, 0.0)
@@ -1153,10 +1349,22 @@ def train(group: str, args) -> None:
                 appearance_gate_sum / max(gate_count, 1) if gate_count else None
             ),
         }
+        metrics["staging_seconds"] = epoch_staging_seconds
+        metrics["staging_chunks"] = epoch_staging_chunks
+        metrics["staging_peak_chunk_bytes"] = epoch_staging_peak_bytes
         metrics["sampling_policy"] = sequence_sampling
         metrics["sampling_quota"] = {
             sequence: int(quotas[sequence]) for sequence in quotas
         }
+        metrics.update(probe)
+        metrics["rss_gb"] = round(_process_rss_gb(), 3)
+        metrics["rss_peak_gb"] = round(
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024), 3)
+        if device.type == "cuda":
+            metrics["cuda_peak_allocated_mb"] = round(
+                torch.cuda.max_memory_allocated() / 2 ** 20, 2)
+            metrics["cuda_peak_reserved_mb"] = round(
+                torch.cuda.max_memory_reserved() / 2 ** 20, 2)
         for key in (
             "rank_mean",
             "fallback_mean",
@@ -1225,7 +1433,7 @@ def train(group: str, args) -> None:
     )
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--group",
@@ -1243,7 +1451,7 @@ def main() -> None:
             "motion_gap3",
         ],
     )
-    parser.add_argument("--dataset", choices=("SportsMOT", "MOT17", "MOT20"), default="SportsMOT")
+    parser.add_argument("--dataset", choices=("SportsMOT", "MOT17", "MOT20", "DanceTrack"), default="SportsMOT")
     init_choice = parser.add_mutually_exclusive_group()
     init_choice.add_argument("--init", default=str(INIT_CKPT))
     init_choice.add_argument("--from-scratch", action="store_true")
@@ -1261,10 +1469,13 @@ def main() -> None:
     parser.add_argument("--no-compact-reid", action="store_true",
                         help="Transport source ReID values as float32 instead of exact float16.")
     staging = parser.add_mutually_exclusive_group()
-    staging.add_argument("--stage-features", dest="stage_features", action="store_true", default=None,
-                         help="Stage selected feature rows in RAM (default: automatic for large pools).")
+    staging.add_argument("--stage-features", dest="stage_features", action="store_true",
+                         default=MAINLINE_STAGE_FEATURES,
+                         help="Stage selected feature rows in bounded RAM chunks (mainline default).")
     staging.add_argument("--no-stage-features", dest="stage_features", action="store_false",
-                         help="Read mmap features per batch instead of staging selected sequence rows.")
+                         help="Read mmap features per batch; use only for performance comparisons.")
+    parser.add_argument("--stage-chunk-samples", type=int, default=MAINLINE_STAGE_CHUNK_SAMPLES,
+                        help="Target samples per staged chunk, aligned to complete batches.")
     parser.add_argument("--no-pin-memory", action="store_true",
                         help="Disable pinned host batches for comparison/debugging.")
     parser.add_argument("--batch-size", type=int, default=1024)
@@ -1289,18 +1500,35 @@ def main() -> None:
         "--appearance-proj-dim",
         type=int,
         default=None,
-        help="Appearance projection width (legacy default 64; query_film_bilinear default 256).",
+        help="Appearance projection width; default 256 for query_film_bilinear, 64 for legacy.",
     )
     parser.add_argument("--architecture-variant", choices=("legacy", "query_film_bilinear"),
-                        default="legacy", help="Model architecture; input pipeline and losses are unchanged.")
+                        default=MAINLINE_ARCHITECTURE_VARIANT,
+                        help="Model architecture; legacy reproduction runs must pass 'legacy'.")
     parser.add_argument("--gap3-weight", type=float, default=1.0)
     parser.add_argument("--rank-weight", type=float, default=1.0)
     parser.add_argument("--motion-harm-weight", type=float, default=1.0,
                         help="Reweight GT-harmful motion events in B/D training; 1.0 keeps the original loss.")
+    parser.add_argument("--dropout", type=float, default=None,
+                        help="Dropout inside the query HCE stack (query_film_bilinear); "
+                             "default 0.0 from scratch, or the init checkpoint's value.")
+    parser.add_argument("--preload-features", action="store_true",
+                        help="Copy mapped event/rank features into resident RAM before training.")
+    parser.add_argument("--warmup-steps", type=int, default=-1,
+                        help="Scheduler warmup steps; -1 uses the first epoch's step count.")
+    parser.add_argument("--grad-norm-every", type=int, default=0,
+                        help="Log motion/appearance trunk gradient norms on the first batch "
+                             "every N epochs (0 disables).")
     parser.add_argument("--speed-weight", type=float, default=1.0)
     parser.add_argument("--size-weight", type=float, default=0.0)
     parser.add_argument("--resume", action="store_true")
-    args = parser.parse_args()
+    parser.add_argument("--allow-partial-cycles", action="store_true",
+                        help="Allow --max-epochs not divisible by --shards (last cycle partial).")
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
     torch.set_num_threads(4)
     train(args.group, args)
 

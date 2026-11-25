@@ -7,9 +7,11 @@ IWG / RG-CMA checkpoints: the new architecture must be retrained.
 from __future__ import annotations
 
 import os
+import random
 from pathlib import Path
 from typing import Any, Mapping
 
+import numpy as np
 import torch
 
 from shutrack.models.shutrack import ShutrackV2Config, ShutrackV2Model
@@ -221,6 +223,13 @@ def build_checkpoint_payload(
         payload["scheduler_state_dict"] = (
             scheduler.state_dict() if scheduler is not None else None
         )
+        payload["rng_state"] = {
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+            "torch": torch.get_rng_state(),
+            "cuda": (torch.cuda.get_rng_state_all()
+                     if torch.cuda.is_available() else []),
+        }
     return payload
 
 

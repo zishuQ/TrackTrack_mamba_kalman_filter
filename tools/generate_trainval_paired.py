@@ -73,7 +73,7 @@ def val_sequences() -> set[str]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default=str(ROOT))
-    parser.add_argument("--dataset", choices=("SportsMOT", "MOT17", "MOT20"), default="SportsMOT")
+    parser.add_argument("--dataset", choices=("SportsMOT", "MOT17", "MOT20", "DanceTrack"), default="SportsMOT")
     parser.add_argument("--checkpoint", default=str(DEFAULT_CKPT))
     parser.add_argument("--max-sequences", type=int, default=0)
     parser.add_argument("--only", nargs="*", default=None)

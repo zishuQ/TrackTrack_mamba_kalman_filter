@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "updated_at": "2026-11-23",
+  "updated_at": "2026-11-25 04:25:00",
   "scope": "MOT17/MOT20 SHUTrack D-supervision: validation, training, test+post, package, Codabench submission, ledger/resume.",
   "accounts": {
     "jojo0": "~/.config/codabench/token",
@@ -333,6 +333,36 @@
             "json": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/mot_pipeline_runs/hist_replay_lowlr/report.json"
           },
           "seed": 42
+        },
+        "sample_proportional_e100": {
+          "kind": "test",
+          "checkpoint": "outputs/agentguard/experiments/mot_sample_proportional_20261124/MOT20/groups/appearance_row_column/checkpoints/last.pt",
+          "epoch": 100,
+          "official_scores": {
+            "HOTA": 66.531,
+            "AssA": 68.913,
+            "DetA": 64.41,
+            "IDF1": 82.325,
+            "MOTA": 77.834,
+            "IDSW": 632.0,
+            "Frag": 753.0
+          },
+          "submissions": {
+            "jojo0": {
+              "id": 1066968,
+              "status": "Finished",
+              "submitted_at": "2026-11-25 02:21:28",
+              "scored_at": "2026-11-25 02:34:00"
+            }
+          },
+          "artifacts": {
+            "dir": "outputs/agentguard/experiments/mot_sample_proportional_20261124/MOT20",
+            "post_dir": "outputs/agentguard/experiments/mot_sample_proportional_20261124/MOT20/test/tracking/mot20_test_0.80_midpoint_e100_shutrack_v2_post",
+            "gates": "outputs/agentguard/experiments/mot_sample_proportional_20261124/MOT20/test/gates.jsonl",
+            "zip": "outputs/agentguard/experiments/mot_sample_proportional_20261124/submissions/MOT20.zip"
+          },
+          "status": "complete",
+          "change_reason": "sample-proportional 4-shard 100-epoch recipe, formal test"
         }
       },
       "search": {}
@@ -650,6 +680,36 @@
           },
           "config_hash": "ffc322156f749270",
           "seed": 42
+        },
+        "sample_proportional_e50_from_round1_mot20": {
+          "kind": "test",
+          "checkpoint": "outputs/agentguard/experiments/mot_sample_proportional_20261124/MOT17/groups/appearance_row_column/checkpoints/last.pt",
+          "epoch": 50,
+          "official_scores": {
+            "HOTA": 67.814,
+            "AssA": 69.434,
+            "DetA": 66.527,
+            "IDF1": 84.282,
+            "MOTA": 81.998,
+            "IDSW": 795.0,
+            "Frag": 1398.0
+          },
+          "submissions": {
+            "jojo0": {
+              "id": 1066979,
+              "status": "Finished",
+              "submitted_at": "2026-11-25 02:45:06",
+              "scored_at": "2026-11-25 02:51:00"
+            }
+          },
+          "artifacts": {
+            "dir": "outputs/agentguard/experiments/mot_sample_proportional_20261124/MOT17",
+            "post_dir": "outputs/agentguard/experiments/mot_sample_proportional_20261124/MOT17/test/tracking/mot17_test_0.80_midpoint_e50_shutrack_v2_post",
+            "gates": "outputs/agentguard/experiments/mot_sample_proportional_20261124/MOT17/test/gates.jsonl",
+            "zip": "outputs/agentguard/experiments/mot_sample_proportional_20261124/submissions/MOT17.zip"
+          },
+          "status": "complete",
+          "change_reason": "50-epoch fine-tune initialized from the round-1 MOT20 e100 weights"
         }
       },
       "search": {}

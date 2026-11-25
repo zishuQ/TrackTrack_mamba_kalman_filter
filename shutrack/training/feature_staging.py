@@ -12,6 +12,21 @@ import time
 import numpy as np
 
 
+def aligned_stage_chunk_samples(chunk_samples, batch_size):
+    """Allow a partial batch only at the end of the sequence."""
+    if chunk_samples <= 0 or batch_size <= 0:
+        raise ValueError("stage chunk size and batch size must be positive")
+    return max(1, chunk_samples // batch_size) * batch_size
+
+
+def feature_chunks(rows, aligned_chunk_samples, *, enabled):
+    if not enabled:
+        yield rows
+        return
+    for start in range(0, len(rows), aligned_chunk_samples):
+        yield rows[start : start + aligned_chunk_samples]
+
+
 def _root_mapping(array):
     root = None
     seen = set()
@@ -79,7 +94,8 @@ class SelectedFeatureRows:
                 end = min(start + block_rows, len(indices))
                 self.values[start:end] = source[indices[start:end]]
         self.values.flags.writeable = False
-        release_mapped_pages(source, discard_cache=True)
+        # Drop this mapping from RSS while keeping reusable file pages cached.
+        release_mapped_pages(source)
 
     @property
     def nbytes(self):

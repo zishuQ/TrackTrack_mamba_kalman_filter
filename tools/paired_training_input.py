@@ -21,12 +21,18 @@ def official_sequences(split, dataset="SportsMOT"):
         if dataset == "MOT17":
             return {f"MOT17-{i:02d}-FRCNN" for i in (2, 4, 5, 9, 10, 11, 13)}
         return {f"MOT20-{i:02d}" for i in (1, 2, 3, 5)}
-    base = Path(__file__).resolve().parents[1] / "3. Tracker/trackeval/seqmap/sportsmot"
-    return {name.strip() for name in (base / f"{split}.txt").read_text().splitlines()
+    seqmap = "dancetrack" if dataset == "DanceTrack" else "sportsmot"
+    base = Path(__file__).resolve().parents[1] / "3. Tracker/trackeval/seqmap" / seqmap
+    path = base / f"{split}.txt"
+    if not path.is_file():
+        raise ValueError(f"Unsupported split {split!r} for {dataset}")
+    return {name.strip() for name in path.read_text().splitlines()
             if name.strip() and name.strip() != "name"}
 
 
 def replay_split(sequence, dataset="SportsMOT"):
+    if dataset == "DanceTrack":
+        return "val" if sequence in official_sequences("val", dataset) else "train"
     if dataset != "SportsMOT":
         return "all"
     return "val" if sequence in official_sequences("val") else "train"

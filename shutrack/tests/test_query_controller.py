@@ -188,7 +188,8 @@ def test_training_options_preserve_legacy_and_choose_256_for_new():
     if tools not in sys.path:
         sys.path.insert(0, tools)
     from train_supervision_groups import resolve_model_options
-    assert resolve_model_options(SimpleNamespace()) == ("legacy", 64)
+    assert resolve_model_options(SimpleNamespace()) == ("query_film_bilinear", 256)
+    assert resolve_model_options(SimpleNamespace(architecture_variant="legacy")) == ("legacy", 64)
     assert resolve_model_options(SimpleNamespace(
         architecture_variant="query_film_bilinear", appearance_proj_dim=None,
     )) == ("query_film_bilinear", 256)

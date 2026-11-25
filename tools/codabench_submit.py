@@ -149,7 +149,10 @@ def cmd_validate(args) -> None:
     expected = _expected_names(args)
     lengths = _seq_lengths(Path(args.seqinfo_root) if args.seqinfo_root else None)
     with zipfile.ZipFile(zip_path) as archive:
-        names = {name for name in archive.namelist() if not name.endswith("/")}
+        raw_names = {name for name in archive.namelist() if not name.endswith("/")}
+        prefix = ("tracker/" if raw_names
+                  and all(name.startswith("tracker/") for name in raw_names) else "")
+        names = {name[len(prefix):] for name in raw_names}
         missing = sorted(expected - names)
         extra = sorted(names - expected)
         if missing:
@@ -159,7 +162,7 @@ def cmd_validate(args) -> None:
         if extra:
             raise SystemExit(f"unexpected files in zip, e.g. {extra[:5]}")
         total_rows = 0
-        for name in sorted(names):
+        for name in sorted(raw_names):
             sequence = Path(name).stem.split("-DPM")[0].split("-FRCNN")[0].split("-SDP")[0]
             maximum = lengths.get(sequence)
             rows = 0

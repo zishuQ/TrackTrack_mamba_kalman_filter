@@ -28,9 +28,12 @@ def now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def poll(submission_id: int) -> dict:
+def poll(submission_id: int, token_file: str = "") -> dict:
+    command = [str(PY), str(CLIENT), "poll", "--submission-id", str(submission_id)]
+    if token_file:
+        command += ["--token-file", token_file]
     result = subprocess.run(
-        [str(PY), str(CLIENT), "poll", "--submission-id", str(submission_id)],
+        command,
         capture_output=True, text=True, timeout=120,
     )
     if result.returncode != 0:
@@ -45,6 +48,7 @@ def main() -> None:
     parser.add_argument("--interval", type=float, default=60.0)
     parser.add_argument("--timeout", type=float, default=7200.0)
     parser.add_argument("--record", default=None)
+    parser.add_argument("--token-file", default="")
     args = parser.parse_args()
     SUBDIR.mkdir(parents=True, exist_ok=True)
     record_path = Path(args.record) if args.record else SUBDIR / f"{args.dataset}_submission.json"
@@ -55,7 +59,7 @@ def main() -> None:
     last_status = None
     while time.time() - started < args.timeout:
         try:
-            payload = poll(args.submission_id)
+            payload = poll(args.submission_id, args.token_file)
             errors = 0
         except Exception as exc:  # noqa: BLE001
             errors += 1

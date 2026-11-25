@@ -284,8 +284,7 @@ def cmd_train(args):
             "--shards", str(args.shards),
             "--max-epochs", str(args.epochs), "--snapshot-every", "20",
             "--rank-weight", "18", "--rank-alpha", "0.95", "--rank-tau", "0.1",
-            "--column-weight", "50", "--appearance-proj-dim", "256",
-            "--architecture-variant", "query_film_bilinear", "--device", "cuda"]
+            "--column-weight", "50", "--device", "cuda"]
     if getattr(args, "allow_partial_cycles", False):
         base.append("--allow-partial-cycles")
     if args.mode == "continue":

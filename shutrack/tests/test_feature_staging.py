@@ -8,7 +8,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from train_supervision_groups import batch_tensors
-from shutrack.training.feature_staging import SelectedFeatureRows, staged_sequence_rows
+from shutrack.training.feature_staging import (
+    SelectedFeatureRows, aligned_stage_chunk_samples, feature_chunks, staged_sequence_rows,
+)
+from shutrack.training.paired_pipeline import prepared_batches
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float16])
@@ -86,3 +89,23 @@ def test_staging_reads_npz_member_offsets_and_sliced_mmap_views(tmp_path):
             selected = np.array([4, 1, 4, 5])
             staged = SelectedFeatureRows(array, selected, block_bytes=256)
             np.testing.assert_array_equal(staged[selected], array[selected])
+
+
+@pytest.mark.parametrize("chunk_samples", [2, 7, 12])
+def test_chunking_preserves_batch_boundaries_and_duplicate_rows(chunk_samples):
+    rows = np.array([14, 3, 7, 3, 9, 2, 1, 2, 11, 2, 6, 3, 8, 9, 6])
+    batch_size = 4
+    aligned = aligned_stage_chunk_samples(chunk_samples, batch_size)
+    assert aligned >= batch_size and aligned % batch_size == 0
+
+    def batches_for(enabled):
+        actual_rows = []
+        for chunk in feature_chunks(rows, aligned, enabled=enabled):
+            with prepared_batches(
+                chunk, batch_size, lambda selected: {}, (), prefetch=1
+            ) as batches:
+                actual_rows.extend(row_ids.tolist() for row_ids, _ in batches)
+        return actual_rows
+
+    expected = [rows[i : i + batch_size].tolist() for i in range(0, len(rows), batch_size)]
+    assert batches_for(True) == batches_for(False) == expected

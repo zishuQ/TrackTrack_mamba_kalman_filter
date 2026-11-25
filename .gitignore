@@ -10,3 +10,4 @@ outputs/
 *.csv
 *.egg-info/
 mamba_kalman_filter/.pytest_cache/
+data/
