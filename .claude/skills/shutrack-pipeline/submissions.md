@@ -30,10 +30,11 @@ Failed/Cancelled 的尝试也保留在册（无分数）。
 | 1064320 | 2026-11-23 00:48 | - | MOT20 e80 round | Finished | 66.635 | 69.200 | 64.342 | 82.518 | 77.812 | 619 |
 | 1064623 | 2026-11-23 11:59 | - | MOT20 low-LR continuation | Finished | 66.587 | 69.170 | 64.276 | 82.534 | 77.748 | 633 |
 | 1066968 | 2026-11-25 02:21 | - | MOT20 sample-proportional e100 | Finished | 66.531 | 68.913 | 64.410 | 82.325 | 77.834 | 632 |
+| 1068664 | 2026-11-26 05:27 | jojo0 | MOT20 round1 harm=2 dropout=0 (sqrt-size) | Finished | 65.213 | 67.418 | 63.258 | 81.133 | 76.566 | 775 |
 
 ## MOT17（phase 16382，competition 10049）
 
-台账内最佳：**67.827** — MOT17 formal_e50 (init MOT20 e100)（#1063098，2026-11-21 21:54）
+台账内最佳：**68.023** — MOT17 round1 harm=2 dropout=0 (init round1 MOT20)（#1068665，2026-11-26 05:28）
 
 | 提交 ID | 时间（本地） | 账号 | 实验 | 状态 | HOTA | AssA | DetA | IDF1 | MOTA | IDSW |
 |---:|---|---|---|---|---:|---:|---:|---:|---:|---:|
@@ -42,6 +43,7 @@ Failed/Cancelled 的尝试也保留在册（无分数）。
 | 1064329 | 2026-11-23 01:05 | - | MOT17 e80 (from MOT20 e80, 50 epochs) | Finished | 67.763 | 69.298 | 66.566 | 84.026 | 81.980 | 819 |
 | 1064624 | 2026-11-23 12:00 | - | MOT17 low-LR continuation | Finished | 67.689 | 69.206 | 66.500 | 83.851 | 81.805 | 846 |
 | 1066979 | 2026-11-25 02:45 | - | MOT17 sample-proportional e50 (from round-1 MOT20) | Finished | 67.814 | 69.434 | 66.527 | 84.282 | 81.998 | 795 |
+| 1068665 | 2026-11-26 05:28 | jojo0 | MOT17 round1 harm=2 dropout=0 (init round1 MOT20) | Finished | 68.023 | 70.250 | 66.172 | 84.945 | 81.794 | 810 |
 
 ## DanceTrack（phase 24635，competition None）
 

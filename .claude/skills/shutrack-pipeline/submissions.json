@@ -1,7 +1,7 @@
 {
   "note": "Every Codabench submission under jojo0/shangqingnie for the four tracking competitions (full history). Append new rows after each submission resolves; scores are official test scores.",
-  "updated_at": "2026-11-25 23:28",
-  "count": 19,
+  "updated_at": "2026-11-26 05:48",
+  "count": 21,
   "submissions": [
     {
       "id": 1062928,
@@ -547,6 +547,74 @@
       },
       "record_file": "outputs/agentguard/experiments/sportsmot_harm4_trainval90_e150_20261125/submissions/SportsMOT_submission.json",
       "created_local": "2026-11-25 23:24"
+    },
+    {
+      "id": 1068664,
+      "dataset": "MOT20",
+      "phase": 16383,
+      "competition": 10050,
+      "task": 20804,
+      "account": "jojo0",
+      "status": "Finished",
+      "created_when": "2026-11-25T21:27:57.434634Z",
+      "experiment": "MOT20 round1 harm=2 dropout=0 (sqrt-size)",
+      "filename": null,
+      "scores": {
+        "HOTA": "65.2130000000",
+        "MOTA": "76.5660000000",
+        "IDF1": "81.1330000000",
+        "MT": "843.0000000000",
+        "ML": "144.0000000000",
+        "CLR_FP": "27911.0000000000",
+        "CLR_FN": "92566.0000000000",
+        "CLR_Re": "82.1100000000",
+        "CLR_Pr": "93.8360000000",
+        "AssA": "67.4180000000",
+        "DetA": "63.2580000000",
+        "AssRe": "71.7200000000",
+        "AssPr": "81.9340000000",
+        "DetRe": "68.8540000000",
+        "DetPr": "78.6860000000",
+        "LocA": "83.7850000000",
+        "IDSW": "775.0000000000",
+        "Frag": "1008.0000000000"
+      },
+      "record_file": "outputs/agentguard/experiments/mot_round1_harm2_d0_20261125/submissions/MOT20_submission.json",
+      "created_local": "2026-11-26 05:27"
+    },
+    {
+      "id": 1068665,
+      "dataset": "MOT17",
+      "phase": 16382,
+      "competition": 10049,
+      "task": 20803,
+      "account": "jojo0",
+      "status": "Finished",
+      "created_when": "2026-11-25T21:28:02.504734Z",
+      "experiment": "MOT17 round1 harm=2 dropout=0 (init round1 MOT20)",
+      "filename": null,
+      "scores": {
+        "HOTA": "68.0230000000",
+        "MOTA": "81.7940000000",
+        "IDF1": "84.9450000000",
+        "MT": "1281.0000000000",
+        "ML": "333.0000000000",
+        "CLR_FP": "27159.0000000000",
+        "CLR_FN": "74754.0000000000",
+        "CLR_Re": "86.7510000000",
+        "CLR_Pr": "94.7430000000",
+        "AssA": "70.2500000000",
+        "DetA": "66.1720000000",
+        "AssRe": "75.4380000000",
+        "AssPr": "81.4750000000",
+        "DetRe": "71.9920000000",
+        "DetPr": "78.6240000000",
+        "LocA": "83.4250000000",
+        "IDSW": "810.0000000000",
+        "Frag": "1458.0000000000"
+      },
+      "record_file": "outputs/agentguard/experiments/mot_round1_harm2_d0_20261125/submissions/MOT17_submission.json",
+      "created_local": "2026-11-26 05:28"
     }
   ]
 }
