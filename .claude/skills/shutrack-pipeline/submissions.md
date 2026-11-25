@@ -17,6 +17,7 @@ Failed/Cancelled 的尝试也保留在册（无分数）。
 | 1066994 | 2026-11-25 03:12 | jojo0 | SportsMOT harm=2 E_e100 (post+AFLink) | Finished | 75.979 | 65.095 | 88.766 | 76.755 | 96.659 | 1885 |
 | 1067021 | 2026-11-25 04:10 | shangqingnie | SportsMOT harm=4 train45 e100 (post+AFLink) | Finished | 75.988 | 65.324 | 88.475 | 76.959 | 96.642 | 1870 |
 | 1068003 | 2026-11-25 20:20 | jojo0 | SportsMOT harm=4 trainval90 e100 (post+AFLink) | Finished | 76.320 | 65.990 | 88.346 | 77.467 | 96.609 | 1848 |
+| 1068301 | 2026-11-25 23:24 | shangqingnie | SportsMOT harm=4 trainval90 e150 (post+AFLink) | Finished | 76.164 | 65.686 | 88.393 | 77.207 | 96.583 | 1841 |
 
 ## MOT20（phase 16383，competition 10050）
 
