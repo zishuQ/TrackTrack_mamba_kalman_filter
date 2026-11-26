@@ -33,9 +33,9 @@
     "size_bytes": 14612849
   },
   "package": {
-    "file": null,
-    "sha256": null,
-    "size_bytes": null
+    "file": "MOT20.zip",
+    "sha256": "d1c24f896b66219d2a60d4a2a9763f2d3aca3ccd2ef7785eb824bc802bef8fb1",
+    "size_bytes": 5422190
   },
   "recipe": {
     "dataset": "MOT20",
@@ -62,7 +62,7 @@
     "weight": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
     "group": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column",
     "submission": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/submissions/MOT20_submission.json",
-    "zip": null,
+    "zip": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/submissions/MOT20.zip",
     "reports": []
   },
   "verified_copy": true

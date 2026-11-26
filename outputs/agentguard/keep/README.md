@@ -5,6 +5,7 @@
 ## MOT20
 
 - HOTA **66.637**，提交 1063086（Finished）
+- 提交包：`MOT20_66.637_1063086/submission/MOT20.zip`
 - 权重：`MOT20_66.637_1063086/weights/epoch_100.pt`（epoch 100，sha256 4726b1703f77cba2…）
 - 配方：harm=1.0、dropout=None、27100 步、warmup 271、shards 4
 
