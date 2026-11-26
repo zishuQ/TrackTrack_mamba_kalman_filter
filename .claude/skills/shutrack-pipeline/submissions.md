@@ -1,8 +1,14 @@
-# Codabench 提交台账（官方 test，2026-11-21 至 11-25）
+# Codabench 提交台账（官方 test，2026-11-21 至 2026-11-26）
 
 每次提交出分后在此追加；`submissions.json` 为机器可读版本。
-范围：本项目 SHUTrack 近期（2026-11-21 至 11-25）jojo0 / shangqingnie 两个账号在 MOT20 / MOT17 / SportsMOT / DanceTrack 的提交。
+范围：本项目 SHUTrack 期间（2026-11-21 至 2026-11-26）jojo0 / shangqingnie 两个账号在 MOT20 / MOT17 / SportsMOT / DanceTrack 的提交。
 Failed/Cancelled 的尝试也保留在册（无分数）。
+
+## 今日使用（UTC 2026-11-26）
+
+- #1069017 MOT20 jojo0 — MOT20 round2 harm=1 dropout=0.05 (sqrt-size)（HOTA 66.481，Finished）
+
+提交前先跑 `.claude/skills/codabench/scripts/codabench_cli.py today --phase <id>` 与 `quota` 核对当日使用与额度。
 
 ## SportsMOT（phase 21402，competition 13077）
 

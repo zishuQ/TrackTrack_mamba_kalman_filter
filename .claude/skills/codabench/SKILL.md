@@ -58,6 +58,18 @@ have independent quotas, and either can be used once per day.
 
 ## Submit / validate / poll
 
+Before every submission, check the live state (this is mandatory, including on
+a new UTC day — quota resets at 00:00 UTC = 08:00 CST):
+
+```bash
+.venv/bin/python .claude/skills/codabench/scripts/codabench_cli.py today --phase <phase>
+.venv/bin/python .claude/skills/codabench/scripts/codabench_cli.py quota --phase <phase>
+```
+
+`today` lists this UTC day's submissions per account; `quota` gives
+`can_make_submission` for both accounts. Pick an account that still `can`, and
+never create a second submission for a result that already has an ID.
+
 Validation (local, before any submit):
 
 ```bash
