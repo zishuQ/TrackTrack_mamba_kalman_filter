@@ -1,5 +1,8 @@
 # SportsMOT dataset card
 
+> Last verified: 2026-11-26. Scores/bests are authoritative in
+> `submissions.json`; this page is the recipe snapshot.
+
 **Reminder: SportsMOT test+post has one extra step vs MOT — after the tracker's
 linear post (`--use_post` → `<...>_post`), run AFLink on that directory and
 package the `<...>_post_aflink_post` output.**

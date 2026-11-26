@@ -1,5 +1,8 @@
 # MOT17 dataset card
 
+> Last verified: 2026-11-26. Scores/bests are authoritative in
+> `submissions.json`; this page is the recipe snapshot.
+
 ## Data and sequences
 
 - Training replay: `outputs/agentguard/experiments/shutrack_bd_mot_20261120/MOT17/data`

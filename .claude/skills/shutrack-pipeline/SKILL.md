@@ -61,7 +61,23 @@ project skill `.claude/skills/codabench`.
 - `submissions.json` / `submissions.md` — the full Codabench submission ledger
   (every official test submission for MOT20/MOT17/SportsMOT/DanceTrack, with
   scores and submission IDs). Append after every scored submission.
+- `scripts/build_submission_ledger.py` — regenerates the submission ledger from
+  the local `*_submission.json` records (each scored submission's record lives
+  in its experiment directory). `--api-dump` optionally syncs a full API listing.
 - `recipes/` — MOT20/MOT17 base recipes and search spaces; `templates/report.md`.
+
+Submission-ledger maintenance contract (apply to every scored submission):
+
+1. Make sure the submission record (`*_submission.json`) exists in its
+   experiment directory, then run
+   `.venv/bin/python .claude/skills/shutrack-pipeline/scripts/build_submission_ledger.py`
+   to regenerate `submissions.json` / `submissions.md`. The ledger is the source
+   of truth; never hand-edit scores into it.
+2. If the new official HOTA beats the dataset's recorded best, update that
+   dataset card's best row and its "last verified" date. Never leave two
+   conflicting claims of "current best" across card, ledger and MANIFEST.
+3. `outputs/agentguard/keep/` is an archival snapshot: replace it only on an
+   explicit user request, never automatically.
 
 ```bash
 .venv/bin/python .claude/skills/shutrack-pipeline/mot_pipeline.py status
