@@ -7,8 +7,10 @@
   replay for the 5-sequence subset at
   `/home/shang/.codex/worktrees/shutrack-nsa-reliability/TrackTrack/outputs/agentguard/experiments/nsa_reliability_replay/MOT17/data`
   (02/04/05/11/13-FRCNN, 86,878 samples).
-- Splits: train = 01/03/06/07/08/12/14-FRCNN; val = 09/10-FRCNN;
-  test = the same 7 FRCNN sequences.
+- Splits: train = 02/04/05/09/10/11/13-FRCNN (official MOT17 train, 102,569
+  samples); test = 01/03/06/07/08/12/14-FRCNN (duplicated to DPM/SDP when
+  packaging). The project's val protocol evaluates 09/10 — both are inside the
+  training set, so this is a tracking sanity check, not a held-out set.
 - Detection cache: `outputs/agentguard/detection_cache/MOT17/all/` for
   `--mode all`.
 - Codabench: competition `10049`, phase `16382`, task `20803`.
