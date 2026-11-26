@@ -27,7 +27,25 @@ def test_bare_launch_selects_mainline_architecture_and_staging():
     assert variant == MAINLINE_ARCHITECTURE_VARIANT
     assert width == MAINLINE_APPEARANCE_PROJ_DIM
     assert args.stage_features is True
-    assert args.stage_chunk_samples == MAINLINE_STAGE_CHUNK_SAMPLES
+    assert trainer.resolve_stage_chunk_samples(args, 1024) == MAINLINE_STAGE_CHUNK_SAMPLES
+
+
+def test_mot20_formal_recipe_stages_the_selected_sequence_in_one_chunk():
+    args = _bare_args("--dataset", "MOT20", "--shards", "4",
+                      "--sequence-sampling", "sqrt-size")
+    rows = range(117186)
+    chunk_samples = trainer.resolve_stage_chunk_samples(args, 1024)
+    assert list(trainer.feature_chunks(rows, chunk_samples, enabled=True)) == [rows]
+
+    args.stage_chunk_samples = 16384
+    chunk_samples = trainer.resolve_stage_chunk_samples(args, 1024)
+    assert len(list(trainer.feature_chunks(rows, chunk_samples, enabled=True))) == 8
+
+
+def test_mot20_full_pool_keeps_bounded_chunks():
+    args = _bare_args("--dataset", "MOT20", "--shards", "1",
+                      "--sequence-sampling", "sqrt-size")
+    assert trainer.resolve_stage_chunk_samples(args, 1024) == MAINLINE_STAGE_CHUNK_SAMPLES
 
 
 def test_legacy_reproduction_opts_out_explicitly():

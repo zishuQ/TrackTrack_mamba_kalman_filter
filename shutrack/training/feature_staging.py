@@ -20,7 +20,7 @@ def aligned_stage_chunk_samples(chunk_samples, batch_size):
 
 
 def feature_chunks(rows, aligned_chunk_samples, *, enabled):
-    if not enabled:
+    if not enabled or aligned_chunk_samples is None:
         yield rows
         return
     for start in range(0, len(rows), aligned_chunk_samples):

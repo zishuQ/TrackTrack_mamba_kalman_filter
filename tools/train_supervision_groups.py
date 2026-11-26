@@ -747,6 +747,16 @@ def resolve_dropout(args, init_config: dict | None = None) -> float:
     return 0.0
 
 
+def resolve_stage_chunk_samples(args, batch_size: int) -> int | None:
+    requested = getattr(args, "stage_chunk_samples", None)
+    if requested is None:
+        if (args.dataset == "MOT20" and getattr(args, "shards", SHARDS) == 4
+                and getattr(args, "sequence_sampling", "sample-proportional") == "sqrt-size"):
+            return None  # Stage the current sequence's selected rows once per shard.
+        requested = MAINLINE_STAGE_CHUNK_SAMPLES
+    return aligned_stage_chunk_samples(int(requested), batch_size)
+
+
 def train(group: str, args) -> None:
     architecture_variant, appearance_proj_dim = resolve_model_options(args)
     motion_harm_weight = float(getattr(args, "motion_harm_weight", 1.0))
@@ -875,10 +885,7 @@ def train(group: str, args) -> None:
     stage_features = bool(getattr(args, "stage_features", MAINLINE_STAGE_FEATURES))
     if preload_features:
         stage_features = False
-    stage_chunk_samples = aligned_stage_chunk_samples(
-        int(getattr(args, "stage_chunk_samples", MAINLINE_STAGE_CHUNK_SAMPLES)),
-        batch_size,
-    )
+    stage_chunk_samples = resolve_stage_chunk_samples(args, batch_size)
     loading_mode = ("preload" if preload_features else
                     ("stage" if stage_features else "mmap"))
 
@@ -1471,11 +1478,13 @@ def build_parser() -> argparse.ArgumentParser:
     staging = parser.add_mutually_exclusive_group()
     staging.add_argument("--stage-features", dest="stage_features", action="store_true",
                          default=MAINLINE_STAGE_FEATURES,
-                         help="Stage selected feature rows in bounded RAM chunks (mainline default).")
+                         help="Stage selected feature rows of the current sequence (default).")
     staging.add_argument("--no-stage-features", dest="stage_features", action="store_false",
                          help="Read mmap features per batch; use only for performance comparisons.")
-    parser.add_argument("--stage-chunk-samples", type=int, default=MAINLINE_STAGE_CHUNK_SAMPLES,
-                        help="Target samples per staged chunk, aligned to complete batches.")
+    parser.add_argument("--stage-chunk-samples", type=int, default=None,
+                        help="Override the stage chunk size, aligned to complete batches. "
+                             "The MOT20 4-shard sqrt-size recipe stages each sequence once; "
+                             f"other recipes default to {MAINLINE_STAGE_CHUNK_SAMPLES} samples.")
     parser.add_argument("--no-pin-memory", action="store_true",
                         help="Disable pinned host batches for comparison/debugging.")
     parser.add_argument("--batch-size", type=int, default=1024)
