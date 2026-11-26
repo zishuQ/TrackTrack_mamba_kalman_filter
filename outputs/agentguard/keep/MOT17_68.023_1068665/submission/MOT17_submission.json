@@ -1,0 +1,187 @@
+{
+  "auto_run": true,
+  "can_make_submissions_public": true,
+  "children": [],
+  "created_when": "2026-11-25T21:28:02.504734Z",
+  "description": "",
+  "fact_sheet_answers": null,
+  "filename": "MOT17.zip",
+  "has_children": false,
+  "id": 1068665,
+  "is_public": false,
+  "is_soft_deleted": false,
+  "is_specific_task_re_run": false,
+  "leaderboard": null,
+  "name": "",
+  "on_leaderboard": false,
+  "owner": "jojo0",
+  "parent": null,
+  "participant_group_name": null,
+  "phase": 16382,
+  "phase_name": "Testing Phase",
+  "pk": 1068665,
+  "scores": [
+    {
+      "column_key": "HOTA",
+      "id": 3399403,
+      "index": 0,
+      "is_primary": true,
+      "precision": 1,
+      "score": "68.0230000000"
+    },
+    {
+      "column_key": "MOTA",
+      "id": 3399411,
+      "index": 1,
+      "is_primary": false,
+      "precision": 1,
+      "score": "81.7940000000"
+    },
+    {
+      "column_key": "IDF1",
+      "id": 3399420,
+      "index": 2,
+      "is_primary": false,
+      "precision": 1,
+      "score": "84.9450000000"
+    },
+    {
+      "column_key": "MT",
+      "id": 3399417,
+      "index": 3,
+      "is_primary": false,
+      "precision": 2,
+      "score": "1281.0000000000"
+    },
+    {
+      "column_key": "ML",
+      "id": 3399418,
+      "index": 4,
+      "is_primary": false,
+      "precision": 2,
+      "score": "333.0000000000"
+    },
+    {
+      "column_key": "CLR_FP",
+      "id": 3399415,
+      "index": 5,
+      "is_primary": false,
+      "precision": 2,
+      "score": "27159.0000000000"
+    },
+    {
+      "column_key": "CLR_FN",
+      "id": 3399414,
+      "index": 6,
+      "is_primary": false,
+      "precision": 2,
+      "score": "74754.0000000000"
+    },
+    {
+      "column_key": "CLR_Re",
+      "id": 3399412,
+      "index": 7,
+      "is_primary": false,
+      "precision": 1,
+      "score": "86.7510000000"
+    },
+    {
+      "column_key": "CLR_Pr",
+      "id": 3399413,
+      "index": 8,
+      "is_primary": false,
+      "precision": 1,
+      "score": "94.7430000000"
+    },
+    {
+      "column_key": "AssA",
+      "id": 3399405,
+      "index": 9,
+      "is_primary": false,
+      "precision": 1,
+      "score": "70.2500000000"
+    },
+    {
+      "column_key": "DetA",
+      "id": 3399404,
+      "index": 10,
+      "is_primary": false,
+      "precision": 1,
+      "score": "66.1720000000"
+    },
+    {
+      "column_key": "AssRe",
+      "id": 3399408,
+      "index": 11,
+      "is_primary": false,
+      "precision": 1,
+      "score": "75.4380000000"
+    },
+    {
+      "column_key": "AssPr",
+      "id": 3399409,
+      "index": 12,
+      "is_primary": false,
+      "precision": 1,
+      "score": "81.4750000000"
+    },
+    {
+      "column_key": "DetRe",
+      "id": 3399406,
+      "index": 13,
+      "is_primary": false,
+      "precision": 1,
+      "score": "71.9920000000"
+    },
+    {
+      "column_key": "DetPr",
+      "id": 3399407,
+      "index": 14,
+      "is_primary": false,
+      "precision": 1,
+      "score": "78.6240000000"
+    },
+    {
+      "column_key": "LocA",
+      "id": 3399410,
+      "index": 15,
+      "is_primary": false,
+      "precision": 1,
+      "score": "83.4250000000"
+    },
+    {
+      "column_key": "IDSW",
+      "id": 3399416,
+      "index": 17,
+      "is_primary": false,
+      "precision": 2,
+      "score": "810.0000000000"
+    },
+    {
+      "column_key": "Frag",
+      "id": 3399419,
+      "index": 18,
+      "is_primary": false,
+      "precision": 2,
+      "score": "1458.0000000000"
+    }
+  ],
+  "status": "Finished",
+  "status_details": "scoring_hostname-worker4",
+  "task": {
+    "created_by": 25871,
+    "created_when": "2025-08-04T22:17:17.328239Z",
+    "description": "Upload the predictions against the test set of MOTChallenge-17.",
+    "id": 20803,
+    "ingestion_only_during_scoring": false,
+    "ingestion_program": null,
+    "input_data": null,
+    "is_public": false,
+    "key": "c4113629-732e-41bf-9a29-ab837ba1218c",
+    "name": "MOT172 Test set submissions",
+    "reference_data": "a96ba329-2072-4451-80ae-e13d11628c31",
+    "scoring_program": "e1e6e120-379e-44c9-9b2c-b557a61e52cc",
+    "shared_with": [],
+    "validated": false
+  }
+}

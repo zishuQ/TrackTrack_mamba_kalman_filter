@@ -1,0 +1,73 @@
+{
+  "round": 1,
+  "recipe": {
+    "motion_harm_weight": 2,
+    "dropout": 0.0
+  },
+  "mot20": {
+    "checkpoint": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/mot_round1_harm2_d0_20261125/mot20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+    "sha256": "fe7896f6e1001e885de306cb6a05baa3cfd89f6a029aaebf714e1a26a0832c57",
+    "submission": {
+      "id": 1068664,
+      "status": "Finished",
+      "scores": {
+        "HOTA": "65.2130000000",
+        "MOTA": "76.5660000000",
+        "IDF1": "81.1330000000",
+        "MT": "843.0000000000",
+        "ML": "144.0000000000",
+        "CLR_FP": "27911.0000000000",
+        "CLR_FN": "92566.0000000000",
+        "CLR_Re": "82.1100000000",
+        "CLR_Pr": "93.8360000000",
+        "AssA": "67.4180000000",
+        "DetA": "63.2580000000",
+        "AssRe": "71.7200000000",
+        "AssPr": "81.9340000000",
+        "DetRe": "68.8540000000",
+        "DetPr": "78.6860000000",
+        "LocA": "83.7850000000",
+        "IDSW": "775.0000000000",
+        "Frag": "1008.0000000000"
+      }
+    },
+    "baseline_hota": 66.637,
+    "delta_pp": -1.424
+  },
+  "mot17": {
+    "checkpoint": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/mot_round1_harm2_d0_20261125/mot17/groups/appearance_row_column/checkpoints/epoch_050.pt",
+    "init": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/mot_round1_harm2_d0_20261125/mot20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+    "init_sha256": "fe7896f6e1001e885de306cb6a05baa3cfd89f6a029aaebf714e1a26a0832c57",
+    "submission": {
+      "id": 1068665,
+      "status": "Finished",
+      "scores": {
+        "HOTA": "68.0230000000",
+        "MOTA": "81.7940000000",
+        "IDF1": "84.9450000000",
+        "MT": "1281.0000000000",
+        "ML": "333.0000000000",
+        "CLR_FP": "27159.0000000000",
+        "CLR_FN": "74754.0000000000",
+        "CLR_Re": "86.7510000000",
+        "CLR_Pr": "94.7430000000",
+        "AssA": "70.2500000000",
+        "DetA": "66.1720000000",
+        "AssRe": "75.4380000000",
+        "AssPr": "81.4750000000",
+        "DetRe": "71.9920000000",
+        "DetPr": "78.6240000000",
+        "LocA": "83.4250000000",
+        "IDSW": "810.0000000000",
+        "Frag": "1458.0000000000"
+      }
+    },
+    "baseline_hota": 67.827,
+    "delta_pp": 0.196
+  },
+  "decision": {
+    "rule": "mean delta HOTA (harm=2 - harm=1); positive -> harm=2 else harm=1",
+    "mean_delta_pp": -0.614,
+    "chosen": "harm=1 (original recipe) + dropout 0.05"
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "appearance_proj_dim": 256,
+  "architecture_variant": "query_film_bilinear",
+  "batch_size": 1024,
+  "column_hinge": false,
+  "column_weight": 50.0,
+  "cycles": 25,
+  "data_root": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/shutrack_bd_mot_20261120/MOT20/data",
+  "dataset": "MOT20",
+  "epochs": 100,
+  "from_scratch": true,
+  "full_passes": 25.0,
+  "gap3_weight": 1.0,
+  "group": "appearance_row_column",
+  "init": null,
+  "init_mode": "scratch",
+  "lr": 0.0001,
+  "motion_harm_weight": 1.0,
+  "normalization_source": "fit_target",
+  "rank_alpha": 0.95,
+  "rank_tau": 0.1,
+  "rank_weight": 18.0,
+  "replay_protocol": {
+    "anchor": false,
+    "column": true,
+    "dataset": "MOT20",
+    "full_write": true,
+    "gap3": false,
+    "rank_arrays": true,
+    "schema": 3,
+    "teacher_sha256": null
+  },
+  "sampling_replacement": true,
+  "seed": 42,
+  "sequence_counts": {
+    "MOT20-01": 19109,
+    "MOT20-02": 145870,
+    "MOT20-03": 307067,
+    "MOT20-05": 630754
+  },
+  "sequence_names": [
+    "MOT20-01",
+    "MOT20-02",
+    "MOT20-03",
+    "MOT20-05"
+  ],
+  "sequence_sampling": "sqrt-size",
+  "sequence_sampling_power": 0.5,
+  "sequences": 4,
+  "shards": 4,
+  "size_weight": 0.0,
+  "snapshot_every": 20,
+  "speed_weight": 1.0,
+  "split": "train",
+  "taus": {
+    "tau_appearance": 0.006428448483347893,
+    "tau_delta": 0.00514930859208107,
+    "tau_motion": 0.031288422644138336
+  },
+  "total_steps": 27100,
+  "warmup_steps": 271,
+  "weight_decay": 0.0001
+}

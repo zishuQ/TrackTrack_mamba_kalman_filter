@@ -1,0 +1,99 @@
+{
+  "auto_run": true,
+  "can_make_submissions_public": true,
+  "children": [],
+  "created_when": "2026-11-25T12:20:18.912386Z",
+  "description": "",
+  "fact_sheet_answers": null,
+  "filename": "SportsMOT.zip",
+  "has_children": false,
+  "id": 1068003,
+  "is_public": false,
+  "is_soft_deleted": false,
+  "is_specific_task_re_run": false,
+  "leaderboard": null,
+  "name": "",
+  "on_leaderboard": false,
+  "owner": "jojo0",
+  "parent": null,
+  "participant_group_name": null,
+  "phase": 21402,
+  "phase_name": "Test Set of SportsMOT (Ranked by HOTA)",
+  "pk": 1068003,
+  "scores": [
+    {
+      "column_key": "HOTA",
+      "id": 3395548,
+      "index": 0,
+      "is_primary": true,
+      "precision": 2,
+      "score": "76.3200000000"
+    },
+    {
+      "column_key": "AssA",
+      "id": 3395550,
+      "index": 1,
+      "is_primary": false,
+      "precision": 2,
+      "score": "65.9900000000"
+    },
+    {
+      "column_key": "DetA",
+      "id": 3395549,
+      "index": 2,
+      "is_primary": false,
+      "precision": 2,
+      "score": "88.3460000000"
+    },
+    {
+      "column_key": "MOTA",
+      "id": 3395551,
+      "index": 3,
+      "is_primary": false,
+      "precision": 2,
+      "score": "96.6090000000"
+    },
+    {
+      "column_key": "IDF1",
+      "id": 3395554,
+      "index": 4,
+      "is_primary": false,
+      "precision": 2,
+      "score": "77.4670000000"
+    },
+    {
+      "column_key": "IDSW",
+      "id": 3395552,
+      "index": 5,
+      "is_primary": false,
+      "precision": 2,
+      "score": "1848.0000000000"
+    },
+    {
+      "column_key": "Frag",
+      "id": 3395553,
+      "index": 6,
+      "is_primary": false,
+      "precision": 2,
+      "score": "2546.0000000000"
+    }
+  ],
+  "status": "Finished",
+  "status_details": "scoring_hostname-worker3",
+  "task": {
+    "created_by": 41650,
+    "created_when": "2026-01-22T15:06:16.326170Z",
+    "description": "To submit, upload a .zip file containing text files with the prediction. The results with the highest HOTA score will be used to determine the winner.",
+    "id": 26486,
+    "ingestion_only_during_scoring": false,
+    "ingestion_program": null,
+    "input_data": null,
+    "is_public": false,
+    "key": "cfaf2a08-96f7-4602-a04b-3a41333a8cd9",
+    "name": "Test Task",
+    "reference_data": "1c547f73-835b-4a1d-8393-f536c7b6a0a9",
+    "scoring_program": "496c429d-a746-4f1a-a812-03f806a9f4e6",
+    "shared_with": [],
+    "validated": false
+  }
+}

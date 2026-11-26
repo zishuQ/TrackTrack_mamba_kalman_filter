@@ -1,0 +1,87 @@
+{
+  "recipe": {
+    "dataset": "SportsMOT",
+    "split": "trainval",
+    "sequences": 90,
+    "init": "scratch",
+    "motion_harm_weight": 4.0,
+    "dropout": 0.05,
+    "seed": 42,
+    "batch_size": 1024,
+    "shards": 1,
+    "epochs": 100,
+    "steps_per_epoch": 624,
+    "total_steps": 62400,
+    "warmup_steps": 312,
+    "final_lr": 0.0,
+    "train_seconds": 5171.6
+  },
+  "checkpoint": {
+    "path": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/sportsmot_harm4_trainval90_e100_20261125/groups/appearance_row_column/checkpoints/epoch_100.pt",
+    "sha256": "407e975e554dfcf15d819c2ad8b16dcd88c9c02856436d8ce9a29b2db32bf65a",
+    "epoch": 100,
+    "global_step": 62400
+  },
+  "test": {
+    "mode": "test",
+    "sequences": 150,
+    "seed": 10000,
+    "kf_type": "nsa",
+    "post": "linear (MixSort)",
+    "aflink": {
+      "thrT": [
+        0,
+        20
+      ],
+      "thrS": 100,
+      "thrP": 0.05,
+      "weights": "AFLink/AFLink_epoch20.pth"
+    },
+    "files": 150,
+    "rows": 1021611,
+    "gates_motion_mean": 0.8615030193085842,
+    "gates_appearance_mean": 0.6744810120645467
+  },
+  "package": {
+    "path": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/sportsmot_harm4_trainval90_e100_20261125/submissions/SportsMOT.zip",
+    "sha256": "f005250150fce4802f0a162aa53133cb5d2422f883e70809cbb790a815a8a18f",
+    "size_bytes": 13077620,
+    "files": 150,
+    "validate": "ok"
+  },
+  "submission": {
+    "id": 1068003,
+    "status": "Finished",
+    "account": "jojo0",
+    "scores": {
+      "HOTA": "76.3200000000",
+      "AssA": "65.9900000000",
+      "DetA": "88.3460000000",
+      "MOTA": "96.6090000000",
+      "IDF1": "77.4670000000",
+      "IDSW": "1848.0000000000",
+      "Frag": "2546.0000000000"
+    }
+  },
+  "comparison": {
+    "previous_harm4_train45_1067021": {
+      "HOTA": 75.988,
+      "AssA": 65.324,
+      "DetA": 88.475,
+      "IDF1": 76.959,
+      "MOTA": 96.642,
+      "IDSW": 1870,
+      "Frag": 2514
+    },
+    "delta_pp": {
+      "HOTA": 0.332,
+      "AssA": 0.666,
+      "DetA": -0.129,
+      "IDF1": 0.508,
+      "MOTA": -0.033,
+      "IDSW": -22,
+      "Frag": 32
+    },
+    "old_best_official_75_840": 0.48
+  }
+}

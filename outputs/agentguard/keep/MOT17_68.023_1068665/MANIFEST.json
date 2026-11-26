@@ -1,0 +1,72 @@
+{
+  "dataset": "MOT17",
+  "official_scores": {
+    "HOTA": 68.023,
+    "MOTA": 81.794,
+    "IDF1": 84.945,
+    "MT": 1281.0,
+    "ML": 333.0,
+    "CLR_FP": 27159.0,
+    "CLR_FN": 74754.0,
+    "CLR_Re": 86.751,
+    "CLR_Pr": 94.743,
+    "AssA": 70.25,
+    "DetA": 66.172,
+    "AssRe": 75.438,
+    "AssPr": 81.475,
+    "DetRe": 71.992,
+    "DetPr": 78.624,
+    "LocA": 83.425,
+    "IDSW": 810.0,
+    "Frag": 1458.0
+  },
+  "submission": {
+    "id": 1068665,
+    "status": "Finished",
+    "created_when": "2026-11-25T21:28:02.504734Z"
+  },
+  "weight": {
+    "file": "epoch_050.pt",
+    "epoch": 50,
+    "global_step": 5200,
+    "sha256": "1b257557990b3e9dc9b161bb1872d5eb4afe08be63f164340bedb024ebcb45c2",
+    "size_bytes": 14623167
+  },
+  "package": {
+    "file": "MOT17.zip",
+    "sha256": "d048f504d40c6b4ab2f071162933d1a93e6ae0ef0f6cc3325763c3c028e5777c",
+    "size_bytes": 5146301
+  },
+  "recipe": {
+    "dataset": "MOT17",
+    "split": "train",
+    "sequences": 7,
+    "epochs": 50,
+    "total_steps": 5200,
+    "warmup_steps": 104,
+    "shards": 1,
+    "sequence_sampling": "sample-proportional",
+    "sequence_sampling_power": 1.0,
+    "batch_size": 1024,
+    "lr": 1e-05,
+    "weight_decay": 0.0001,
+    "seed": 42,
+    "dropout": 0.0,
+    "motion_harm_weight": 2.0,
+    "init": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/mot_round1_harm2_d0_20261125/mot20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+    "init_mode": "weights_only_refit",
+    "architecture_variant": "query_film_bilinear",
+    "appearance_proj_dim": 256
+  },
+  "source_paths": {
+    "weight": "outputs/agentguard/experiments/mot_round1_harm2_d0_20261125/mot17/groups/appearance_row_column/checkpoints/epoch_050.pt",
+    "group": "outputs/agentguard/experiments/mot_round1_harm2_d0_20261125/mot17/groups/appearance_row_column",
+    "submission": "outputs/agentguard/experiments/mot_round1_harm2_d0_20261125/submissions/MOT17_submission.json",
+    "zip": "outputs/agentguard/experiments/mot_round1_harm2_d0_20261125/submissions/MOT17.zip",
+    "reports": [
+      "outputs/agentguard/experiments/mot_round1_harm2_d0_20261125/report.md",
+      "outputs/agentguard/experiments/mot_round1_harm2_d0_20261125/report.json"
+    ]
+  },
+  "verified_copy": true
+}

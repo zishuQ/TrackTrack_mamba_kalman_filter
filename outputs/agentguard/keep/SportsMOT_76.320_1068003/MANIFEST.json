@@ -1,0 +1,61 @@
+{
+  "dataset": "SportsMOT",
+  "official_scores": {
+    "HOTA": 76.32,
+    "AssA": 65.99,
+    "DetA": 88.346,
+    "MOTA": 96.609,
+    "IDF1": 77.467,
+    "IDSW": 1848.0,
+    "Frag": 2546.0
+  },
+  "submission": {
+    "id": 1068003,
+    "status": "Finished",
+    "created_when": "2026-11-25T12:20:18.912386Z"
+  },
+  "weight": {
+    "file": "epoch_100.pt",
+    "epoch": 100,
+    "global_step": 62400,
+    "sha256": "407e975e554dfcf15d819c2ad8b16dcd88c9c02856436d8ce9a29b2db32bf65a",
+    "size_bytes": 14629311
+  },
+  "package": {
+    "file": "SportsMOT.zip",
+    "sha256": "f005250150fce4802f0a162aa53133cb5d2422f883e70809cbb790a815a8a18f",
+    "size_bytes": 13077620
+  },
+  "recipe": {
+    "dataset": "SportsMOT",
+    "split": "trainval",
+    "sequences": 90,
+    "epochs": 100,
+    "total_steps": 62400,
+    "warmup_steps": 312,
+    "shards": 1,
+    "sequence_sampling": "sample-proportional",
+    "sequence_sampling_power": 1.0,
+    "batch_size": 1024,
+    "lr": 0.0001,
+    "weight_decay": 0.0001,
+    "seed": 42,
+    "dropout": 0.05,
+    "motion_harm_weight": 4.0,
+    "init": null,
+    "init_mode": "scratch",
+    "architecture_variant": "query_film_bilinear",
+    "appearance_proj_dim": 256
+  },
+  "source_paths": {
+    "weight": "outputs/agentguard/experiments/sportsmot_harm4_trainval90_e100_20261125/groups/appearance_row_column/checkpoints/epoch_100.pt",
+    "group": "outputs/agentguard/experiments/sportsmot_harm4_trainval90_e100_20261125/groups/appearance_row_column",
+    "submission": "outputs/agentguard/experiments/sportsmot_harm4_trainval90_e100_20261125/submissions/SportsMOT_submission.json",
+    "zip": "outputs/agentguard/experiments/sportsmot_harm4_trainval90_e100_20261125/submissions/SportsMOT.zip",
+    "reports": [
+      "outputs/agentguard/experiments/sportsmot_harm4_trainval90_e100_20261125/report.md",
+      "outputs/agentguard/experiments/sportsmot_harm4_trainval90_e100_20261125/report.json"
+    ]
+  },
+  "verified_copy": true
+}

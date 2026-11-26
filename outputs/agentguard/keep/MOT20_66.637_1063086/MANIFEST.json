@@ -1,0 +1,69 @@
+{
+  "dataset": "MOT20",
+  "official_scores": {
+    "AssA": 69.283,
+    "AssPr": 82.673,
+    "AssRe": 73.571,
+    "CLR_FN": 89536.0,
+    "CLR_FP": 24946.0,
+    "CLR_Pr": 94.491,
+    "CLR_Re": 82.696,
+    "DetA": 64.27,
+    "DetPr": 79.57,
+    "DetRe": 69.638,
+    "Frag": 841.0,
+    "HOTA": 66.637,
+    "IDF1": 82.661,
+    "IDSW": 635.0,
+    "LocA": 84.246,
+    "ML": 144.0,
+    "MOTA": 77.752,
+    "MT": 853.0
+  },
+  "submission": {
+    "id": 1063086,
+    "status": "Finished",
+    "created_when": "2026-11-21T13:39:29.357374Z"
+  },
+  "weight": {
+    "file": "epoch_100.pt",
+    "epoch": 100,
+    "global_step": 27100,
+    "sha256": "4726b1703f77cba215c9cb597ae371f0e7dc83be710ba33edfaa37cb5cd1177d",
+    "size_bytes": 14612849
+  },
+  "package": {
+    "file": null,
+    "sha256": null,
+    "size_bytes": null
+  },
+  "recipe": {
+    "dataset": "MOT20",
+    "split": "train",
+    "sequences": 4,
+    "epochs": 100,
+    "total_steps": 27100,
+    "warmup_steps": 271,
+    "shards": 4,
+    "sequence_sampling": "sqrt-size",
+    "sequence_sampling_power": 0.5,
+    "batch_size": 1024,
+    "lr": 0.0001,
+    "weight_decay": 0.0001,
+    "seed": 42,
+    "dropout": null,
+    "motion_harm_weight": 1.0,
+    "init": null,
+    "init_mode": "scratch",
+    "architecture_variant": "query_film_bilinear",
+    "appearance_proj_dim": 256
+  },
+  "source_paths": {
+    "weight": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+    "group": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column",
+    "submission": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/submissions/MOT20_submission.json",
+    "zip": null,
+    "reports": []
+  },
+  "verified_copy": true
+}
