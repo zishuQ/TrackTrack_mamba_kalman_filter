@@ -20,7 +20,9 @@ tau 0.1 / column 50, harm 1.
 
 | Recipe | Command highlights | Steps | Official |
 |---|---|---:|---|
-| formal e100 (sqrt-size) | `--sequence-sampling sqrt-size` (power 0.5, replacement), `--shards 4 --max-epochs 100`, warmup auto (=271) | 27,100 | **66.637**, #1063086 |
+| formal e100 (sqrt-size) | harm=1, dropout 0, 4 shards × 100, warmup 271 | 27,100 | **66.637**, #1063086 |
+| harm=2 e100 (sqrt-size) | same schedule, dropout 0 | 27,100 | 65.213, #1068664 |
+| harm=1 e100 (sqrt-size) | same schedule, dropout 0.05 | 27,100 | 66.481, #1069017 |
 | sample-proportional e100 | default sampling, `--warmup-steps 270`, `--shards 4 --max-epochs 100` | 27,000 | 66.531, #1066968 |
 | low-LR continuation | `tools/continue_low_lr.py` from e100, 50 stage-epochs / 4 shards (`--allow-partial-cycles`), lr 1e-5 | — | 66.587 |
 

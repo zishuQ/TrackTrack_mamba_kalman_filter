@@ -74,13 +74,9 @@ project skill `.claude/skills/codabench`.
   --dataset MOT20 --experiment mot20_continue_lr5e6 --stages train,test,package,submit --execute
 ```
 
-MOT official bests (ledger): MOT20 66.637 (formal_e100, #1063086),
-MOT17 67.827 (formal_e50, #1063098). Later runs are recorded as ledger entries
-too (`sample_proportional_e100` 66.531 / #1066968, `sample_proportional_e50_from_round1_mot20`
-67.814 / #1066979).
+Use `experiments.json` (`official_best`) for the current MOT official baselines. For SportsMOT, use `recipes/sportsmot_trainval_e100.json` and the dataset card. See `submissions.json` for official scores.
 
-The SportsMOT results are not in the ledger; they live in their experiment
-directories (see the SportsMOT card).
+Training proposals carry `motion_harm_weight`, `dropout`, `sequence_sampling` and `warmup_steps` from their base experiment. Keep the recorded MOT17 initializer when varying fine-tuning settings.
 
 Tuner policy highlights (full text in `mot_tuner.py`):
 

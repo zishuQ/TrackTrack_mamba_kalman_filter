@@ -88,8 +88,10 @@ def sha256(path):
 
 
 TRAINING_MODES = ("scratch", "finetune", "continue")
+TRAINING_OPTIONS = {"sequence_sampling": str, "motion_harm_weight": float,
+                    "dropout": float, "warmup_steps": int}
 TUNABLE = ("mode", "epochs", "shards", "lr", "batch_size", "seed", "init",
-           "source", "allow_partial_cycles")
+           "source", "allow_partial_cycles", *TRAINING_OPTIONS)
 INFERENCE_FLAGS = {
     "det_thr": "--det-thr", "init_thr": "--init-thr", "match_thr": "--match-thr",
     "kf_type": "--kf-type", "post_interval": "--post-interval",
@@ -113,6 +115,11 @@ def repo_rel(path):
     return str(candidate)
 
 
+def training_options(params):
+    return {key: convert(params[key]) for key, convert in TRAINING_OPTIONS.items()
+            if params.get(key) is not None}
+
+
 def canonical_config(dataset, params):
     mode = str(params.get("mode") or params.get("kind"))
     if mode not in TRAINING_MODES:
@@ -122,7 +129,7 @@ def canonical_config(dataset, params):
               "lr": float(params["lr"]), "seed": int(params.get("seed", 42)),
               "batch_size": int(params.get("batch_size", 1024)),
               "allow_partial_cycles": bool(params.get("allow_partial_cycles", False)),
-              "init": None, "source": None}
+              "init": None, "source": None, **training_options(params)}
     if mode == "finetune":
         config["init"] = repo_rel(params.get("init"))
     elif mode == "continue":
@@ -136,7 +143,8 @@ def config_hash(config):
 
 
 def experiment_params(entry):
-    return {"mode": entry.get("kind"), "epochs": entry.get("epochs"),
+    options = {**entry, **(entry.get("config") or {}), **(entry.get("params") or {})}
+    return {**training_options(options), "mode": entry.get("kind"), "epochs": entry.get("epochs"),
             "shards": entry.get("shards"), "lr": entry.get("lr"),
             "batch_size": entry.get("batch_size", 1024),
             "seed": entry.get("seed", 42),
@@ -262,8 +270,7 @@ def cmd_train(args):
     if not args.experiment:
         raise SystemExit("--experiment is required")
     name = args.experiment
-    if name in ledger["datasets"][args.dataset]["experiments"]:
-        raise SystemExit(f"{name}: experiment name already exists in the ledger; choose a new name")
+    existing = ledger["datasets"][args.dataset]["experiments"].get(name)
     state = load_state(name)
     final_epoch = args.epochs
     final_ckpt = experiment_dir(name) / "groups/appearance_row_column/checkpoints" / f"epoch_{final_epoch:03d}.pt"
@@ -273,6 +280,10 @@ def cmd_train(args):
             print(json.dumps({"experiment": name, "status": "train already complete",
                               "checkpoint": str(final_ckpt)}, indent=2), flush=True)
             return
+    if existing is not None:
+        if (existing.get("status") != "proposed"
+                or existing.get("config") != canonical_config(args.dataset, vars(args))):
+            raise SystemExit(f"{name}: use the recorded proposal or choose a new experiment name")
     groups = experiment_dir(name) / "groups"
     base = [str(PY), "-u", str(TRAIN_TOOL),
             "--group", "appearance_row_column", "--dataset", args.dataset,
@@ -285,6 +296,8 @@ def cmd_train(args):
             "--max-epochs", str(args.epochs), "--snapshot-every", "20",
             "--rank-weight", "18", "--rank-alpha", "0.95", "--rank-tau", "0.1",
             "--column-weight", "50", "--device", "cuda"]
+    for key, value in training_options(vars(args)).items():
+        base += ["--" + key.replace("_", "-"), str(value)]
     if getattr(args, "allow_partial_cycles", False):
         base.append("--allow-partial-cycles")
     if args.mode == "continue":
@@ -322,7 +335,8 @@ def cmd_train(args):
         entry.update({"kind": args.mode, "epochs": args.epochs, "shards": args.shards,
                       "lr": args.lr, "seed": getattr(args, "seed", None) or 42,
                       "batch_size": getattr(args, "batch_size", None) or 1024, "checkpoint": str(final_ckpt.relative_to(ROOT)),
-                      "source_checkpoint": args.source, "init": args.init})
+                      "source_checkpoint": args.source, "init": args.init,
+                       **training_options(vars(args))})
         save_ledger(ledger)
 
 
@@ -759,6 +773,8 @@ def cmd_propose(args):
             params[key] = int(raw)
         elif key == "lr":
             params[key] = float(raw)
+        elif key in TRAINING_OPTIONS:
+            params[key] = TRAINING_OPTIONS[key](raw)
         elif key == "allow_partial_cycles":
             params[key] = raw.lower() in ("1", "true", "yes", "on")
         else:
@@ -913,7 +929,8 @@ def cmd_run(args):
                    "--dataset", dataset, "--experiment", name]
         if stage == "train":
             params = entry.get("params") or experiment_params(entry)
-            for key in ("mode", "epochs", "shards", "lr", "batch_size", "seed", "init", "source"):
+            for key in ("mode", "epochs", "shards", "lr", "batch_size", "seed", "init", "source",
+                        *TRAINING_OPTIONS):
                 value = params.get(key)
                 if value is not None:
                     command += ["--" + key.replace("_", "-"), str(value)]
@@ -932,6 +949,8 @@ def cmd_run(args):
             code = subprocess.call(command)
             if code:
                 raise SystemExit(f"{name}:{stage} failed")
+            ledger = load_ledger()
+            entry = ledger["datasets"][dataset]["experiments"][name]
             entry["status"] = stage
             save_ledger(ledger)
     if args.execute:
@@ -1123,6 +1142,8 @@ def main():
     train.add_argument("--seed", type=int)
     train.add_argument("--init")
     train.add_argument("--source")
+    for key, convert in TRAINING_OPTIONS.items():
+        train.add_argument("--" + key.replace("_", "-"), type=convert)
     train.add_argument("--allow-partial-cycles", action="store_true")
     train.add_argument("--execute", action="store_true")
     train.set_defaults(func=cmd_train)

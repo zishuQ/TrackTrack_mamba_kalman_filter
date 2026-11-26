@@ -3,12 +3,16 @@
   "dataset": "MOT17",
   "mode": "finetune",
   "params": {
-    "init": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/final/MOT20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+    "init": "outputs/agentguard/experiments/mot_round1_harm2_d0_20261125/mot20/groups/appearance_row_column/checkpoints/epoch_100.pt",
     "epochs": 50,
     "shards": 1,
-    "lr": 1e-05,
+    "lr": 0.00001,
     "batch_size": 1024,
-    "allow_partial_cycles": false
+    "allow_partial_cycles": false,
+    "sequence_sampling": "sample-proportional",
+    "motion_harm_weight": 2,
+    "dropout": 0,
+    "warmup_steps": 104
   },
   "tunable": [
     "epochs",
@@ -35,5 +39,9 @@
     "optimizer",
     "loss"
   ],
-  "description": "Verified formal MOT17 recipe: init MOT20 epoch_100, 50 single-shard epochs, lr 1e-5, 7 official train sequences."
+  "description": "Best verified MOT17 chain: initialize from the round-1 harm=2 MOT20 e100, then fine-tune 50 single-shard epochs with harm=2 and no dropout.",
+  "official_hota": 68.023,
+  "submission_id": 1068665,
+  "init_submission_id": 1068664,
+  "init_sha256": "fe7896f6e1001e885de306cb6a05baa3cfd89f6a029aaebf714e1a26a0832c57"
 }

@@ -298,7 +298,8 @@ def build_candidate(ledger, dataset, space, search):
                 advance_axis(search)
                 continue
             lr = float(slots[step_index])
-            params = {"mode": "continue", "epochs": axis.get("epochs", 50),
+            options = mp.training_options(mp.experiment_params(experiments(ledger, dataset)[training_name]))
+            params = {**options, "mode": "continue", "epochs": axis.get("epochs", 50),
                       "shards": space["training_defaults"]["shards"], "lr": lr,
                       "seed": 42, "batch_size": 1024,
                       "source": best_entry["checkpoint"],

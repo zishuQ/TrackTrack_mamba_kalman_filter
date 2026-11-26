@@ -26,9 +26,11 @@ Fine-tuning from a MOT20 checkpoint (typical):
   --rank-weight 18 --rank-alpha 0.95 --rank-tau 0.1 --column-weight 50
 ```
 
-5,200 steps, 104 steps/epoch. The formal recipe inits from the formal MOT20
-e100 (67.827, #1063098). Variants on record: from MOT20 e80 (67.763), from the
-round-1 MOT20 e100 with sample-proportional sampling (67.814, #1066979).
+5,200 steps, 104 per epoch. The verified top recipe uses harm=2, dropout=0,
+and the round-1 MOT20 harm=2 e100 checkpoint (68.023, #1068665). See
+`recipes/mot17_finetune.json` for the initializer path and SHA-256.
+The same initializer and harm with dropout 0.05 scored 68.007 (#1069047).
+The historical MOT20 formal e100 → MOT17 harm=1 recipe scored 67.827 (#1063098).
 
 The NSA-c MOT17 run (worktree) used the old-gate ablation MOT20 e100 as init,
 `--shards 4 --max-epochs 200` (4,800 steps, stop e100/2,400, lr 1e-5,

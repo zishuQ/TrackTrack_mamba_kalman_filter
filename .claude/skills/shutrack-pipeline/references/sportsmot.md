@@ -32,6 +32,7 @@ official configuration.
 | Run | Data | Epochs / steps | warmup | Official test |
 |---|---|---:|---:|---|
 | harm=4 trainval90 e100 (#1068003) | 90 | 100 / 62,400 | 312 (0.5%) | **76.320** (current best) |
+| harm=4 trainval90 e150 (#1068301) | 90 | 150 / 93,600 | 468 (0.5%) | 76.164 |
 | harm=4 train45 e100 (#1067021) | 45 | 100 / 32,100 | 160 (0.5%) | 75.988 |
 | harm=2 (E_e100, #1066994) | 45 | 100 / 32,100 | 160 | 75.979 |
 | D e80 train45 (#1064937) | 45 | 80 | — | 75.840 (former best) |

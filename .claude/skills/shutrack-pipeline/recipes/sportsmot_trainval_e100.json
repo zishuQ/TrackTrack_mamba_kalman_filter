@@ -1,0 +1,69 @@
+{
+  "name": "sportsmot_trainval_e100",
+  "dataset": "SportsMOT",
+  "mode": "scratch",
+  "params": {
+    "architecture_variant": "query_film_bilinear",
+    "appearance_proj_dim": 256,
+    "group": "appearance_row_column",
+    "data_root": "outputs/agentguard/experiments/shutrack_architecture_night_20261120/ablation/SportsMOT/data",
+    "split": "trainval",
+    "sequences": 90,
+    "epochs": 100,
+    "total_steps": 62400,
+    "shards": 1,
+    "lr": 0.0001,
+    "weight_decay": 0.0001,
+    "seed": 42,
+    "batch_size": 1024,
+    "rank_weight": 18,
+    "rank_alpha": 0.95,
+    "rank_tau": 0.1,
+    "column_weight": 50,
+    "snapshot_every": 5,
+    "sequence_sampling": "sample-proportional",
+    "motion_harm_weight": 4,
+    "dropout": 0.05,
+    "warmup_steps": 312
+  },
+  "official_hota": 76.32,
+  "submission_id": 1068003,
+  "checkpoint": "outputs/agentguard/experiments/sportsmot_harm4_trainval90_e100_20261125/groups/appearance_row_column/checkpoints/epoch_100.pt",
+  "postprocess": [
+    "linear_interpolation",
+    "aflink"
+  ],
+  "aflink": {
+    "weights": "3. Tracker/AFLink/AFLink_epoch20.pth",
+    "thrT": [
+      0,
+      20
+    ],
+    "thrS": 100,
+    "thrP": 0.05
+  },
+  "test_sequences": 150,
+  "comparison_runs": [
+    {
+      "submission_id": 1068301,
+      "epochs": 150,
+      "total_steps": 93600,
+      "warmup_steps": 468,
+      "official_hota": 76.164
+    },
+    {
+      "submission_id": 1067021,
+      "sequences": 45,
+      "epochs": 100,
+      "motion_harm_weight": 4,
+      "official_hota": 75.988
+    },
+    {
+      "submission_id": 1066994,
+      "sequences": 45,
+      "epochs": 100,
+      "motion_harm_weight": 2,
+      "official_hota": 75.979
+    }
+  ]
+}

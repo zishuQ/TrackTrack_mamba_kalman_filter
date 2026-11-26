@@ -7,7 +7,11 @@
     "shards": 4,
     "lr": 0.0001,
     "batch_size": 1024,
-    "allow_partial_cycles": false
+    "allow_partial_cycles": false,
+    "sequence_sampling": "sqrt-size",
+    "motion_harm_weight": 1,
+    "dropout": 0,
+    "warmup_steps": 271
   },
   "tunable": [
     "epochs",
@@ -33,5 +37,7 @@
     "optimizer",
     "loss"
   ],
-  "description": "Verified formal MOT20 baseline: from scratch, 100 shard-epochs, 4 shards, lr 1e-4, 4 official train sequences."
+  "description": "Verified formal MOT20 baseline: from scratch, 100 shard-epochs, 4 shards, lr 1e-4, 4 official train sequences.",
+  "official_hota": 66.637,
+  "submission_id": 1063086
 }
