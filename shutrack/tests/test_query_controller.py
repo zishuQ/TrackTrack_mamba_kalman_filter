@@ -227,6 +227,19 @@ def test_weights_only_initialization_requires_same_architecture():
         _load_init_state_with_extension(new_model(architecture_variant="legacy"), source)
 
 
+def test_weights_only_initialization_allows_dropout_override():
+    """Dropout has no parameters, so a fine-tune may enable it on a dropout-0 source."""
+    from shutrack.training.train import _load_init_state_with_extension
+    source = new_model()
+    target = new_model(dropout=0.05)
+    _load_init_state_with_extension(target, source)
+    assert target.config.dropout == 0.05
+    assert any(isinstance(module, torch.nn.Dropout) and module.p > 0
+               for module in target.modules())
+    for name, value in source.state_dict().items():
+        torch.testing.assert_close(target.state_dict()[name], value, rtol=0, atol=0)
+
+
 def test_new_model_uses_existing_tracker_adapter(tmp_path, monkeypatch):
     import shutrack.tests.test_runtime_adapter as runtime_tests
 

@@ -141,7 +141,9 @@ def _load_init_state_with_extension(
     differences = {
         key: (source_config.get(key), target_config.get(key))
         for key in sorted(set(source_config) | set(target_config))
-        if key != "appearance_match_input"
+        # dropout adds no parameters; it is a training-time property and may be
+        # overridden on --init (e.g. fine-tune with dropout on a dropout-0 source).
+        if key not in ("appearance_match_input", "dropout")
         and source_config.get(key) != target_config.get(key)
     }
     if differences:
