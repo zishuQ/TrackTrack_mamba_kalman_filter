@@ -14,7 +14,7 @@ Candidate training roots (all protocol schema 3 / full_write / rank + column):
 | Root | Content | Use |
 |---|---|---|
 | `outputs/agentguard/experiments/shutrack_architecture_night_20261120/ablation/SportsMOT/data` | 90 dirs = official train45 + val45 (593,762 samples) | original E/harm family; select with `--split train` (45) or `--split trainval` (90) |
-| `outputs/agentguard/experiments/sportsmot_mechanisms_20261124/data` | train45, 305,631 samples, state-rich | mechanisms / NSA-c train45 runs |
+| `outputs/agentguard/experiments/sportsmot_mechanisms_20261124/data` | train45, 305,631 samples, state-rich | mechanisms train45 runs |
 | `outputs/agentguard/experiments/sportsmot_mechanisms_formal_20261124/data` | trainval90, 593,762 samples, state-rich | formal trainval / c trainval90 |
 
 - Official sequence lists: `3. Tracker/trackeval/seqmap/sportsmot/{train,val,test}.txt`
@@ -76,7 +76,7 @@ cd "3. Tracker"
 
 - Raw only (no post). Reference old-gate baselines:
   `outputs/agentguard/experiments/sportsmot_de_20261123/evals/D_e020/summary.json`
-  (HOTA 83.660). NSA-c comparisons: `nsa_reliability_c_20261125/*/eval_c1/`.
+  (HOTA 83.660).
 - **Careful**: for trainval90 models, val45 is inside the training data — val
   numbers are optimistic; compare test-side results for decisions.
 
@@ -130,7 +130,6 @@ cd "3. Tracker"
 - Validation expects exactly 150 files and the official 150-name list.
 - SportsMOT quota is per account per UTC day; jojo0 and shangqingnie have
   independent quotas — check both (see the codabench skill).
-- The NSA-c (reliability c) work lives in the worktree
-  `/home/shang/.codex/worktrees/shutrack-nsa-reliability/TrackTrack` with its
-  own trainer and replay caches; summary in
-  `outputs/agentguard/experiments/nsa_reliability_c_20261125/handoff_summary.md`.
+- The c (NSA reliability) experiment line was abandoned on 2026-11-26; its
+  worktree runs and replay caches were deleted. Only the historical notes in
+  `docs/shutrack_nsa_reliability_design_20261124.md` remain.

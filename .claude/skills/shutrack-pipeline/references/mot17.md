@@ -6,10 +6,7 @@
 ## Data and sequences
 
 - Training replay: `outputs/agentguard/experiments/shutrack_bd_mot_20261120/MOT17/data`
-  (7 train sequences, FRCNN variants). The NSA-c work also has a state-rich
-  replay for the 5-sequence subset at
-  `/home/shang/.codex/worktrees/shutrack-nsa-reliability/TrackTrack/outputs/agentguard/experiments/nsa_reliability_replay/MOT17/data`
-  (02/04/05/11/13-FRCNN, 86,878 samples).
+  (7 train sequences, FRCNN variants).
 - Splits: train = 02/04/05/09/10/11/13-FRCNN (official MOT17 train, 102,569
   samples); test = 01/03/06/07/08/12/14-FRCNN (duplicated to DPM/SDP when
   packaging). The project's val protocol evaluates 09/10 — both are inside the
@@ -37,10 +34,11 @@ and the round-1 MOT20 harm=2 e100 checkpoint (68.023, #1068665). See
 The same initializer and harm with dropout 0.05 scored 68.007 (#1069047).
 The historical MOT20 formal e100 → MOT17 harm=1 recipe scored 67.827 (#1063098).
 
-The NSA-c MOT17 run (worktree) used the old-gate ablation MOT20 e100 as init,
-`--shards 4 --max-epochs 200` (4,800 steps, stop e100/2,400, lr 1e-5,
+The c (NSA reliability) MOT17 run used the old-gate ablation MOT20 e100 as
+init, `--shards 4 --max-epochs 200` (4,800 steps, stop e100/2,400, lr 1e-5,
 warmup 24) — the c head is zeroed to c=1 and normalization is refit
-(`init_mode=weights_only_refit`).
+(`init_mode=weights_only_refit`). That experiment line was abandoned on
+2026-11-26 and its worktree artifacts were deleted.
 
 `--init` inherits the checkpoint's dropout unless `--dropout` is passed.
 

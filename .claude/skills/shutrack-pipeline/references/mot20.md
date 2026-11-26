@@ -7,9 +7,7 @@
 
 - Training replay: `outputs/agentguard/experiments/shutrack_bd_mot_20261120/MOT20/data`
   (4 sequences: MOT20-01/02/03/05, 1,102,800 samples; protocol schema 3,
-  full_write, rank + column). The state-rich replay for the NSA-c work lives in
-  `/home/shang/.codex/worktrees/shutrack-nsa-reliability/TrackTrack/outputs/agentguard/experiments/nsa_reliability_replay/MOT20/data`
-  (MOT20-02/03, 452,937 samples, includes `event_state_*` arrays).
+  full_write, rank + column).
 - Splits: train = 01/02/03/05; val = 01/05; test = 04/06/07/08.
 - Detection cache: `outputs/agentguard/detection_cache/MOT20/` — `--mode all`
   reads the `all/` split.
@@ -56,9 +54,10 @@ Reference val summaries from the old-gate midpoints:
 - Test 4 sequences → post; expected 4 txt files.
 - Package: `make_package.py --expected-count 4`; validate with
   `codabench_submit.py validate --dataset mot20 --seqinfo-root /home/shang/datasets/MOT20/test`.
-- The NSA-c e20 checkpoint also supports the c=1 ablation with
-  `--agentguard-disable-kf-gate` (forces the KF motion value to 1, keeps the
-  EMA gate learned).
+- The c (NSA reliability) experiment line was abandoned on 2026-11-26; its
+  checkpoints and state-replay caches were deleted. The tracker still supports
+  `--agentguard-disable-kf-gate` (force the KF motion value to 1, keep the EMA
+  gate learned) for future ablation work.
 
 ## Gotchas
 
