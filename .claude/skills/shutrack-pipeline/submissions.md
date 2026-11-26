@@ -31,6 +31,7 @@ Failed/Cancelled 的尝试也保留在册（无分数）。
 | 1064623 | 2026-11-23 11:59 | - | MOT20 low-LR continuation | Finished | 66.587 | 69.170 | 64.276 | 82.534 | 77.748 | 633 |
 | 1066968 | 2026-11-25 02:21 | - | MOT20 sample-proportional e100 | Finished | 66.531 | 68.913 | 64.410 | 82.325 | 77.834 | 632 |
 | 1068664 | 2026-11-26 05:27 | jojo0 | MOT20 round1 harm=2 dropout=0 (sqrt-size) | Finished | 65.213 | 67.418 | 63.258 | 81.133 | 76.566 | 775 |
+| 1069017 | 2026-11-26 11:20 | jojo0 | MOT20 round2 harm=1 dropout=0.05 (sqrt-size) | Finished | 66.481 | 68.918 | 64.310 | 82.203 | 77.813 | 646 |
 
 ## MOT17（phase 16382，competition 10049）
 
