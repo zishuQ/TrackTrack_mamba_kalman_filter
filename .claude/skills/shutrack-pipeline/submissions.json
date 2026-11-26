@@ -1,7 +1,7 @@
 {
   "note": "Every Codabench submission under jojo0/shangqingnie for the four tracking competitions (full history). Append new rows after each submission resolves; scores are official test scores.",
-  "updated_at": "2026-11-26 12:06",
-  "count": 23,
+  "updated_at": "2026-11-26 16:29",
+  "count": 24,
   "submissions": [
     {
       "id": 1062928,
@@ -683,6 +683,29 @@
       },
       "record_file": "outputs/agentguard/experiments/mot17_r1mot20_harm2_d005_20261126/submissions/MOT17_submission.json",
       "created_local": "2026-11-26 12:04"
+    },
+    {
+      "id": 1069361,
+      "dataset": "SportsMOT",
+      "phase": 21402,
+      "competition": 13077,
+      "task": 26486,
+      "account": "jojo0",
+      "status": "Finished",
+      "created_when": "2026-11-26T08:25:10.040124Z",
+      "experiment": "SportsMOT harm=4 trainval90 e100 dropout=0 (post+AFLink)",
+      "filename": null,
+      "scores": {
+        "HOTA": "76.2420000000",
+        "AssA": "65.8660000000",
+        "DetA": "88.3320000000",
+        "MOTA": "96.5320000000",
+        "IDF1": "77.3140000000",
+        "IDSW": "1861.0000000000",
+        "Frag": "2612.0000000000"
+      },
+      "record_file": "outputs/agentguard/experiments/sportsmot_harm4_trainval90_e100_d0_20261126/submissions/SportsMOT_submission.json",
+      "created_local": "2026-11-26 16:25"
     }
   ]
 }

@@ -8,6 +8,7 @@ Failed/Cancelled 的尝试也保留在册（无分数）。
 
 - #1069017 MOT20 jojo0 — MOT20 round2 harm=1 dropout=0.05 (sqrt-size)（HOTA 66.481，Finished）
 - #1069047 MOT17 jojo0 — MOT17 from r1-MOT20 harm=2 dropout=0.05 (50e)（HOTA 68.007，Finished）
+- #1069361 SportsMOT jojo0 — SportsMOT harm=4 trainval90 e100 dropout=0 (post+AFLink)（HOTA 76.242，Finished）
 
 提交前先跑 `.claude/skills/codabench/scripts/codabench_cli.py today --phase <id>` 与 `quota` 核对当日使用与额度。
 
@@ -25,6 +26,7 @@ Failed/Cancelled 的尝试也保留在册（无分数）。
 | 1067021 | 2026-11-25 04:10 | shangqingnie | SportsMOT harm=4 train45 e100 (post+AFLink) | Finished | 75.988 | 65.324 | 88.475 | 76.959 | 96.642 | 1870 |
 | 1068003 | 2026-11-25 20:20 | jojo0 | SportsMOT harm=4 trainval90 e100 (post+AFLink) | Finished | 76.320 | 65.990 | 88.346 | 77.467 | 96.609 | 1848 |
 | 1068301 | 2026-11-25 23:24 | shangqingnie | SportsMOT harm=4 trainval90 e150 (post+AFLink) | Finished | 76.164 | 65.686 | 88.393 | 77.207 | 96.583 | 1841 |
+| 1069361 | 2026-11-26 16:25 | jojo0 | SportsMOT harm=4 trainval90 e100 dropout=0 (post+AFLink) | Finished | 76.242 | 65.866 | 88.332 | 77.314 | 96.532 | 1861 |
 
 ## MOT20（phase 16383，competition 10050）
 
