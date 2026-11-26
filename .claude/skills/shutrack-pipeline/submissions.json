@@ -1,7 +1,7 @@
 {
   "note": "Every Codabench submission under jojo0/shangqingnie for the four tracking competitions (full history). Append new rows after each submission resolves; scores are official test scores.",
-  "updated_at": "2026-11-26 11:47",
-  "count": 22,
+  "updated_at": "2026-11-26 12:06",
+  "count": 23,
   "submissions": [
     {
       "id": 1062928,
@@ -649,6 +649,40 @@
       },
       "record_file": "outputs/agentguard/experiments/mot_round2_harm1_d005_20261125/submissions/MOT20_submission.json",
       "created_local": "2026-11-26 11:20"
+    },
+    {
+      "id": 1069047,
+      "dataset": "MOT17",
+      "phase": 16382,
+      "competition": 10049,
+      "task": 20803,
+      "account": "jojo0",
+      "status": "Finished",
+      "created_when": "2026-11-26T04:04:56.576757Z",
+      "experiment": "MOT17 from r1-MOT20 harm=2 dropout=0.05 (50e)",
+      "filename": null,
+      "scores": {
+        "HOTA": "68.0070000000",
+        "MOTA": "81.7330000000",
+        "IDF1": "84.8950000000",
+        "MT": "1284.0000000000",
+        "ML": "333.0000000000",
+        "CLR_FP": "27468.0000000000",
+        "CLR_FN": "74766.0000000000",
+        "CLR_Re": "86.7490000000",
+        "CLR_Pr": "94.6860000000",
+        "AssA": "70.2260000000",
+        "DetA": "66.1660000000",
+        "AssRe": "75.3240000000",
+        "AssPr": "81.4480000000",
+        "DetRe": "72.0090000000",
+        "DetPr": "78.5980000000",
+        "LocA": "83.4300000000",
+        "IDSW": "831.0000000000",
+        "Frag": "1452.0000000000"
+      },
+      "record_file": "outputs/agentguard/experiments/mot17_r1mot20_harm2_d005_20261126/submissions/MOT17_submission.json",
+      "created_local": "2026-11-26 12:04"
     }
   ]
 }

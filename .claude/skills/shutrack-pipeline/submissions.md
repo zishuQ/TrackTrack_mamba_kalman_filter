@@ -7,6 +7,7 @@ Failed/Cancelled 的尝试也保留在册（无分数）。
 ## 今日使用（UTC 2026-11-26）
 
 - #1069017 MOT20 jojo0 — MOT20 round2 harm=1 dropout=0.05 (sqrt-size)（HOTA 66.481，Finished）
+- #1069047 MOT17 jojo0 — MOT17 from r1-MOT20 harm=2 dropout=0.05 (50e)（HOTA 68.007，Finished）
 
 提交前先跑 `.claude/skills/codabench/scripts/codabench_cli.py today --phase <id>` 与 `quota` 核对当日使用与额度。
 
@@ -51,6 +52,7 @@ Failed/Cancelled 的尝试也保留在册（无分数）。
 | 1064624 | 2026-11-23 12:00 | - | MOT17 low-LR continuation | Finished | 67.689 | 69.206 | 66.500 | 83.851 | 81.805 | 846 |
 | 1066979 | 2026-11-25 02:45 | - | MOT17 sample-proportional e50 (from round-1 MOT20) | Finished | 67.814 | 69.434 | 66.527 | 84.282 | 81.998 | 795 |
 | 1068665 | 2026-11-26 05:28 | jojo0 | MOT17 round1 harm=2 dropout=0 (init round1 MOT20) | Finished | 68.023 | 70.250 | 66.172 | 84.945 | 81.794 | 810 |
+| 1069047 | 2026-11-26 12:04 | jojo0 | MOT17 from r1-MOT20 harm=2 dropout=0.05 (50e) | Finished | 68.007 | 70.226 | 66.166 | 84.895 | 81.733 | 831 |
 
 ## DanceTrack（phase 24635，competition None）
 
