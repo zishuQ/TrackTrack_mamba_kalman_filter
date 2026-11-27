@@ -2,12 +2,12 @@
   "auto_run": true,
   "can_make_submissions_public": true,
   "children": [],
-  "created_when": "2026-11-25T21:28:02.504734Z",
+  "created_when": "2026-11-27T04:23:30.609719Z",
   "description": "",
   "fact_sheet_answers": null,
   "filename": "MOT17.zip",
   "has_children": false,
-  "id": 1068665,
+  "id": 1070802,
   "is_public": false,
   "is_soft_deleted": false,
   "is_specific_task_re_run": false,
@@ -19,155 +19,155 @@
   "participant_group_name": null,
   "phase": 16382,
   "phase_name": "Testing Phase",
-  "pk": 1068665,
+  "pk": 1070802,
   "scores": [
     {
       "column_key": "HOTA",
-      "id": 3399403,
+      "id": 3410892,
       "index": 0,
       "is_primary": true,
       "precision": 1,
-      "score": "68.0230000000"
+      "score": "68.2290000000"
     },
     {
       "column_key": "MOTA",
-      "id": 3399411,
+      "id": 3410900,
       "index": 1,
       "is_primary": false,
       "precision": 1,
-      "score": "81.7940000000"
+      "score": "82.0660000000"
     },
     {
       "column_key": "IDF1",
-      "id": 3399420,
+      "id": 3410909,
       "index": 2,
       "is_primary": false,
       "precision": 1,
-      "score": "84.9450000000"
+      "score": "84.7270000000"
     },
     {
       "column_key": "MT",
-      "id": 3399417,
+      "id": 3410906,
       "index": 3,
       "is_primary": false,
       "precision": 2,
-      "score": "1281.0000000000"
+      "score": "1326.0000000000"
     },
     {
       "column_key": "ML",
-      "id": 3399418,
+      "id": 3410907,
       "index": 4,
       "is_primary": false,
       "precision": 2,
-      "score": "333.0000000000"
+      "score": "339.0000000000"
     },
     {
       "column_key": "CLR_FP",
-      "id": 3399415,
+      "id": 3410904,
       "index": 5,
       "is_primary": false,
       "precision": 2,
-      "score": "27159.0000000000"
+      "score": "25989.0000000000"
     },
     {
       "column_key": "CLR_FN",
-      "id": 3399414,
+      "id": 3410903,
       "index": 6,
       "is_primary": false,
       "precision": 2,
-      "score": "74754.0000000000"
+      "score": "74373.0000000000"
     },
     {
       "column_key": "CLR_Re",
-      "id": 3399412,
+      "id": 3410901,
       "index": 7,
       "is_primary": false,
       "precision": 1,
-      "score": "86.7510000000"
+      "score": "86.8190000000"
     },
     {
       "column_key": "CLR_Pr",
-      "id": 3399413,
+      "id": 3410902,
       "index": 8,
       "is_primary": false,
       "precision": 1,
-      "score": "94.7430000000"
+      "score": "94.9620000000"
     },
     {
       "column_key": "AssA",
-      "id": 3399405,
+      "id": 3410894,
       "index": 9,
       "is_primary": false,
       "precision": 1,
-      "score": "70.2500000000"
+      "score": "70.3490000000"
     },
     {
       "column_key": "DetA",
-      "id": 3399404,
+      "id": 3410893,
       "index": 10,
       "is_primary": false,
       "precision": 1,
-      "score": "66.1720000000"
+      "score": "66.4670000000"
     },
     {
       "column_key": "AssRe",
-      "id": 3399408,
+      "id": 3410897,
       "index": 11,
       "is_primary": false,
       "precision": 1,
-      "score": "75.4380000000"
+      "score": "75.4180000000"
     },
     {
       "column_key": "AssPr",
-      "id": 3399409,
+      "id": 3410898,
       "index": 12,
       "is_primary": false,
       "precision": 1,
-      "score": "81.4750000000"
+      "score": "81.7340000000"
     },
     {
       "column_key": "DetRe",
-      "id": 3399406,
+      "id": 3410895,
       "index": 13,
       "is_primary": false,
       "precision": 1,
-      "score": "71.9920000000"
+      "score": "72.1840000000"
     },
     {
       "column_key": "DetPr",
-      "id": 3399407,
+      "id": 3410896,
       "index": 14,
       "is_primary": false,
       "precision": 1,
-      "score": "78.6240000000"
+      "score": "78.9550000000"
     },
     {
       "column_key": "LocA",
-      "id": 3399410,
+      "id": 3410899,
       "index": 15,
       "is_primary": false,
       "precision": 1,
-      "score": "83.4250000000"
+      "score": "83.5950000000"
     },
     {
       "column_key": "IDSW",
-      "id": 3399416,
+      "id": 3410905,
       "index": 17,
       "is_primary": false,
       "precision": 2,
-      "score": "810.0000000000"
+      "score": "825.0000000000"
     },
     {
       "column_key": "Frag",
-      "id": 3399419,
+      "id": 3410908,
       "index": 18,
       "is_primary": false,
       "precision": 2,
-      "score": "1458.0000000000"
+      "score": "1368.0000000000"
     }
   ],
   "status": "Finished",
-  "status_details": "scoring_hostname-worker4",
+  "status_details": "scoring_hostname-worker1",
   "task": {
     "created_by": 25871,
     "created_when": "2025-08-04T22:17:17.328239Z",

@@ -1,4 +1,4 @@
-# 保留的最高 test 权重与数据（2026-11-26）
+# 保留的最高 test 权重与数据（2026-11-27）
 
 规则：每个数据集只保留官方 test HOTA 最高的一个权重及其最小数据（权重、训练配置与曲线、提交记录、提交包、报告）。
 
@@ -11,9 +11,11 @@
 
 ## MOT17
 
-- HOTA **68.023**，提交 1068665（Finished）
-- 权重：`MOT17_68.023_1068665/weights/epoch_050.pt`（epoch 50，sha256 1b257557990b3e9d…）
-- 配方：harm=2.0、dropout=0.0、5200 步、warmup 104、shards 1
+- HOTA **68.229**，提交 1070802（Finished，2026-11-27）
+- 提交包：`MOT17_68.229_1070802/submission/MOT17.zip`
+- 权重：`MOT17_68.229_1070802/weights/epoch_050.pt`（epoch 50，sha256 f2ef5142df673542…）
+- 配方：harm=1.5、dropout=0.0、LR 2e-5、5200 步、warmup 104、shards 1，底座 MOT20 harm=2 e100（#1068664）
+- 同日次佳：init MOT20 harm=1 e100（#1063086），HOTA 68.167（#1070817）
 
 ## SportsMOT
 

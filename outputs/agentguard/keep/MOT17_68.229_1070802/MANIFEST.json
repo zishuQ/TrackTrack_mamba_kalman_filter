@@ -1,0 +1,70 @@
+{
+  "dataset": "MOT17",
+  "official_scores": {
+    "HOTA": 68.229,
+    "MOTA": 82.066,
+    "IDF1": 84.727,
+    "MT": 1326.0,
+    "ML": 339.0,
+    "CLR_FP": 25989.0,
+    "CLR_FN": 74373.0,
+    "CLR_Re": 86.819,
+    "CLR_Pr": 94.962,
+    "AssA": 70.349,
+    "DetA": 66.467,
+    "AssRe": 75.418,
+    "AssPr": 81.734,
+    "DetRe": 72.184,
+    "DetPr": 78.955,
+    "LocA": 83.595,
+    "IDSW": 825.0,
+    "Frag": 1368.0
+  },
+  "submission": {
+    "id": 1070802,
+    "status": "Finished",
+    "created_when": "2026-11-27T04:23:30.609719Z"
+  },
+  "weight": {
+    "file": "epoch_050.pt",
+    "epoch": 50,
+    "global_step": 5200,
+    "sha256": "f2ef5142df673542862ad60889a164f1c41ed005961eebe22b7ebc8439eebdf2",
+    "size_bytes": 14623231
+  },
+  "package": {
+    "file": "MOT17.zip",
+    "sha256": "9e6e64a982559f1fb950498cb33a1bfb878a58eaa1325f3dc800647308edad34",
+    "size_bytes": 5082620
+  },
+  "recipe": {
+    "dataset": "MOT17",
+    "split": "train",
+    "sequences": 7,
+    "epochs": 50,
+    "total_steps": 5200,
+    "warmup_steps": 104,
+    "shards": 1,
+    "sequence_sampling": "sample-proportional",
+    "sequence_sampling_power": 1.0,
+    "batch_size": 1024,
+    "lr": 2e-05,
+    "weight_decay": 0.0001,
+    "seed": 42,
+    "dropout": 0.0,
+    "motion_harm_weight": 1.5,
+    "init": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/mot_round1_harm2_d0_20261125/mot20/groups/appearance_row_column/checkpoints/epoch_100.pt",
+    "init_sha256": "fe7896f6e1001e885de306cb6a05baa3cfd89f6a029aaebf714e1a26a0832c57",
+    "init_mode": "weights_only_refit",
+    "architecture_variant": "query_film_bilinear",
+    "appearance_proj_dim": 256
+  },
+  "source_paths": {
+    "weight": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/mot17_harm15_lr2e5_20261127/groups/appearance_row_column/checkpoints/epoch_050.pt",
+    "group": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/mot17_harm15_lr2e5_20261127/groups/appearance_row_column",
+    "submission": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/mot17_harm15_lr2e5_20261127/submissions/MOT17_submission.json",
+    "zip": "/home/shang/workspace/TrackTrack/outputs/agentguard/experiments/mot17_harm15_lr2e5_20261127/submissions/MOT17.zip"
+  },
+  "note": "Replaces keep/MOT17_68.023_1068665 as the MOT17 best. Same recipe as #1069953 (harm=1.5, dropout=0, 50e, init #1068664) with fine-tune LR 2e-5. The second 2026-11-27 candidate (#1070817, init #1063086) scored 68.167.",
+  "verified_copy": true
+}
