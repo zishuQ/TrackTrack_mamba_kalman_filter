@@ -1,6 +1,7 @@
 """Ordering, shutdown and gradient checks for the paired training pipeline."""
 
 import threading
+from contextlib import nullcontext
 
 import numpy as np
 import pytest
@@ -71,22 +72,25 @@ def test_batch_order_values_and_tail(prefetch):
     assert [len(x) for x in built] == [3, 3, 1]
 
 
-def test_producer_is_joined_when_consumer_fails_with_full_queue():
+@pytest.mark.parametrize("consumer_fails", [False, True], ids=["early-exit", "exception"])
+def test_producer_is_joined_on_consumer_exit_with_full_queue(consumer_fails):
     threads = []
-    calls = []
+    third_batch_started = threading.Event()
 
     def build(indices):
         threads.append(threading.current_thread())
-        calls.append(indices.copy())
+        if indices[0] == 2:
+            third_batch_started.set()
         return {"x": indices.copy()}
 
-    with pytest.raises(RuntimeError, match="consumer failed"):
-        with prepared_batches(np.arange(100), 1, build, {"x"}, prefetch=1) as batches:
-            next(batches)
+    outcome = pytest.raises(RuntimeError, match="consumer failed") if consumer_fails else nullcontext()
+    with outcome, prepared_batches(np.arange(100), 1, build, {"x"}, prefetch=1) as batches:
+        next(batches)
+        assert third_batch_started.wait(timeout=5)
+        if consumer_fails:
             raise RuntimeError("consumer failed")
-    assert threads
+    assert len(threads) == 3  # consumed batch, queued batch, and the producer's in-flight batch
     assert all(not thread.is_alive() for thread in threads)
-    assert len(calls) <= 3  # consumed + queued + producer's in-flight batch
 
 
 def test_producer_error_reaches_consumer_and_thread_is_joined():

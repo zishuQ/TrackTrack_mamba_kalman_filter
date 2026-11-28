@@ -11,7 +11,6 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
 from shutrack.training.defaults import (  # noqa: E402
-    LEGACY_APPEARANCE_PROJ_DIM, LEGACY_ARCHITECTURE_VARIANT,
     MAINLINE_APPEARANCE_PROJ_DIM, MAINLINE_ARCHITECTURE_VARIANT,
     MAINLINE_STAGE_CHUNK_SAMPLES,
 )
@@ -49,11 +48,9 @@ def test_mot20_full_pool_keeps_bounded_chunks():
     assert trainer.resolve_stage_chunk_samples(args, 1024) == MAINLINE_STAGE_CHUNK_SAMPLES
 
 
-def test_legacy_reproduction_opts_out_explicitly():
-    args = _bare_args("--architecture-variant", LEGACY_ARCHITECTURE_VARIANT)
-    variant, width = trainer.resolve_model_options(args)
-    assert variant == LEGACY_ARCHITECTURE_VARIANT
-    assert width == LEGACY_APPEARANCE_PROJ_DIM
+def test_training_rejects_retired_architecture():
+    with pytest.raises(SystemExit):
+        _bare_args("--architecture-variant", "legacy")
 
 
 @pytest.mark.parametrize("flag", ["--stage-features", "--no-stage-features", "--preload-features"])

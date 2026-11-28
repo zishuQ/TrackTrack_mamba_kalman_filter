@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from shutrack.schema import COMPETITION_DIM, EVIDENCE_DIM
+from shutrack.schema import EVIDENCE_DIM
 
 
 def _mlp(in_dim: int, d_model: int, ff_dim: int) -> nn.Sequential:
@@ -27,18 +27,6 @@ class EvidenceEncoder(nn.Module):
 
     def forward(self, evidence: torch.Tensor) -> torch.Tensor:
         return self.net(self.input_norm(evidence.float()))
-
-
-class CompetitionEncoder(nn.Module):
-    """Encode the 3-dim association-competition evidence."""
-
-    def __init__(self, d_model: int = 128, ff_dim: int = 256) -> None:
-        super().__init__()
-        self.input_norm = nn.LayerNorm(COMPETITION_DIM)
-        self.net = _mlp(COMPETITION_DIM, d_model, ff_dim)
-
-    def forward(self, competition: torch.Tensor) -> torch.Tensor:
-        return self.net(self.input_norm(competition.float()))
 
 
 class AppearanceEncoder(nn.Module):

@@ -26,7 +26,7 @@ for path in (
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from sportsmot_supervision_pilot import DEFAULT_CKPT, SequencePilot, iou_xyxy  # noqa: E402
+from sportsmot_supervision_pilot import SequencePilot, iou_xyxy  # noqa: E402
 from paired_identity import recover_identity_labels  # noqa: E402
 
 
@@ -69,12 +69,13 @@ def main() -> None:
     parser.add_argument("--sequence", required=True)
     parser.add_argument("--split", choices=("train", "val"), required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--old-binding", action="store_true")
     parser.add_argument("--log-root", default="/tmp/identity_anchor_audit")
     args = parser.parse_args()
     pilot_class = OldBindingPilot if args.old_binding else SequencePilot
     pilot = pilot_class(
-        args.sequence, args.split, DEFAULT_CKPT, Path(args.log_root) / args.sequence
+        args.sequence, args.split, args.checkpoint, Path(args.log_root) / args.sequence
     )
     pilot.run_replay()
     recovered = recover_identity_labels(pilot)

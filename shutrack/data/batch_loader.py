@@ -1,6 +1,6 @@
-"""Batch-index loader for the packed SHUTrack dataset.
+"""Batch-index loader for paired SHUTrack training.
 
-Yields whole batches via ``PackedShutrackDataset.batch`` (vectorised gather)
+Yields whole batches via the supplied dataset's ``batch`` method
 instead of one item at a time.  An optional producer thread overlaps the CPU
 gather with GPU compute; the sampler remains the owner of the epoch schedule
 and the yielded batch order is exactly the sampler order.
@@ -10,19 +10,21 @@ from __future__ import annotations
 
 import queue
 import threading
-from typing import Any, Iterator
-
-from shutrack.data.packed_dataset import PackedShutrackDataset
-from shutrack.data.sampling import SequenceBatchSampler, ShardBatchSampler
+from collections.abc import Iterable, Iterator
+from typing import Any, Protocol
 
 _SENTINEL = object()
+
+
+class _BatchSource(Protocol):
+    def batch(self, indices: Any) -> Any: ...
 
 
 class BatchIndexLoader:
     def __init__(
         self,
-        dataset: PackedShutrackDataset,
-        sampler: SequenceBatchSampler | ShardBatchSampler,
+        dataset: _BatchSource,
+        sampler: Iterable[Any],
         *,
         prefetch: int = 2,
     ) -> None:
@@ -30,12 +32,6 @@ class BatchIndexLoader:
         self.sampler = sampler
         self.prefetch = max(0, int(prefetch))
         self._thread: threading.Thread | None = None
-
-    def set_epoch(self, epoch: int) -> None:
-        self.sampler.set_epoch(epoch)
-
-    def __len__(self) -> int:
-        return len(self.sampler)
 
     @staticmethod
     def _put(sink: queue.Queue, item: object, stop: threading.Event) -> bool:
@@ -64,7 +60,7 @@ class BatchIndexLoader:
             if not stop.is_set():
                 self._put(sink, _SENTINEL, stop)
 
-    def __iter__(self) -> Iterator[dict[str, Any]]:
+    def __iter__(self) -> Iterator[Any]:
         if self.prefetch <= 0:
             for indices in self.sampler:
                 yield self.dataset.batch(indices)

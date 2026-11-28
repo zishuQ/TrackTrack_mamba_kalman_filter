@@ -58,10 +58,6 @@ from agentguard.rollout_labels import (
 from agentguard.data.label_schema import make_cue_target, make_risk_targets
 
 DEFAULT_CACHE = MAIN / "outputs/agentguard/detection_cache"
-DEFAULT_CKPT = (
-    MAIN
-    / "outputs/agentguard/experiments/shutrack_a_submit_20261117/SportsMOT/checkpoints/last.pt"
-)
 DEFAULT_OUT = (
     MAIN / "outputs/agentguard/experiments/shutrack_a_supervision_pilot_20261118"
 )
@@ -2225,7 +2221,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sequences", nargs="+", default=list(SEQUENCES))
     parser.add_argument("--split", default="val")
-    parser.add_argument("--checkpoint", default=str(DEFAULT_CKPT))
+    parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT))
     parser.add_argument("--max-frames", type=int, default=0)
     args = parser.parse_args()

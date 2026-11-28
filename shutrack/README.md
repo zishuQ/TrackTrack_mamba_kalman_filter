@@ -1,26 +1,13 @@
 # SHUTrack v3 — HCE + RSC
 
-SHUTrack = **Suppress Harmful Updates**.  After a match is accepted, the motion
-state and the appearance template should not always be written with full
-strength.  This package implements the isolated v3 architecture:
+SHUTrack = **Suppress Harmful Updates**. After a match, its two gates scale
+the NSA Kalman correction and the weight of the new appearance embedding in
+the EMA. The maintained model variant is `query_film_bilinear`.
 
-* **HCE — Historical Context Encoder** reads at most the five events before the
-  current one.  Each history event is encoded from two paths — motion+observation
-  evidence and ReID appearance — and fused into one history token.  A shared
-  temporal Transformer (d_model=128, 2 layers, 4 heads) encodes the tokens; two
-  learned queries read the motion/observation and appearance history contexts.
-* **RSC — Reliability-aware Suppression Controller** uses those two readouts as
-  queries and reads the current motion+observation token, the ReID appearance
-  token, and (optionally) the association-competition token as key/value.  One
-  cross-modal attention layer plus FFN produces two representation deltas, which
-  are fused residually in representation space and decoded by two independent
-  sigmoid heads into the motion and appearance gates.
-
-There is no policy head, cue/risk head, five-strategy prototype, base/refined
-gate, correction/bound, or detached gradient path.  The gates do not use softmax
-and are not required to sum to one.  Online writes keep TrackTrack's existing
-`Track.update_with_gates`: the motion gate scales the original NSA measurement
-correction and the appearance gate scales the original EMA write.
+Each event combines motion and observation evidence with ReID appearance.
+The current event produces two queries, modulated by association competition.
+A temporal Transformer encodes the previous five events. The queries read this
+history and the two bilinear heads produce independent sigmoid gates.
 
 ## Input schema (`shutrack_v3_evidence13_competition3`)
 
@@ -58,22 +45,15 @@ Normalized legacy columns **15, 21, 25**:
 Online inference passes the same recorded candidate pool through as
 `track_cost_row`, `detection_cost_col` and `max_iou_with_other`, using the
 pre-iteration `final_cost` matrix and the legacy 63-dim scalar definition, then
-applies the same 63-dim normalization.  The packed training tensors already
-contain these normalized columns, so both sides use identical values.
-
-Training can disable the branch (`--competition off`) for the lean
-dual-evidence variant.  The checkpoint records the effective input schema and
-`competition_enabled`; the loader rejects a model/checkpoint branch mismatch.
+applies the same 63-dim normalization. Paired training fits the statistics on
+the selected training sequences and stores them in the checkpoint. The runtime
+and trainer both use the same feature columns.
 
 ### Appearance branch
 
 Per-event pre-update track ReID + the event's detection ReID; both projected to
-64 dims, then `concat(track, det, |diff|, product)` → 128.  Missing detections
+256 dims by default, then `concat(track, det, |diff|, product)` → 128.  Missing detections
 use a learned placeholder and an explicit mask.
-
-Packed scalars are already z-scored by the legacy train-split statistics and
-are **not** normalized again.  Online inference applies the same 63-dim mean/std
-stored in the checkpoint.
 
 ## History window and reset semantics
 
@@ -100,173 +80,21 @@ stored in the checkpoint.
   candidate pool.  TrackTrack's confirmation rule (`observation_count >=
   min_len`) is unchanged.  Removing an unmatched candidate track clears its
   runtime buffer.
-* The old packed training data has no supervised windows with 1–2 history
-  events.  Truncated-history training is a separate future option; early-path
-  gains on real early tracks must be measured, not assumed.
 
 ## Training
 
-The only objective is the existing weighted gate loss:
+Use `tools/train_supervision_groups.py` with the `appearance_row_column` group,
+the paired replay data root, and the dataset's documented recipe. The
+[SHUTrack pipeline guide](../.claude/skills/shutrack-pipeline/SKILL.md) links
+to the verified MOT17, MOT20, and SportsMOT commands. For fine-tuning, use
+`--init CHECKPOINT` with a current SHUTrack checkpoint. For fresh training,
+use `--from-scratch`. To resume, repeat the recipe with `--resume`.
 
-```text
-BCEWithLogits + 0.1 * MSE, normalized by valid_channels * sample_weight
-```
-
-No policy KL, cue/risk BCE, base/final duplication or correction terms.
-
-Training reads the existing packed `outputs/agentguard/train_data/*` in place
-(`data.pt`, `reid_features.npy`, `safe_gate_target`, `valid_channels`,
-`sample_weight`); no cache, index, label or dataset is generated.  Batches are
-organized per sequence (sequence order shuffled once per epoch, local samples
-shuffled inside each sequence), so each `data.pt` file loads at most once per
-epoch; `metrics.jsonl` records `samples_per_second`, `sequence_load_count` and
-`rss_mb`.
-
-### Data loading, timing and resume
-
-* `--data-loader batch` (default) gathers a whole batch with numpy fancy
-  indexing on the mmap-backed `data.pt` and `reid_features.npy` arrays,
-  grouped by sequence and scattered back to the sampler order (duplicated
-  samples kept).  On real MOT17 data this is 8-17x faster than the legacy
-  per-item path (`--data-loader items`, kept for numerical comparison);
-  per-step losses are identical.
-* `--prefetch N` (default 2) runs the CPU gather in a producer thread so the
-  next batch is ready while the GPU computes.  The thread stops when the
-  iterator closes, including early `--max-steps` stops.
-* `--profile` synchronizes per batch and splits `data_read_seconds`,
-  `h2d_seconds` and `compute_seconds`.  Without it the formal path has no
-  per-batch CUDA synchronization and converts the loss statistics once per
-  epoch; the non-finite loss check is kept.
-* `sequence_load_count` includes DataLoader-worker loads when the legacy
-  items path runs with `--num-workers > 0` (shared counter).
-* Resume restores optimizer, scheduler, global_step and epoch, and re-seeds
-  the sampler with `seed + epoch`, so the run continues the schedule instead
-  of restarting it (MOT17 epoch-24 `last.pt`: step 2209 resumes at
-  lr 5.477e-6, not the 1e-5 initial value).
-
-### Prepared next-round commands (paused until review)
-
-MOT20 single-shard timing (first shard = 262,271 samples / 257 batches).
-`--max-steps 257` stops after the first shard; it also changes the LR schedule
-of this timing run, so these weights are not used for formal resume.  Both
-paths share the same sampler (`sqrt-size`, batch 1024, seed 42) and the same
-`--profile` timing, with independent output directories:
+Strict-load a checkpoint and inspect its recorded configuration:
 
 ```bash
-./.venv/bin/python -m shutrack.cli train \
-  --dataset-dir outputs/agentguard/train_data/MOT20 \
-  --checkpoint-dir outputs/agentguard/experiments/shutrack_a_old_recipe_20261117/MOT20_shard_timing_batch/checkpoints \
-  --device cuda --epochs 4 --batch-size 1024 --num-workers 0 \
-  --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 --grad-clip 1.0 --seed 42 \
-  --memory-shards 4 --shard-cycles 1 --epochs-per-shard 1 \
-  --sequence-sampling sqrt-size --competition on \
-  --data-loader batch --prefetch 2 --profile --max-steps 257
-```
-
-```bash
-./.venv/bin/python -m shutrack.cli train \
-  --dataset-dir outputs/agentguard/train_data/MOT20 \
-  --checkpoint-dir outputs/agentguard/experiments/shutrack_a_old_recipe_20261117/MOT20_shard_timing_items/checkpoints \
-  --device cuda --epochs 4 --batch-size 1024 --num-workers 4 \
-  --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 --grad-clip 1.0 --seed 42 \
-  --memory-shards 4 --shard-cycles 1 --epochs-per-shard 1 \
-  --sequence-sampling sqrt-size --competition on \
-  --data-loader items --profile --max-steps 257
-```
-
-MOT17 continuation from the paused epoch-24 checkpoint (same schedule, no
-`--init-checkpoint`):
-
-```bash
-./.venv/bin/python -m shutrack.cli train \
-  --dataset-dir outputs/agentguard/train_data/MOT17 \
-  --checkpoint-dir outputs/agentguard/experiments/shutrack_a_old_recipe_20261117/MOT17/checkpoints \
-  --device cuda --epochs 50 --batch-size 1024 --num-workers 0 \
-  --lr 1e-5 --weight-decay 1e-4 --warmup-epochs 1 --grad-clip 1.0 --seed 42 \
-  --memory-shards 1 --shard-cycles 1 --epochs-per-shard 50 \
-  --sequence-sampling sample-proportional --competition on \
-  --resume outputs/agentguard/experiments/shutrack_a_old_recipe_20261117/MOT17/checkpoints/last.pt \
-  --data-loader batch --prefetch 2
-```
-
-SportsMOT from scratch (200 shard-epochs = 50 full passes; recipe from the
-paused `plan.json`):
-
-```bash
-./.venv/bin/python -m shutrack.cli train \
-  --dataset-dir outputs/agentguard/train_data/SportsMOT \
-  --checkpoint-dir outputs/agentguard/experiments/shutrack_a_old_recipe_20261117/SportsMOT/checkpoints \
-  --device cuda --epochs 200 --batch-size 1024 --num-workers 4 \
-  --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 --grad-clip 1.0 --seed 42 \
-  --memory-shards 4 --shard-cycles 50 --epochs-per-shard 1 \
-  --sequence-sampling sample-proportional --competition on \
-  --data-loader batch --prefetch 2
-```
-
-Raw evaluation (explicit full sequence list, mmap detection cache, result
-directory prepared under `outputs/agentguard/eval_results/shutrack_a_opt_20261117/`):
-
-```bash
-cd "3. Tracker"
-../.venv/bin/python -u run.py --dataset SportsMOT --mode val \
-  --sequences <the same 45-sequence list> --seed 10000 --kf-type nsa \
-  --agentguard-mode shutrack-v2 \
-  --shutrack-checkpoint <checkpoint> --agentguard-device cpu \
-  --detection-cache-root ../outputs/agentguard/detection_cache \
-  --output_dir ../outputs/agentguard/eval_results/shutrack_a_opt_20261117 \
-  --tracker-suffix <run-suffix> --print-per-sequence-metrics
-```
-
-`run.py` has no multi-process per-sequence tracking entry today; a single
-invocation with the complete sequence list produces one COMBINED TrackEval
-result.  Parallel tracking would need a separate eval-only entry, which is
-not part of this round.
-
-### Two formal commands (not started by this round)
-
-Lean dual-evidence variant:
-
-```bash
-./.venv/bin/python -m shutrack.cli train \
-  --dataset-dir outputs/agentguard/train_data/MOT17 \
-  --checkpoint-dir outputs/agentguard/experiments/shutrack_v3_mot17_lean_bs1024_100e/checkpoints \
-  --device cuda --epochs 100 --batch-size 1024 --num-workers 0 \
-  --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 --grad-clip 1.0 \
-  --seed 42 --competition off
-```
-
-With competition token:
-
-```bash
-./.venv/bin/python -m shutrack.cli train \
-  --dataset-dir outputs/agentguard/train_data/MOT17 \
-  --checkpoint-dir outputs/agentguard/experiments/shutrack_v3_mot17_competition_bs1024_100e/checkpoints \
-  --device cuda --epochs 100 --batch-size 1024 --num-workers 0 \
-  --lr 1e-4 --weight-decay 1e-4 --warmup-epochs 1 --grad-clip 1.0 \
-  --seed 42 --competition on
-```
-
-`--epochs` is the number of schedule epochs.  With the shard sampler it must
-equal `memory_shards × shard_cycles × epochs_per_shard`: MOT20 uses
-4×25×1 = 100 shard-epochs (25 full passes), SportsMOT uses 4×50×1 = 200
-shard-epochs (50 full passes), and MOT17 uses 1×1×50 = 50 full passes.
-
-Training writes only `last.pt`, `best.pt`, `metrics.jsonl`, `training.log` and
-`training_summary.json`.  A run refuses to reuse an existing checkpoint
-directory unless `--resume <last.pt>` is given.  Resume appends logs, validates
-model config, normalization, competition branch and dataset contract before
-loading optimizer state.  `best.pt` tracks the lowest average **training loss**
-(`best_metric_name = "training_loss"`), not tracker HOTA.
-
-### Inspect / validate
-
-```bash
-./.venv/bin/python -m shutrack.cli inspect-data \
-  --dataset-dir outputs/agentguard/train_data/MOT17 --competition on
-
-./.venv/bin/python -m shutrack.cli validate-checkpoint \
-  --checkpoint outputs/agentguard/experiments/shutrack_v3_mot17_competition_bs1024_100e/checkpoints/last.pt \
-  --dataset-dir outputs/agentguard/train_data/MOT17 --max-batches 4 --device cpu
+./.venv/bin/python -m shutrack validate-checkpoint \
+  --checkpoint outputs/agentguard/keep/MOT17_68.023_1068665/weights/epoch_050.pt
 ```
 
 ## Online tracking
@@ -280,9 +108,9 @@ cd "3. Tracker"
               MOT17-09-FRCNN MOT17-10-FRCNN MOT17-11-FRCNN MOT17-13-FRCNN \
   --agentguard-mode shutrack-v2 \
   --shutrack-checkpoint \
-    "../outputs/agentguard/experiments/shutrack_v3_mot17_competition_bs1024_100e/checkpoints/best.pt" \
+    "../outputs/agentguard/keep/MOT17_68.023_1068665/weights/epoch_050.pt" \
   --agentguard-device cpu \
-  --tracker-suffix shutrack_v3_mot17_e100 \
+  --tracker-suffix shutrack_mot17 \
   --print-per-sequence-metrics
 ```
 
@@ -304,9 +132,7 @@ When no matched gate exists, all diagnostic values are finite zeros.
 Detection dropout in the mmap entry applies one keep mask to both the detection
 rows and `agentguard_target_detection_indices`; source candidates keep their
 rows and `agentguard_source_detection_indices` aligned for the existing recovery
-rule.  `validate-checkpoint` compares the checkpoint's 63-dim normalization
-mean/std with the packed metadata before computing loss and names both the
-checkpoint and data directory on mismatch.
+rule.
 
 ## Tests
 
@@ -314,29 +140,14 @@ checkpoint and data directory on mismatch.
 ./.venv/bin/python -m pytest shutrack/tests -q
 ```
 
-The suite covers evidence/competition column selection, online competition
-values vs the legacy scalar definition (including the single-candidate
-boundary), packed↔online feature/mask/competition/gate parity, window
-causality, reset-once and model-visible masks at frames 1/50/51, unmatched
-history recording, real-`Track` early-enable match 2/3 behavior, branch on/off
-training, checkpoint branch validation, sequence-organized sampling/load
-counts, resume append/contract checks, read-only guards and a tiny end-to-end
-training run.
+The suite covers feature parity, replay collection, the two gate heads,
+history resets, early enablement, checkpoint compatibility, and paired
+training feature loading.
 
 The real TrackTrack entry smoke is opt-in:
 
 ```bash
 SHUTRACK_RUN_TRACKER_SMOKE=1 \
-SHUTRACK_SMOKE_CHECKPOINT=outputs/agentguard/experiments/shutrack_v3_mot17_competition_smoke/checkpoints/last.pt \
+SHUTRACK_SMOKE_CHECKPOINT=outputs/agentguard/keep/MOT17_68.023_1068665/weights/epoch_050.pt \
 ./.venv/bin/python -m pytest shutrack/tests/test_tracktrack_entry_smoke.py -q -s
 ```
-
-## Known limitations
-
-1. The packed data still has no source event caches; competition columns are
-   read directly from the existing normalized packed scalars (they are
-   complete), so no margin-style degradation exists anymore.
-2. Early enablement is optional and not represented in the legacy supervised
-   windows; its real early-track benefit must be validated separately.
-3. This round does not launch the formal long training and does not regenerate
-   caches, labels, trajectories or datasets.

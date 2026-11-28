@@ -8,6 +8,7 @@ import torch
 from shutrack.models.shutrack import ShutrackV2Config, ShutrackV2Model
 from shutrack.schema import COMPETITION_SCALAR_INDICES, EVIDENCE_SCALAR_INDICES, LEGACY_SCALAR_DIM
 from shutrack.training.checkpoint import build_checkpoint_payload, save_checkpoint_atomic
+from shutrack.training.defaults import MAINLINE_ARCHITECTURE_VARIANT
 
 
 def official_sequences(split, dataset="SportsMOT"):
@@ -42,7 +43,9 @@ def full_write_checkpoint(path, reid_dim):
     # The normal runtime captures windows. Both write gates are forced to one.
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
-        model = ShutrackV2Model(ShutrackV2Config(reid_dim=int(reid_dim)))
+        model = ShutrackV2Model(ShutrackV2Config(
+            reid_dim=int(reid_dim), architecture_variant=MAINLINE_ARCHITECTURE_VARIANT,
+        ))
     payload = build_checkpoint_payload(
         model=model, training_config={}, dataset_descriptor={"competition_enabled": True},
         epoch=0, global_step=0, best_metric=0.0, optimizer=None, scheduler=None,

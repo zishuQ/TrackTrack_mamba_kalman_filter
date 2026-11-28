@@ -44,10 +44,6 @@ for path in (str(TRACKER_DIR), str(AGENTGUARD_SRC), str(WORKTREE)):
 
 DEFAULT_CACHE = MAIN / "outputs/agentguard/detection_cache"
 DATA_ROOT = Path("/home/shang/datasets")
-DEFAULT_CHECKPOINT = (
-    MAIN
-    / "outputs/agentguard/experiments/shutrack_a_submit_20261117/SportsMOT/checkpoints/last.pt"
-)
 DEFAULT_OUT = MAIN / "outputs/agentguard/experiments/shutrack_a_motion_supervision_20261118"
 DEFAULT_PACKED = MAIN / "outputs/agentguard/train_data/SportsMOT"
 
@@ -320,7 +316,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sequence", default="v_00HRwkvvjtQ_c001")
     parser.add_argument("--split", default="val", choices=["train", "val"])
-    parser.add_argument("--checkpoint", default=str(DEFAULT_CHECKPOINT))
+    parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--cache-root", default=str(DEFAULT_CACHE))
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT))
     parser.add_argument("--packed-root", default=str(DEFAULT_PACKED))

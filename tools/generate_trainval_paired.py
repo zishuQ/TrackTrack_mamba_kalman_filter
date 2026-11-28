@@ -21,7 +21,7 @@ for path in (str(WORKTREE / "tools"), str(WORKTREE), str(WORKTREE / "agentguard/
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from sportsmot_supervision_pilot import SequencePilot, DEFAULT_CKPT, DEFAULT_CACHE
+from sportsmot_supervision_pilot import SequencePilot, DEFAULT_CACHE
 from paired_training_input import full_write_checkpoint, official_sequences, replay_split
 from agentguard.data.detection_cache import SequenceDetectionCache
 from paired_collection_io import atomic_json, inspect_shard, collection_lock
@@ -74,7 +74,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default=str(ROOT))
     parser.add_argument("--dataset", choices=("SportsMOT", "MOT17", "MOT20", "DanceTrack"), default="SportsMOT")
-    parser.add_argument("--checkpoint", default=str(DEFAULT_CKPT))
+    parser.add_argument("--checkpoint", type=Path, help="Teacher checkpoint for gated replay.")
     parser.add_argument("--max-sequences", type=int, default=0)
     parser.add_argument("--only", nargs="*", default=None)
     parser.add_argument(
@@ -94,6 +94,8 @@ def main() -> None:
         "release heavy state instead of holding the whole sequence",
     )
     args = parser.parse_args()
+    if not args.full_write and args.checkpoint is None:
+        parser.error("--checkpoint is required unless --full-write is set")
     root = Path(args.root)
     data = root / "data"
     logs = root / "logs"
@@ -109,7 +111,7 @@ def main() -> None:
         raise ValueError("No sequences selected")
     val_set = val_sequences()
     temp = tempfile.TemporaryDirectory(dir=root)
-    checkpoint = Path(args.checkpoint)
+    checkpoint = args.checkpoint
     if args.full_write:
         first = sequences[0]
         cache = SequenceDetectionCache(DEFAULT_CACHE / args.dataset / replay_split(first, args.dataset) / first)

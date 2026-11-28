@@ -14,7 +14,6 @@ from agentguard.models.iwg import IWG, make_head
 
 
 IWG_CONTEXT_SIZE = 6
-SUPPORTED_IWG_CONTEXT_SIZES = frozenset({6, 8})
 RG_CMA_DIM = 128
 RG_CMA_HEADS = 4
 RG_CMA_LEGACY_CORRECTION_BOUND = 0.05
@@ -25,121 +24,26 @@ SUPPORTED_RELIABILITY_MODES = frozenset(
     {RELIABILITY_MODE_FULL, RELIABILITY_MODE_NO_SCALAR}
 )
 ARCHITECTURE_LEGACY = "legacy"
-ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL = "legacy-clean-cross-modal"
-ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED = (
-    "legacy-clean-cross-modal-base-conditioned"
-)
-ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA = (
-    "legacy-clean-bidirectional-cma"
-)
-ARCHITECTURE_LEGACY_CLEAN_6X6_CMA = "legacy-clean-6x6-cma"
-ARCHITECTURE_DIRECT_BASE = "direct-base"
-ARCHITECTURE_CLEAN_CROSS_MODAL = "clean-cross-modal"
-ARCHITECTURE_SELECTIVE_CORRECTION = "selective-correction"
-SUPPORTED_ARCHITECTURE_VARIANTS = frozenset(
-    {
-        ARCHITECTURE_LEGACY,
-        ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
-        ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED,
-        ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA,
-        ARCHITECTURE_LEGACY_CLEAN_6X6_CMA,
-        ARCHITECTURE_DIRECT_BASE,
-        ARCHITECTURE_CLEAN_CROSS_MODAL,
-        ARCHITECTURE_SELECTIVE_CORRECTION,
-    }
-)
-
-# Scalar63 indices 27:55 are geometry/KF state. IoU and angle are the only
-# association features retained in the clean motion stream; the complement is
-# treated as matching reliability/context evidence.
-CLEAN_MOTION_SCALAR_INDICES = (0, 1, 4, *range(27, 55))
-CLEAN_RELIABILITY_SCALAR_INDICES = tuple(
-    index for index in range(63) if index not in CLEAN_MOTION_SCALAR_INDICES
-)
+SUPPORTED_ARCHITECTURE_VARIANTS = frozenset({ARCHITECTURE_LEGACY})
 
 
 def _model_descriptor(
     name: str,
     correction_bound: float,
-    context_size: int = IWG_CONTEXT_SIZE,
-    architecture_variant: str = ARCHITECTURE_LEGACY,
 ) -> dict[str, Any]:
-    if architecture_variant == ARCHITECTURE_LEGACY:
-        # This byte-for-byte descriptor shape preserves every existing model
-        # schema hash and keeps old checkpoints loadable.
-        return {
-            "name": name,
-            "iwg_context_size": int(context_size),
-            "modal_token_dim": 64,
-            "attention_dim": RG_CMA_DIM,
-            "attention_heads": RG_CMA_HEADS,
-            "attention_dropout": 0.1,
-            "cross_modal_tokens": ["motion", "appearance", "reliability"],
-            "correction_bound": correction_bound,
-            "base_heads": "linear_linear",
-            "gradient_contract": "safe_direct_base_detached_rg_cma",
-        }
-    clean_cross_modal = architecture_variant in {
-        ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
-        ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED,
-        ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA,
-        ARCHITECTURE_LEGACY_CLEAN_6X6_CMA,
-        ARCHITECTURE_CLEAN_CROSS_MODAL,
-        ARCHITECTURE_SELECTIVE_CORRECTION,
-    }
-    base_conditioned = (
-        architecture_variant
-        == ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED
-    )
-    direct_base = architecture_variant in {
-        ARCHITECTURE_DIRECT_BASE,
-        ARCHITECTURE_CLEAN_CROSS_MODAL,
-        ARCHITECTURE_SELECTIVE_CORRECTION,
-    }
-    descriptor = {
+    # Preserve the schema hashes used by base IWG checkpoints.
+    return {
         "name": name,
-        "architecture_variant": architecture_variant,
-        "iwg_context_size": int(context_size),
+        "iwg_context_size": IWG_CONTEXT_SIZE,
         "modal_token_dim": 64,
         "attention_dim": RG_CMA_DIM,
         "attention_heads": RG_CMA_HEADS,
         "attention_dropout": 0.1,
-        "cross_modal_tokens": (
-            ["motion", "appearance"]
-            if clean_cross_modal
-            else ["motion", "appearance", "reliability"]
-        ),
+        "cross_modal_tokens": ["motion", "appearance", "reliability"],
         "correction_bound": correction_bound,
-        "base_gate": (
-            "direct_continuous_aux_policy_detached"
-            if direct_base
-            else "policy_prototype_plus_bounded_residual"
-        ),
-        "modal_split": (
-            "reid_appearance_vs_geometry_kf_motion"
-            if clean_cross_modal
-            else "reid_appearance_vs_scalar63"
-        ),
-        "reliability_control": (
-            "separate_two_channel_scale"
-            if architecture_variant == ARCHITECTURE_SELECTIVE_CORRECTION
-            else "base_conditioned_correction_head"
-            if base_conditioned
-            else "none" if clean_cross_modal else "cross_attention_token"
-        ),
+        "base_heads": "linear_linear",
         "gradient_contract": "safe_direct_base_detached_rg_cma",
     }
-    if architecture_variant == ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA:
-        descriptor["cross_modal_operator"] = (
-            "bidirectional_history_attention_plus_two_token_fusion"
-        )
-    if architecture_variant == ARCHITECTURE_LEGACY_CLEAN_6X6_CMA:
-        descriptor["cross_modal_operator"] = (
-            "shared_bidirectional_full_history_6x6_attention"
-        )
-        descriptor["cross_modal_readout"] = "endpoint_query_temporal_attention"
-        descriptor["cross_modal_fusion"] = "none"
-    return descriptor
 
 
 def _descriptor_sha256(descriptor: dict[str, Any]) -> str:
@@ -162,114 +66,6 @@ IWG_RG_CMA_MODEL_DESCRIPTOR = _model_descriptor(
 )
 IWG_RG_CMA_MODEL_SCHEMA_SHA256 = _descriptor_sha256(IWG_RG_CMA_MODEL_DESCRIPTOR)
 
-IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA = "agentguard_iwg_rg_cma_v3"
-IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_DESCRIPTOR = _model_descriptor(
-    IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA,
-    RG_CMA_LEGACY_CORRECTION_BOUND,
-    context_size=8,
-)
-IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA_SHA256 = _descriptor_sha256(
-    IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_DESCRIPTOR
-)
-
-IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA = "agentguard_iwg_rg_cma_v4"
-IWG_RG_CMA_CONTEXT8_MODEL_DESCRIPTOR = _model_descriptor(
-    IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA,
-    RG_CMA_CORRECTION_BOUND,
-    context_size=8,
-)
-IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA_SHA256 = _descriptor_sha256(
-    IWG_RG_CMA_CONTEXT8_MODEL_DESCRIPTOR
-)
-
-IWG_RG_CMA_DIRECT_BASE_MODEL_SCHEMA = "agentguard_iwg_rg_cma_direct_base_v1"
-IWG_RG_CMA_DIRECT_BASE_MODEL_DESCRIPTOR = _model_descriptor(
-    IWG_RG_CMA_DIRECT_BASE_MODEL_SCHEMA,
-    RG_CMA_LEGACY_CORRECTION_BOUND,
-    architecture_variant=ARCHITECTURE_DIRECT_BASE,
-)
-IWG_RG_CMA_DIRECT_BASE_MODEL_SCHEMA_SHA256 = _descriptor_sha256(
-    IWG_RG_CMA_DIRECT_BASE_MODEL_DESCRIPTOR
-)
-
-IWG_RG_CMA_LEGACY_CLEAN_CROSS_MODAL_MODEL_SCHEMA = (
-    "agentguard_iwg_rg_cma_legacy_clean_cross_modal_v1"
-)
-IWG_RG_CMA_LEGACY_CLEAN_CROSS_MODAL_MODEL_DESCRIPTOR = _model_descriptor(
-    IWG_RG_CMA_LEGACY_CLEAN_CROSS_MODAL_MODEL_SCHEMA,
-    RG_CMA_LEGACY_CORRECTION_BOUND,
-    architecture_variant=ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
-)
-IWG_RG_CMA_LEGACY_CLEAN_CROSS_MODAL_MODEL_SCHEMA_SHA256 = _descriptor_sha256(
-    IWG_RG_CMA_LEGACY_CLEAN_CROSS_MODAL_MODEL_DESCRIPTOR
-)
-
-IWG_RG_CMA_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED_MODEL_SCHEMA = (
-    "agentguard_iwg_rg_cma_legacy_clean_cross_modal_base_conditioned_v1"
-)
-IWG_RG_CMA_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED_MODEL_DESCRIPTOR = (
-    _model_descriptor(
-        IWG_RG_CMA_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED_MODEL_SCHEMA,
-        RG_CMA_LEGACY_CORRECTION_BOUND,
-        architecture_variant=ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED,
-    )
-)
-IWG_RG_CMA_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED_MODEL_SCHEMA_SHA256 = (
-    _descriptor_sha256(
-        IWG_RG_CMA_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED_MODEL_DESCRIPTOR
-    )
-)
-
-IWG_RG_CMA_LEGACY_CLEAN_BIDIRECTIONAL_CMA_MODEL_SCHEMA = (
-    "agentguard_iwg_rg_cma_legacy_clean_bidirectional_cma_v1"
-)
-IWG_RG_CMA_LEGACY_CLEAN_BIDIRECTIONAL_CMA_MODEL_DESCRIPTOR = _model_descriptor(
-    IWG_RG_CMA_LEGACY_CLEAN_BIDIRECTIONAL_CMA_MODEL_SCHEMA,
-    RG_CMA_LEGACY_CORRECTION_BOUND,
-    architecture_variant=ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA,
-)
-IWG_RG_CMA_LEGACY_CLEAN_BIDIRECTIONAL_CMA_MODEL_SCHEMA_SHA256 = (
-    _descriptor_sha256(
-        IWG_RG_CMA_LEGACY_CLEAN_BIDIRECTIONAL_CMA_MODEL_DESCRIPTOR
-    )
-)
-
-IWG_RG_CMA_LEGACY_CLEAN_6X6_CMA_MODEL_SCHEMA = (
-    "agentguard_iwg_rg_cma_legacy_clean_6x6_cma_v1"
-)
-IWG_RG_CMA_LEGACY_CLEAN_6X6_CMA_MODEL_DESCRIPTOR = _model_descriptor(
-    IWG_RG_CMA_LEGACY_CLEAN_6X6_CMA_MODEL_SCHEMA,
-    RG_CMA_LEGACY_CORRECTION_BOUND,
-    architecture_variant=ARCHITECTURE_LEGACY_CLEAN_6X6_CMA,
-)
-IWG_RG_CMA_LEGACY_CLEAN_6X6_CMA_MODEL_SCHEMA_SHA256 = _descriptor_sha256(
-    IWG_RG_CMA_LEGACY_CLEAN_6X6_CMA_MODEL_DESCRIPTOR
-)
-
-IWG_RG_CMA_CLEAN_CROSS_MODAL_MODEL_SCHEMA = (
-    "agentguard_iwg_rg_cma_clean_cross_modal_v1"
-)
-IWG_RG_CMA_CLEAN_CROSS_MODAL_MODEL_DESCRIPTOR = _model_descriptor(
-    IWG_RG_CMA_CLEAN_CROSS_MODAL_MODEL_SCHEMA,
-    RG_CMA_LEGACY_CORRECTION_BOUND,
-    architecture_variant=ARCHITECTURE_CLEAN_CROSS_MODAL,
-)
-IWG_RG_CMA_CLEAN_CROSS_MODAL_MODEL_SCHEMA_SHA256 = _descriptor_sha256(
-    IWG_RG_CMA_CLEAN_CROSS_MODAL_MODEL_DESCRIPTOR
-)
-
-IWG_RG_CMA_SELECTIVE_CORRECTION_MODEL_SCHEMA = (
-    "agentguard_iwg_rg_cma_selective_correction_v1"
-)
-IWG_RG_CMA_SELECTIVE_CORRECTION_MODEL_DESCRIPTOR = _model_descriptor(
-    IWG_RG_CMA_SELECTIVE_CORRECTION_MODEL_SCHEMA,
-    RG_CMA_LEGACY_CORRECTION_BOUND,
-    architecture_variant=ARCHITECTURE_SELECTIVE_CORRECTION,
-)
-IWG_RG_CMA_SELECTIVE_CORRECTION_MODEL_SCHEMA_SHA256 = _descriptor_sha256(
-    IWG_RG_CMA_SELECTIVE_CORRECTION_MODEL_DESCRIPTOR
-)
-
 MODEL_CONTRACT_SPECS = {
     (IWG_RG_CMA_LEGACY_MODEL_SCHEMA, IWG_RG_CMA_LEGACY_MODEL_SCHEMA_SHA256): {
         "correction_bound": RG_CMA_LEGACY_CORRECTION_BOUND,
@@ -282,91 +78,6 @@ MODEL_CONTRACT_SPECS = {
         "context_size": 6,
         "architecture_variant": ARCHITECTURE_LEGACY,
         "descriptor": IWG_RG_CMA_MODEL_DESCRIPTOR,
-    },
-    (
-        IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA,
-        IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA_SHA256,
-    ): {
-        "correction_bound": RG_CMA_LEGACY_CORRECTION_BOUND,
-        "context_size": 8,
-        "architecture_variant": ARCHITECTURE_LEGACY,
-        "descriptor": IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_DESCRIPTOR,
-    },
-    (
-        IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA,
-        IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA_SHA256,
-    ): {
-        "correction_bound": RG_CMA_CORRECTION_BOUND,
-        "context_size": 8,
-        "architecture_variant": ARCHITECTURE_LEGACY,
-        "descriptor": IWG_RG_CMA_CONTEXT8_MODEL_DESCRIPTOR,
-    },
-    (
-        IWG_RG_CMA_DIRECT_BASE_MODEL_SCHEMA,
-        IWG_RG_CMA_DIRECT_BASE_MODEL_SCHEMA_SHA256,
-    ): {
-        "correction_bound": RG_CMA_LEGACY_CORRECTION_BOUND,
-        "context_size": 6,
-        "architecture_variant": ARCHITECTURE_DIRECT_BASE,
-        "descriptor": IWG_RG_CMA_DIRECT_BASE_MODEL_DESCRIPTOR,
-    },
-    (
-        IWG_RG_CMA_LEGACY_CLEAN_CROSS_MODAL_MODEL_SCHEMA,
-        IWG_RG_CMA_LEGACY_CLEAN_CROSS_MODAL_MODEL_SCHEMA_SHA256,
-    ): {
-        "correction_bound": RG_CMA_LEGACY_CORRECTION_BOUND,
-        "context_size": 6,
-        "architecture_variant": ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
-        "descriptor": IWG_RG_CMA_LEGACY_CLEAN_CROSS_MODAL_MODEL_DESCRIPTOR,
-    },
-    (
-        IWG_RG_CMA_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED_MODEL_SCHEMA,
-        IWG_RG_CMA_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED_MODEL_SCHEMA_SHA256,
-    ): {
-        "correction_bound": RG_CMA_LEGACY_CORRECTION_BOUND,
-        "context_size": 6,
-        "architecture_variant": (
-            ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED
-        ),
-        "descriptor": (
-            IWG_RG_CMA_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED_MODEL_DESCRIPTOR
-        ),
-    },
-    (
-        IWG_RG_CMA_LEGACY_CLEAN_BIDIRECTIONAL_CMA_MODEL_SCHEMA,
-        IWG_RG_CMA_LEGACY_CLEAN_BIDIRECTIONAL_CMA_MODEL_SCHEMA_SHA256,
-    ): {
-        "correction_bound": RG_CMA_LEGACY_CORRECTION_BOUND,
-        "context_size": 6,
-        "architecture_variant": ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA,
-        "descriptor": IWG_RG_CMA_LEGACY_CLEAN_BIDIRECTIONAL_CMA_MODEL_DESCRIPTOR,
-    },
-    (
-        IWG_RG_CMA_LEGACY_CLEAN_6X6_CMA_MODEL_SCHEMA,
-        IWG_RG_CMA_LEGACY_CLEAN_6X6_CMA_MODEL_SCHEMA_SHA256,
-    ): {
-        "correction_bound": RG_CMA_LEGACY_CORRECTION_BOUND,
-        "context_size": 6,
-        "architecture_variant": ARCHITECTURE_LEGACY_CLEAN_6X6_CMA,
-        "descriptor": IWG_RG_CMA_LEGACY_CLEAN_6X6_CMA_MODEL_DESCRIPTOR,
-    },
-    (
-        IWG_RG_CMA_CLEAN_CROSS_MODAL_MODEL_SCHEMA,
-        IWG_RG_CMA_CLEAN_CROSS_MODAL_MODEL_SCHEMA_SHA256,
-    ): {
-        "correction_bound": RG_CMA_LEGACY_CORRECTION_BOUND,
-        "context_size": 6,
-        "architecture_variant": ARCHITECTURE_CLEAN_CROSS_MODAL,
-        "descriptor": IWG_RG_CMA_CLEAN_CROSS_MODAL_MODEL_DESCRIPTOR,
-    },
-    (
-        IWG_RG_CMA_SELECTIVE_CORRECTION_MODEL_SCHEMA,
-        IWG_RG_CMA_SELECTIVE_CORRECTION_MODEL_SCHEMA_SHA256,
-    ): {
-        "correction_bound": RG_CMA_LEGACY_CORRECTION_BOUND,
-        "context_size": 6,
-        "architecture_variant": ARCHITECTURE_SELECTIVE_CORRECTION,
-        "descriptor": IWG_RG_CMA_SELECTIVE_CORRECTION_MODEL_DESCRIPTOR,
     },
 }
 
@@ -473,7 +184,6 @@ class SafeDirectIWG(IWG):
         scalar_dim: int = 63,
         event_dim: int = 128,
         context_size: int = IWG_CONTEXT_SIZE,
-        architecture_variant: str = ARCHITECTURE_LEGACY,
     ):
         super().__init__(
             reid_dim=reid_dim,
@@ -481,7 +191,6 @@ class SafeDirectIWG(IWG):
             event_dim=event_dim,
             context_size=context_size,
         )
-        self.architecture_variant = str(architecture_variant)
         self.policy_head = _linear_head(event_dim, 64, 5)
         self.iwg_gate_residual_head = _linear_head(event_dim, 64, 2)
 
@@ -524,13 +233,7 @@ class SafeDirectIWG(IWG):
         )
 
     def _apply_safe_heads(self, event_embedding: torch.Tensor) -> dict[str, torch.Tensor]:
-        direct_base = self.architecture_variant in {
-            ARCHITECTURE_DIRECT_BASE,
-            ARCHITECTURE_CLEAN_CROSS_MODAL,
-            ARCHITECTURE_SELECTIVE_CORRECTION,
-        }
-        policy_input = event_embedding.detach() if direct_base else event_embedding
-        policy_logits = self.policy_head(policy_input)
+        policy_logits = self.policy_head(event_embedding)
         policy_probs = F.softmax(policy_logits, dim=-1)
         residual = self.iwg_gate_residual_head(event_embedding)
         detached = event_embedding.detach()
@@ -541,12 +244,9 @@ class SafeDirectIWG(IWG):
             device=policy_probs.device,
             dtype=policy_probs.dtype,
         )
-        if direct_base:
-            base_gate = torch.sigmoid(residual)
-        else:
-            base_gate = torch.clamp(
-                policy_probs @ prototype + 0.15 * torch.tanh(residual), 0.0, 1.0
-            )
+        base_gate = torch.clamp(
+            policy_probs @ prototype + 0.15 * torch.tanh(residual), 0.0, 1.0
+        )
         return {
             "policy_logits": policy_logits,
             "policy_probs": policy_probs,
@@ -669,10 +369,10 @@ class IWGRGCMA(nn.Module):
         super().__init__()
         correction_bound = float(correction_bound)
         context_size = int(context_size)
-        if context_size not in SUPPORTED_IWG_CONTEXT_SIZES:
+        if context_size != IWG_CONTEXT_SIZE:
             raise ValueError(
                 "unsupported RG-CMA context_size: "
-                f"{context_size}; expected one of {sorted(SUPPORTED_IWG_CONTEXT_SIZES)}"
+                f"{context_size}; expected {IWG_CONTEXT_SIZE}"
             )
         if not math.isfinite(correction_bound) or not 0.0 < correction_bound <= 1.0:
             raise ValueError(
@@ -693,86 +393,18 @@ class IWGRGCMA(nn.Module):
                 f"{architecture_variant!r}; expected one of "
                 f"{sorted(SUPPORTED_ARCHITECTURE_VARIANTS)}"
             )
-        if architecture_variant != ARCHITECTURE_LEGACY and (
-            context_size != IWG_CONTEXT_SIZE
-            or not math.isclose(
-                correction_bound,
-                RG_CMA_LEGACY_CORRECTION_BOUND,
-                rel_tol=0.0,
-                abs_tol=1e-12,
-            )
-        ):
-            raise ValueError(
-                "structural ablations require context_size=6 and "
-                "correction_bound=0.05"
-            )
-        if (
-            architecture_variant
-            in {
-                ARCHITECTURE_CLEAN_CROSS_MODAL,
-                ARCHITECTURE_SELECTIVE_CORRECTION,
-                ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
-                ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED,
-                ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA,
-                ARCHITECTURE_LEGACY_CLEAN_6X6_CMA,
-            }
-            and reliability_mode != RELIABILITY_MODE_FULL
-        ):
-            raise ValueError(
-                "clean cross-modal ablations require reliability_mode='full'"
-            )
         self.scalar_dim = int(scalar_dim)
         self.correction_bound = correction_bound
         self.context_size = context_size
         self.reliability_mode = reliability_mode
         self.architecture_variant = architecture_variant
-        self.uses_clean_modalities = architecture_variant in {
-            ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
-            ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED,
-            ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA,
-            ARCHITECTURE_LEGACY_CLEAN_6X6_CMA,
-            ARCHITECTURE_CLEAN_CROSS_MODAL,
-            ARCHITECTURE_SELECTIVE_CORRECTION,
-        }
-        self.uses_selective_correction = (
-            architecture_variant == ARCHITECTURE_SELECTIVE_CORRECTION
-        )
-        self.uses_base_conditioned_correction = (
-            architecture_variant
-            == ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED
-        )
-        self.uses_bidirectional_history_cma = (
-            architecture_variant == ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA
-        )
-        self.uses_full_history_cma = (
-            architecture_variant == ARCHITECTURE_LEGACY_CLEAN_6X6_CMA
-        )
-        self.cross_modal_token_count = 2 if self.uses_clean_modalities else 3
+        self.cross_modal_token_count = 3
         self.iwg = SafeDirectIWG(
             reid_dim=reid_dim,
             scalar_dim=scalar_dim,
             event_dim=event_dim,
             context_size=context_size,
-            architecture_variant=architecture_variant,
         )
-        if self.uses_clean_modalities:
-            self.clean_motion_encoder = nn.Sequential(
-                nn.LayerNorm(len(CLEAN_MOTION_SCALAR_INDICES)),
-                nn.Linear(len(CLEAN_MOTION_SCALAR_INDICES), 128),
-                nn.GELU(),
-                nn.Linear(128, 64),
-                nn.LayerNorm(64),
-            )
-            self.register_buffer(
-                "_clean_motion_indices",
-                torch.tensor(CLEAN_MOTION_SCALAR_INDICES, dtype=torch.long),
-                persistent=False,
-            )
-            self.register_buffer(
-                "_clean_reliability_indices",
-                torch.tensor(CLEAN_RELIABILITY_SCALAR_INDICES, dtype=torch.long),
-                persistent=False,
-            )
         self.motion_projection = nn.Linear(64, RG_CMA_DIM)
         self.appearance_projection = nn.Linear(64, RG_CMA_DIM)
         self.modality_embedding = nn.Parameter(torch.zeros(2, RG_CMA_DIM))
@@ -787,50 +419,18 @@ class IWGRGCMA(nn.Module):
         self.appearance_temporal_attention = nn.MultiheadAttention(
             RG_CMA_DIM, RG_CMA_HEADS, dropout=0.1, batch_first=True
         )
-        if self.uses_bidirectional_history_cma:
-            self.appearance_to_motion_cross_attention = nn.MultiheadAttention(
-                RG_CMA_DIM, RG_CMA_HEADS, dropout=0.1, batch_first=True
-            )
-            self.motion_to_appearance_cross_attention = nn.MultiheadAttention(
-                RG_CMA_DIM, RG_CMA_HEADS, dropout=0.1, batch_first=True
-            )
-            self.motion_cross_modal_norm = nn.LayerNorm(RG_CMA_DIM)
-            self.appearance_cross_modal_norm = nn.LayerNorm(RG_CMA_DIM)
-            self.motion_cross_modal_dropout = nn.Dropout(0.1)
-            self.appearance_cross_modal_dropout = nn.Dropout(0.1)
-        if self.uses_full_history_cma:
-            self.bidirectional_history_cross_attention = nn.MultiheadAttention(
-                RG_CMA_DIM, RG_CMA_HEADS, dropout=0.1, batch_first=True
-            )
-            self.motion_history_cross_norm = nn.LayerNorm(RG_CMA_DIM)
-            self.appearance_history_cross_norm = nn.LayerNorm(RG_CMA_DIM)
-            self.history_cross_dropout = nn.Dropout(0.1)
-        if not self.uses_clean_modalities:
-            reliability_dim = 2 + 5 + 3 + 4 + self.scalar_dim
-            self.reliability_projection = nn.Linear(reliability_dim, RG_CMA_DIM)
-        if not self.uses_full_history_cma:
-            self.cross_modality_embedding = nn.Parameter(
-                torch.zeros(self.cross_modal_token_count, RG_CMA_DIM)
-            )
-            nn.init.normal_(self.cross_modality_embedding, mean=0.0, std=0.02)
-            self.cross_modal_attention = RecordingTransformerEncoderLayer()
-        correction_head_input_dim = RG_CMA_DIM + (
-            1 if self.uses_base_conditioned_correction else 0
+        reliability_dim = 2 + 5 + 3 + 4 + self.scalar_dim
+        self.reliability_projection = nn.Linear(reliability_dim, RG_CMA_DIM)
+        self.cross_modality_embedding = nn.Parameter(
+            torch.zeros(self.cross_modal_token_count, RG_CMA_DIM)
         )
-        self.motion_correction_head = make_head(correction_head_input_dim, 64, 1)
-        self.appearance_correction_head = make_head(
-            correction_head_input_dim, 64, 1
-        )
+        nn.init.normal_(self.cross_modality_embedding, mean=0.0, std=0.02)
+        self.cross_modal_attention = RecordingTransformerEncoderLayer()
+        self.motion_correction_head = make_head(RG_CMA_DIM, 64, 1)
+        self.appearance_correction_head = make_head(RG_CMA_DIM, 64, 1)
         for head in (self.motion_correction_head, self.appearance_correction_head):
             nn.init.zeros_(head[-1].weight)
             nn.init.zeros_(head[-1].bias)
-        if self.uses_selective_correction:
-            selective_reliability_dim = (
-                2 + 3 + 4 + len(CLEAN_RELIABILITY_SCALAR_INDICES)
-            )
-            self.reliability_gate_head = make_head(
-                selective_reliability_dim, 64, 2
-            )
 
     @staticmethod
     def _apply_unmatched_sentinel(
@@ -870,14 +470,6 @@ class IWGRGCMA(nn.Module):
         probabilities = weights.float().clamp(min=1e-8)
         return -(probabilities * probabilities.log()).sum(dim=-1).mean(dim=-1)
 
-    def _encode_clean_motion(self, scalar_feats: torch.Tensor) -> torch.Tensor:
-        if not self.uses_clean_modalities:
-            raise RuntimeError("clean motion encoding requires a clean-modal variant")
-        motion_scalars = scalar_feats.index_select(
-            -1, self._clean_motion_indices.to(device=scalar_feats.device)
-        )
-        return self.clean_motion_encoder(motion_scalars)
-
     def _refine_flat(
         self,
         *,
@@ -889,10 +481,8 @@ class IWGRGCMA(nn.Module):
         has_detection: torch.BoolTensor,
         return_diagnostics: bool = True,
     ) -> dict[str, torch.Tensor]:
-        # Base-IWG producers are detached. The clean motion encoder belongs to
-        # RG-CMA and must retain gradients in the structural ablations.
-        if not self.uses_clean_modalities:
-            motion_windows = motion_windows.detach()
+        # Keep the refinement loss isolated from the base IWG encoders.
+        motion_windows = motion_windows.detach()
         appearance_windows = appearance_windows.detach()
         positions = self.relative_position_embedding.unsqueeze(0)
         motion_values = (
@@ -906,40 +496,6 @@ class IWGRGCMA(nn.Module):
             + positions
         )
         safe_mask = self._safe_attention_mask(window_mask)
-        appearance_to_motion_weights = None
-        motion_to_appearance_weights = None
-        appearance_to_motion_6x6_weights = None
-        motion_to_appearance_6x6_weights = None
-        if self.uses_full_history_cma:
-            # Shared weights keep the two modality directions symmetric. Each
-            # history token queries the complete opposite-modality history.
-            appearance_to_motion, appearance_to_motion_6x6_weights = (
-                self.bidirectional_history_cross_attention(
-                    motion_values,
-                    appearance_values,
-                    appearance_values,
-                    key_padding_mask=safe_mask,
-                    need_weights=return_diagnostics,
-                    average_attn_weights=False,
-                )
-            )
-            motion_to_appearance, motion_to_appearance_6x6_weights = (
-                self.bidirectional_history_cross_attention(
-                    appearance_values,
-                    motion_values,
-                    motion_values,
-                    key_padding_mask=safe_mask,
-                    need_weights=return_diagnostics,
-                    average_attn_weights=False,
-                )
-            )
-            motion_values = self.motion_history_cross_norm(
-                motion_values + self.history_cross_dropout(appearance_to_motion)
-            )
-            appearance_values = self.appearance_history_cross_norm(
-                appearance_values
-                + self.history_cross_dropout(motion_to_appearance)
-            )
         motion_query = motion_values[:, -1:, :]
         appearance_query = appearance_values[:, -1:, :]
         motion_summary, motion_weights = self.motion_temporal_attention(
@@ -958,84 +514,26 @@ class IWGRGCMA(nn.Module):
             need_weights=return_diagnostics,
             average_attn_weights=False,
         )
-        if self.uses_bidirectional_history_cma:
-            appearance_to_motion, appearance_to_motion_weights = (
-                self.appearance_to_motion_cross_attention(
-                    motion_summary,
-                    appearance_values,
-                    appearance_values,
-                    key_padding_mask=safe_mask,
-                    need_weights=return_diagnostics,
-                    average_attn_weights=False,
-                )
-            )
-            motion_to_appearance, motion_to_appearance_weights = (
-                self.motion_to_appearance_cross_attention(
-                    appearance_summary,
-                    motion_values,
-                    motion_values,
-                    key_padding_mask=safe_mask,
-                    need_weights=return_diagnostics,
-                    average_attn_weights=False,
-                )
-            )
-            motion_summary = self.motion_cross_modal_norm(
-                motion_summary
-                + self.motion_cross_modal_dropout(appearance_to_motion)
-            )
-            appearance_summary = self.appearance_cross_modal_norm(
-                appearance_summary
-                + self.appearance_cross_modal_dropout(motion_to_appearance)
-            )
-        cross_weights = None
-        if self.uses_full_history_cma:
-            # The endpoint temporal summaries already include cross-modal
-            # history, so this variant intentionally omits 2-token fusion.
-            motion_head_input = motion_summary[:, 0]
-            appearance_head_input = appearance_summary[:, 0]
-        else:
-            if self.uses_clean_modalities:
-                cross_tokens = torch.cat(
-                    [motion_summary, appearance_summary], dim=1
-                )
-            else:
-                reliability_input = self._build_reliability_input(
-                    scalar_current=scalar_current,
-                    base_outputs=base_outputs,
-                )
-                reliability = self.reliability_projection(reliability_input).unsqueeze(1)
-                cross_tokens = torch.cat(
-                    [motion_summary, appearance_summary, reliability], dim=1
-                )
-            cross_tokens = cross_tokens + self.cross_modality_embedding.unsqueeze(0)
-            attended, cross_weights = self.cross_modal_attention(
-                cross_tokens, return_diagnostics=return_diagnostics
-            )
-            motion_head_input = attended[:, 0]
-            appearance_head_input = attended[:, 1]
-        if self.uses_base_conditioned_correction:
-            base_gate = base_outputs["base_gate"].detach()
-            motion_head_input = torch.cat(
-                [motion_head_input, base_gate[:, 0:1]], dim=-1
-            )
-            appearance_head_input = torch.cat(
-                [appearance_head_input, base_gate[:, 1:2]], dim=-1
-            )
+        reliability_input = self._build_reliability_input(
+            scalar_current=scalar_current,
+            base_outputs=base_outputs,
+        )
+        reliability = self.reliability_projection(reliability_input).unsqueeze(1)
+        cross_tokens = torch.cat(
+            [motion_summary, appearance_summary, reliability], dim=1
+        )
+        cross_tokens = cross_tokens + self.cross_modality_embedding.unsqueeze(0)
+        attended, cross_weights = self.cross_modal_attention(
+            cross_tokens, return_diagnostics=return_diagnostics
+        )
+        motion_head_input = attended[:, 0]
+        appearance_head_input = attended[:, 1]
         motion_raw = self.motion_correction_head(motion_head_input)
         appearance_raw = self.appearance_correction_head(appearance_head_input)
         raw_correction = self.correction_bound * torch.tanh(
             torch.cat([motion_raw, appearance_raw], dim=-1)
         )
-        if self.uses_selective_correction:
-            selective_input = self._build_selective_reliability_input(
-                scalar_current=scalar_current,
-                base_outputs=base_outputs,
-            )
-            correction_scale = torch.sigmoid(
-                self.reliability_gate_head(selective_input)
-            )
-        else:
-            correction_scale = torch.ones_like(raw_correction)
+        correction_scale = torch.ones_like(raw_correction)
         correction = raw_correction * correction_scale
         correction = correction.masked_fill(~has_detection.unsqueeze(-1), 0.0)
         refined = torch.clamp(base_outputs["base_gate"].detach() + correction, 0.0, 1.0)
@@ -1057,22 +555,7 @@ class IWGRGCMA(nn.Module):
             result["appearance_attention_entropy"] = self._attention_entropy(
                 appearance_weights
             )
-            if appearance_to_motion_weights is not None:
-                result["appearance_to_motion_attention_weights"] = (
-                    appearance_to_motion_weights.squeeze(2)
-                )
-                result["motion_to_appearance_attention_weights"] = (
-                    motion_to_appearance_weights.squeeze(2)
-                )
-            if appearance_to_motion_6x6_weights is not None:
-                result["appearance_to_motion_6x6_attention_weights"] = (
-                    appearance_to_motion_6x6_weights
-                )
-                result["motion_to_appearance_6x6_attention_weights"] = (
-                    motion_to_appearance_6x6_weights
-                )
-            if cross_weights is not None:
-                result["cross_modal_attention_weights"] = cross_weights
+            result["cross_modal_attention_weights"] = cross_weights
         return result
 
     def _build_reliability_input(
@@ -1097,29 +580,6 @@ class IWGRGCMA(nn.Module):
             dim=-1,
         )
 
-    def _build_selective_reliability_input(
-        self,
-        *,
-        scalar_current: torch.Tensor,
-        base_outputs: dict[str, torch.Tensor],
-    ) -> torch.Tensor:
-        if not self.uses_selective_correction:
-            raise RuntimeError(
-                "selective reliability input requires selective-correction"
-            )
-        reliability_scalar = scalar_current.detach().index_select(
-            -1, self._clean_reliability_indices.to(device=scalar_current.device)
-        )
-        return torch.cat(
-            [
-                base_outputs["base_gate"].detach(),
-                base_outputs["cue"].detach(),
-                base_outputs["risk"].detach(),
-                reliability_scalar,
-            ],
-            dim=-1,
-        )
-
     def forward(
         self,
         track_feats: torch.Tensor,
@@ -1136,15 +596,11 @@ class IWGRGCMA(nn.Module):
         history_padding = base.pop("_history_padding_mask")
         appearance_history = base.pop("_appearance_history")
         motion_history = base.pop("_motion_history")
-        if self.uses_clean_modalities:
-            motion_history = self._encode_clean_motion(scalar_feats)
         indices = _last_valid_indices(history_padding)
         has_current = _current_detection_mask(
             history_padding, has_detection_mask, indices
         )
         base = self._apply_unmatched_sentinel(base, has_current)
-        if self.uses_clean_modalities:
-            base["motion_token"] = _gather_position(motion_history, indices)
         motion_windows, window_mask = _causal_windows(
             motion_history, history_padding, reset_mask, self.context_size
         )
@@ -1187,8 +643,6 @@ class IWGRGCMA(nn.Module):
                 raise ValueError("has_detection_mask must match padding_mask")
             detection = has_detection_mask.bool() & ~padding
         base = self._apply_unmatched_sentinel(base, detection)
-        if self.uses_clean_modalities:
-            base["motion_token"] = self._encode_clean_motion(scalar_feats)
         motion_windows, window_mask = _causal_windows(
             base["motion_token"], padding, reset_mask, self.context_size
         )
@@ -1254,7 +708,7 @@ def model_contract(
             "unsupported RG-CMA architecture_variant for checkpoint contract: "
             f"{architecture_variant!r}"
         )
-    if context_size not in SUPPORTED_IWG_CONTEXT_SIZES:
+    if context_size != IWG_CONTEXT_SIZE:
         raise ValueError(
             "unsupported RG-CMA context_size for checkpoint contract: "
             f"{context_size}"

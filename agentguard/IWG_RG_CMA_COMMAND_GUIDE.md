@@ -110,9 +110,8 @@ run.py test（CPU、final、post、无 TrackEval）
 | SportsMOT train | `outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_train_v3_compact` |
 | SportsMOT train+val | `outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_trainval_v3_compact` |
 | SportsMOT train+val，NSA future horizon=8，输入 context=6 | `outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_trainval_h8_v3_compact` |
-| SportsMOT train+val，NSA future horizon=8，输入 context=8 | `outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_trainval_future8_context8_v3_compact` |
 
-这里必须区分两个参数：`future horizon` 是 GT rollout 标签向未来看的帧数；`context size` 是网络和在线 tracker 实际输入的历史事件数。目录名中的 `h8` 只表示 future horizon=8，不能据此判断网络输入已经是 8 帧。构建输入数据时用 `build_iwg_rg_cma_data --context-size 8`，训练时用 `train_iwg_rg_cma --context-size 8`。
+这里必须区分两个参数：`future horizon` 是 GT rollout 标签向未来看的帧数；`context size` 是网络和在线 tracker 实际输入的历史事件数。目录名中的 `h8` 表示 future horizon=8。IWG/RG-CMA 的数据构建、训练和在线推理使用 6 个历史事件。
 
 统一缓存位置：
 

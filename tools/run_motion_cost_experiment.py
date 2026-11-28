@@ -33,7 +33,7 @@ VAL_SEQS = tuple(
 )
 LAMBDAS = (0.0, 0.25, 1.0, 4.0)
 HEAVY = {"train_motion_cost_bce.py", "train_supervision_groups.py", "run.py",
-         "generate_trainval_paired.py", "arch_night_test_submit.py",
+         "generate_trainval_paired.py", "collect_pending_data.py",
          "verify_motion_cost_bce.py", "evaluate_motion_gate_targets.py"}
 STATE_PATH = EXP / "state.json"
 LOGS = EXP / "logs"

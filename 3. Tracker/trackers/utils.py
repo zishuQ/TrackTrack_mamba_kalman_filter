@@ -10,8 +10,7 @@ COMPACT_SNAPSHOT_HISTORY = 6
 #   * conf_distance's second-most-recent score
 #   * scalar-feature last-3 scores
 #   * compact snapshots of the last 6 observations
-# It is not the IWG context size (6 or 8). Age and maturity use
-# observation_count, not this container length.
+# IWG uses a separate 6-event input window. Age and maturity use observation_count.
 ONLINE_HISTORY_KEEP = 8
 
 

@@ -50,6 +50,7 @@ from agentguard.data.detection_cache import SequenceDetectionCache
 from shutrack.models.shutrack import ShutrackV2Config, ShutrackV2Model
 from shutrack.training.checkpoint import (
     build_checkpoint_payload,
+    load_init_weights,
     load_shutrack_checkpoint,
     save_checkpoint_atomic,
 )
@@ -62,9 +63,7 @@ from shutrack.training.loss import (
     motion_speed4_l1_loss,
     motion_speed_l1_loss,
 )
-from shutrack.training.train import _load_init_state_with_extension, _seed_everything
 from shutrack.training.defaults import (
-    LEGACY_APPEARANCE_PROJ_DIM, LEGACY_ARCHITECTURE_VARIANT,
     MAINLINE_APPEARANCE_PROJ_DIM, MAINLINE_ARCHITECTURE_VARIANT,
     MAINLINE_STAGE_CHUNK_SAMPLES,
 )
@@ -78,10 +77,17 @@ from shutrack.schema import EVIDENCE_SCALAR_INDICES, COMPETITION_SCALAR_INDICES
 ROOT = MAIN / "outputs/agentguard/experiments/shutrack_a_supervision_trainval_20261118"
 DATA = ROOT / "data"
 CACHE = MAIN / "outputs/agentguard/detection_cache"
-INIT_CKPT = MAIN / "outputs/agentguard/experiments/shutrack_a_submit_20261117/SportsMOT/checkpoints/last.pt"
 SHARDS = 4
 CYCLES = 10
 EPOCHS = SHARDS * CYCLES
+
+
+def _seed_everything(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    os.environ.setdefault("PYTHONHASHSEED", str(seed))
 
 
 def tau_of(values: list[np.ndarray]) -> float:
@@ -722,15 +728,13 @@ def validate_replay_summary(
 
 
 def resolve_model_options(args) -> tuple[str, int]:
-    """Resolve the shared mainline default; legacy runs opt out explicitly."""
+    """Resolve the model and its appearance projection width."""
     variant = getattr(args, "architecture_variant", MAINLINE_ARCHITECTURE_VARIANT)
-    if variant not in (LEGACY_ARCHITECTURE_VARIANT, MAINLINE_ARCHITECTURE_VARIANT):
+    if variant != MAINLINE_ARCHITECTURE_VARIANT:
         raise ValueError(f"Unknown architecture_variant: {variant!r}")
     width = getattr(args, "appearance_proj_dim", None)
     if width is None:
-        width = (MAINLINE_APPEARANCE_PROJ_DIM
-                 if variant == MAINLINE_ARCHITECTURE_VARIANT
-                 else LEGACY_APPEARANCE_PROJ_DIM)
+        width = MAINLINE_APPEARANCE_PROJ_DIM
     width = int(width)
     if width <= 0:
         raise ValueError("appearance_proj_dim must be positive")
@@ -758,6 +762,8 @@ def resolve_stage_chunk_samples(args, batch_size: int) -> int | None:
 
 
 def train(group: str, args) -> None:
+    if not args.from_scratch and not args.init:
+        raise SystemExit("Specify --from-scratch or --init CHECKPOINT for the training recipe")
     architecture_variant, appearance_proj_dim = resolve_model_options(args)
     motion_harm_weight = float(getattr(args, "motion_harm_weight", 1.0))
     run_started = time.time()
@@ -903,8 +909,8 @@ def train(group: str, args) -> None:
         init_model, init_checkpoint = load_shutrack_checkpoint(args.init, map_location="cpu")
         init_config = init_model.config.as_dict()
         dropout = resolve_dropout(args, init_config)
-        init_proj = int(init_config.get("appearance_proj_dim", 64))
-        if init_config.get("architecture_variant", "legacy") != architecture_variant:
+        init_proj = int(init_config["appearance_proj_dim"])
+        if init_config["architecture_variant"] != architecture_variant:
             raise ValueError("Init checkpoint architecture_variant does not match the requested model; use --from-scratch for a new architecture")
         if init_proj != appearance_proj_dim:
             raise ValueError(
@@ -912,7 +918,7 @@ def train(group: str, args) -> None:
                 f"--appearance-proj-dim={appearance_proj_dim}"
             )
         model = ShutrackV2Model(ShutrackV2Config(**{**init_config, "dropout": dropout}))
-        _load_init_state_with_extension(model, init_model)
+        load_init_weights(model, init_model)
         if full_write:
             # Weights-only initialization on a full-write replay: the source
             # checkpoint's scalar statistics belong to a different dataset, so
@@ -940,7 +946,7 @@ def train(group: str, args) -> None:
     global_step = 0
     if args.resume:
         payload = torch.load(last_path, map_location="cpu", weights_only=False)
-        if (payload.get("model_config") or {}).get("architecture_variant", "legacy") != architecture_variant:
+        if (payload.get("model_config") or {}).get("architecture_variant") != architecture_variant:
             raise ValueError("Resume checkpoint architecture_variant does not match the requested model")
         model.load_state_dict(payload["model_state_dict"], strict=True)
         optimizer.load_state_dict(payload["optimizer_state_dict"])
@@ -1017,7 +1023,6 @@ def train(group: str, args) -> None:
         previous_config.setdefault("column_hinge", False)
         previous_config.setdefault("motion_harm_weight", 1.0)
         previous_config.setdefault("appearance_proj_dim", 64)
-        previous_config.setdefault("architecture_variant", "legacy")
         previous_sampling = previous_config.get(
             "sequence_sampling", "sample-proportional"
         )
@@ -1446,7 +1451,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dataset", choices=("SportsMOT", "MOT17", "MOT20", "DanceTrack"), default="SportsMOT")
     init_choice = parser.add_mutually_exclusive_group()
-    init_choice.add_argument("--init", default=str(INIT_CKPT))
+    init_choice.add_argument("--init", help="Initialize from a current SHUTrack checkpoint.")
     init_choice.add_argument("--from-scratch", action="store_true")
     parser.add_argument("--split", choices=("train", "trainval"))
     parser.add_argument("--snapshot-every", type=int, default=20)
@@ -1492,11 +1497,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--appearance-proj-dim",
         type=int,
         default=None,
-        help="Appearance projection width; default 256 for query_film_bilinear, 64 for legacy.",
+        help="Appearance projection width (default 256).",
     )
-    parser.add_argument("--architecture-variant", choices=("legacy", "query_film_bilinear"),
-                        default=MAINLINE_ARCHITECTURE_VARIANT,
-                        help="Model architecture; legacy reproduction runs must pass 'legacy'.")
+    parser.add_argument("--architecture-variant", choices=(MAINLINE_ARCHITECTURE_VARIANT,),
+                        default=MAINLINE_ARCHITECTURE_VARIANT)
     parser.add_argument("--gap3-weight", type=float, default=1.0)
     parser.add_argument("--rank-weight", type=float, default=1.0)
     parser.add_argument("--motion-harm-weight", type=float, default=1.0,

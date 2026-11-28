@@ -992,9 +992,9 @@ def _add_build_iwg_rg_cma_data_parser(
     parser.add_argument(
         "--context-size",
         type=int,
-        choices=[6, 8],
+        choices=[6],
         default=6,
-        help="Number of events passed to IWG/RG-CMA (6 preserves old datasets).",
+        help="IWG/RG-CMA input window size (6 events).",
     )
 
 
@@ -1111,9 +1111,9 @@ def _add_train_iwg_rg_cma_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--context-size",
         type=int,
-        choices=[6, 8],
+        choices=[6],
         default=6,
-        help="Number of events passed to IWG/RG-CMA (official baseline: 6).",
+        help="IWG/RG-CMA input window size (6 events).",
     )
     parser.add_argument(
         "--reliability-mode",
@@ -1123,18 +1123,9 @@ def _add_train_iwg_rg_cma_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--architecture-variant",
-        choices=[
-            "legacy",
-            "legacy-clean-cross-modal",
-            "legacy-clean-cross-modal-base-conditioned",
-            "legacy-clean-bidirectional-cma",
-            "legacy-clean-6x6-cma",
-            "direct-base",
-            "clean-cross-modal",
-            "selective-correction",
-        ],
+        choices=["legacy"],
         default="legacy",
-        help="Model structure used for controlled RG-CMA ablations.",
+        help="IWG model structure (legacy).",
     )
     parser.add_argument(
         "--residual-beta",

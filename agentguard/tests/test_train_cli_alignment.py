@@ -362,16 +362,16 @@ def test_without_cma_command_is_rejected_without_remapping(tmp_path):
 
 def test_ablation_suite_commands_keep_epoch_65_and_report_conflicts(tmp_path):
     module = _load_script("run_mot17_ablation_suite.py")
-    context8 = {
+    context6 = {
         "dataset_dir": tmp_path / "data",
         "architecture_variant": "legacy",
-        "context_size": 8,
+        "context_size": 6,
         "init_checkpoint": "",
         "freeze_iwg": False,
     }
-    command = module._training_command(context8, tmp_path / "ckpts")
+    command = module._training_command(context6, tmp_path / "ckpts")
     config = validate_train_iwg_rg_cma_command(command, selected_epoch=65)
-    assert config["context_size"] == 8
+    assert config["context_size"] == 6
     assert 65 in config["checkpoint_epochs"]
 
     policy = {

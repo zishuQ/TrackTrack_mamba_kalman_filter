@@ -8,19 +8,11 @@ import torch
 from agentguard.contracts.enums import POLICY_PROTOTYPE_MATRIX
 from agentguard.datasets.iwg_rg_cma_dataset import PACKED_TRAIN_DATA_FORMAT
 from agentguard.models.iwg_rg_cma import (
-    ARCHITECTURE_CLEAN_CROSS_MODAL,
-    ARCHITECTURE_DIRECT_BASE,
-    ARCHITECTURE_LEGACY_CLEAN_6X6_CMA,
-    ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA,
-    ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
-    ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED,
-    ARCHITECTURE_SELECTIVE_CORRECTION,
     IWG_RG_CMA_LEGACY_MODEL_SCHEMA,
     IWG_RG_CMA_MODEL_SCHEMA,
     IWGRGCMA,
     RG_CMA_CORRECTION_BOUND,
     RG_CMA_LEGACY_CORRECTION_BOUND,
-    model_contract,
 )
 from agentguard.training.train_iwg_rg_cma import (
     FORMAL_CHECKPOINT_EPOCHS,
@@ -98,46 +90,6 @@ def test_iwg_rg_cma_checkpoint_strict_roundtrip(tmp_path):
     torch.save(legacy, legacy_path)
     legacy_loaded, _ = load_iwg_rg_cma_checkpoint(legacy_path)
     assert legacy_loaded.correction_bound == RG_CMA_LEGACY_CORRECTION_BOUND
-
-@pytest.mark.parametrize(
-    "architecture_variant",
-    [
-        ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
-        ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED,
-        ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA,
-        ARCHITECTURE_LEGACY_CLEAN_6X6_CMA,
-        ARCHITECTURE_DIRECT_BASE,
-        ARCHITECTURE_CLEAN_CROSS_MODAL,
-        ARCHITECTURE_SELECTIVE_CORRECTION,
-    ],
-)
-def test_structural_ablation_checkpoint_roundtrip(tmp_path, architecture_variant):
-    model = IWGRGCMA(
-        16,
-        correction_bound=RG_CMA_LEGACY_CORRECTION_BOUND,
-        architecture_variant=architecture_variant,
-    )
-    checkpoint = _checkpoint()
-    checkpoint.update(
-        model_contract(
-            correction_bound=RG_CMA_LEGACY_CORRECTION_BOUND,
-            context_size=6,
-            architecture_variant=architecture_variant,
-        )
-    )
-    checkpoint.update(
-        {
-            "model_state_dict": model.state_dict(),
-            "correction_bound": RG_CMA_LEGACY_CORRECTION_BOUND,
-            "architecture_variant": architecture_variant,
-            "training_config": {"architecture_variant": architecture_variant},
-        }
-    )
-    path = tmp_path / f"{architecture_variant}.pt"
-    torch.save(checkpoint, path)
-    loaded, metadata = load_iwg_rg_cma_checkpoint(path)
-    assert loaded.architecture_variant == architecture_variant
-    assert metadata["architecture_variant"] == architecture_variant
 
 
 def test_iwg_rg_cma_formal_batch_size_is_explicit():

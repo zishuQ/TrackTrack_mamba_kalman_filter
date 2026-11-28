@@ -67,10 +67,8 @@ def test_no_legacy_heads_or_parameters():
 def test_competition_branch_on_and_off():
     full = make_model(competition_enabled=True)
     lean = make_model(competition_enabled=False)
-    assert full.competition_encoder is not None
-    assert lean.competition_encoder is None
-    assert full.rsc.token_count == 3
-    assert lean.rsc.token_count == 2
+    assert full.rsc.condition_encoder is not None
+    assert lean.rsc.condition_encoder is None
     full.eval()
     lean.eval()
     with torch.no_grad():

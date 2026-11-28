@@ -24,7 +24,7 @@ for path in (
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from sportsmot_supervision_pilot import DEFAULT_CKPT, SequencePilot  # noqa: E402
+from sportsmot_supervision_pilot import SequencePilot  # noqa: E402
 
 
 def main() -> None:
@@ -32,11 +32,12 @@ def main() -> None:
     parser.add_argument("--sequence", required=True)
     parser.add_argument("--split", choices=("train", "val"), required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--log-root", default="/tmp/appearance_search_audit")
     args = parser.parse_args()
 
     pilot = SequencePilot(
-        args.sequence, args.split, DEFAULT_CKPT, Path(args.log_root) / args.sequence
+        args.sequence, args.split, args.checkpoint, Path(args.log_root) / args.sequence
     )
     pilot.run_replay()
     pilot.appearance_diagnostics()

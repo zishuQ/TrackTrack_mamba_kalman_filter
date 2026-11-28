@@ -282,7 +282,7 @@ def _candidate_rows(
         "outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_trainval_h8_v3_compact":
             "horizon h8 / context 6 variant; referenced by h8 training workflows and historical outputs",
         "outputs/agentguard/datasets/iwg_rg_cma/SportsMOT/nsa_trainval_future8_context8_v3_compact":
-            "future8 / context 8 variant; referenced by context8 training workflows and historical outputs",
+            "future8 / context 8 dataset for retired IWG experiments; historical outputs only",
     }
 
     for row in dataset_rows:

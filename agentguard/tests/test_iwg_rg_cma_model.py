@@ -6,16 +6,6 @@ import torch.nn.functional as F
 
 from agentguard.models.event_encoder import EventEncoder
 from agentguard.models.iwg_rg_cma import (
-    ARCHITECTURE_CLEAN_CROSS_MODAL,
-    ARCHITECTURE_DIRECT_BASE,
-    ARCHITECTURE_LEGACY,
-    ARCHITECTURE_LEGACY_CLEAN_6X6_CMA,
-    ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA,
-    ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
-    ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED,
-    ARCHITECTURE_SELECTIVE_CORRECTION,
-    CLEAN_MOTION_SCALAR_INDICES,
-    CLEAN_RELIABILITY_SCALAR_INDICES,
     IWGRGCMA,
     RG_CMA_CORRECTION_BOUND,
     SafeDirectIWG,
@@ -391,11 +381,7 @@ def test_safe_selective_auxiliary_losses_do_not_oppose_exact_target():
 
 def test_safe_selective_cma_gradient_is_nonzero_and_base_is_isolated():
     torch.manual_seed(29)
-    model = IWGRGCMA(
-        16,
-        correction_bound=0.05,
-        architecture_variant=ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
-    ).train()
+    model = IWGRGCMA(16, correction_bound=0.05).train()
     batch = _batch(batch_size=2, length=6)
     oracle = torch.tensor([[0.1, 0.9], [0.2, 0.8]])
     confidence = torch.full((2, 2), 0.75)
@@ -426,215 +412,11 @@ def test_safe_selective_cma_gradient_is_nonzero_and_base_is_isolated():
     assert _has_finite_nonzero_grad(model.appearance_correction_head)
 
 
-def test_direct_base_gate_is_continuous_and_policy_is_auxiliary_only():
-    torch.manual_seed(101)
-    model = IWGRGCMA(
-        16,
-        correction_bound=0.05,
-        architecture_variant=ARCHITECTURE_DIRECT_BASE,
-    ).eval()
-    batch = _batch()
-    with torch.no_grad():
-        before = _forward(model, batch)
-        for parameter in model.iwg.policy_head.parameters():
-            parameter.add_(torch.randn_like(parameter) * 20.0)
-        after = _forward(model, batch)
-    torch.testing.assert_close(before["base_gate"], after["base_gate"])
-    assert not torch.equal(before["policy_probs"], after["policy_probs"])
-    assert ((before["base_gate"] > 0.0) & (before["base_gate"] < 1.0)).all()
-
-
-def test_clean_cross_modal_uses_pure_motion_indices_and_two_tokens():
-    torch.manual_seed(103)
-    model = IWGRGCMA(
-        16,
-        correction_bound=0.05,
-        architecture_variant=ARCHITECTURE_CLEAN_CROSS_MODAL,
-    ).eval()
-    scalar = torch.randn(2, 6, 63)
-    reliability_changed = scalar.clone()
-    reliability_changed[..., list(CLEAN_RELIABILITY_SCALAR_INDICES)] += 50.0
-    motion_changed = scalar.clone()
-    motion_changed[..., CLEAN_MOTION_SCALAR_INDICES[0]] += 50.0
-    with torch.no_grad():
-        clean = model._encode_clean_motion(scalar)
-        same_motion = model._encode_clean_motion(reliability_changed)
-        changed_motion = model._encode_clean_motion(motion_changed)
-        outputs = _forward(model, _batch())
-    torch.testing.assert_close(clean, same_motion)
-    assert not torch.equal(clean, changed_motion)
-    assert outputs["cross_modal_attention_weights"].shape == (2, 4, 2, 2)
-    assert not hasattr(model, "reliability_projection")
-
-
-def test_legacy_clean_cross_modal_preserves_legacy_base_and_uses_two_tokens():
-    torch.manual_seed(105)
-    legacy = IWGRGCMA(16, correction_bound=0.05).eval()
-    clean = IWGRGCMA(
-        16,
-        correction_bound=0.05,
-        architecture_variant=ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL,
-    ).eval()
-    clean.iwg.load_state_dict(legacy.iwg.state_dict(), strict=True)
-    batch = _batch()
-    with torch.no_grad():
-        legacy_base = legacy.iwg(
-            batch["track_feats"],
-            batch["det_feats"],
-            batch["scalar_feats"],
-            batch["padding_mask"],
-            batch["reset_mask"],
-        )
-        clean_base = clean.iwg(
-            batch["track_feats"],
-            batch["det_feats"],
-            batch["scalar_feats"],
-            batch["padding_mask"],
-            batch["reset_mask"],
-        )
-        outputs = _forward(clean, batch)
-    torch.testing.assert_close(legacy_base["base_gate"], clean_base["base_gate"])
-    assert outputs["cross_modal_attention_weights"].shape == (2, 4, 2, 2)
-    assert not hasattr(clean, "reliability_projection")
-
-
-def test_base_conditioned_correction_heads_add_one_base_gate_feature():
-    torch.manual_seed(106)
-    model = IWGRGCMA(
-        16,
-        correction_bound=0.05,
-        architecture_variant=ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED,
-    ).eval()
+def test_no_harm_weight_contributes_to_loss():
+    model = IWGRGCMA(16, correction_bound=0.05).eval()
     batch = _batch()
     with torch.no_grad():
         outputs = _forward(model, batch)
-    assert model.motion_correction_head[0].in_features == 129
-    assert model.appearance_correction_head[0].in_features == 129
-    assert outputs["cross_modal_attention_weights"].shape == (2, 4, 2, 2)
-    assert not hasattr(model, "reliability_projection")
-
-
-def test_bidirectional_cma_uses_both_opposite_modality_histories():
-    torch.manual_seed(108)
-    legacy = IWGRGCMA(16, correction_bound=0.05).eval()
-    model = IWGRGCMA(
-        16,
-        correction_bound=0.05,
-        architecture_variant=ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA,
-    ).eval()
-    model.iwg.load_state_dict(legacy.iwg.state_dict(), strict=True)
-    batch = _batch()
-    with torch.no_grad():
-        legacy_base = legacy.iwg(
-            batch["track_feats"],
-            batch["det_feats"],
-            batch["scalar_feats"],
-            batch["padding_mask"],
-            batch["reset_mask"],
-        )
-        enhanced_base = model.iwg(
-            batch["track_feats"],
-            batch["det_feats"],
-            batch["scalar_feats"],
-            batch["padding_mask"],
-            batch["reset_mask"],
-        )
-        outputs = _forward(model, batch)
-    torch.testing.assert_close(legacy_base["base_gate"], enhanced_base["base_gate"])
-    assert outputs["appearance_to_motion_attention_weights"].shape == (2, 4, 6)
-    assert outputs["motion_to_appearance_attention_weights"].shape == (2, 4, 6)
-    assert outputs["cross_modal_attention_weights"].shape == (2, 4, 2, 2)
-    assert hasattr(model, "appearance_to_motion_cross_attention")
-    assert hasattr(model, "motion_to_appearance_cross_attention")
-    assert model.motion_correction_head[0].in_features == 128
-    assert model.appearance_correction_head[0].in_features == 128
-    assert not hasattr(model, "reliability_projection")
-
-    model.train()
-    for head in (model.motion_correction_head, model.appearance_correction_head):
-        torch.nn.init.normal_(head[-1].weight, std=0.1)
-        torch.nn.init.normal_(head[-1].bias, std=0.1)
-    _forward(model, batch)["refined_gate"].sum().backward()
-    assert _has_finite_nonzero_grad(model.appearance_to_motion_cross_attention)
-    assert _has_finite_nonzero_grad(model.motion_to_appearance_cross_attention)
-
-
-def test_full_history_6x6_cma_precedes_endpoint_temporal_readout():
-    torch.manual_seed(110)
-    legacy = IWGRGCMA(16, correction_bound=0.05).eval()
-    model = IWGRGCMA(
-        16,
-        correction_bound=0.05,
-        architecture_variant=ARCHITECTURE_LEGACY_CLEAN_6X6_CMA,
-    ).eval()
-    model.iwg.load_state_dict(legacy.iwg.state_dict(), strict=True)
-    batch = _batch()
-    with torch.no_grad():
-        legacy_base = legacy.iwg(
-            batch["track_feats"],
-            batch["det_feats"],
-            batch["scalar_feats"],
-            batch["padding_mask"],
-            batch["reset_mask"],
-        )
-        enhanced_base = model.iwg(
-            batch["track_feats"],
-            batch["det_feats"],
-            batch["scalar_feats"],
-            batch["padding_mask"],
-            batch["reset_mask"],
-        )
-        outputs = _forward(model, batch)
-    torch.testing.assert_close(legacy_base["base_gate"], enhanced_base["base_gate"])
-    assert outputs["appearance_to_motion_6x6_attention_weights"].shape == (
-        2,
-        4,
-        6,
-        6,
-    )
-    assert outputs["motion_to_appearance_6x6_attention_weights"].shape == (
-        2,
-        4,
-        6,
-        6,
-    )
-    assert outputs["motion_attention_weights"].shape == (2, 4, 6)
-    assert outputs["appearance_attention_weights"].shape == (2, 4, 6)
-    assert "cross_modal_attention_weights" not in outputs
-    assert hasattr(model, "bidirectional_history_cross_attention")
-    assert not hasattr(model, "appearance_to_motion_cross_attention")
-    assert not hasattr(model, "motion_to_appearance_cross_attention")
-    assert not hasattr(model, "cross_modal_attention")
-
-    model.train()
-    for head in (model.motion_correction_head, model.appearance_correction_head):
-        torch.nn.init.normal_(head[-1].weight, std=0.1)
-        torch.nn.init.normal_(head[-1].bias, std=0.1)
-    _forward(model, batch)["refined_gate"].sum().backward()
-    assert _has_finite_nonzero_grad(model.bidirectional_history_cross_attention)
-    assert _has_finite_nonzero_grad(model.motion_temporal_attention)
-    assert _has_finite_nonzero_grad(model.appearance_temporal_attention)
-
-
-def test_selective_correction_scales_raw_delta_and_no_harm_is_explicit():
-    torch.manual_seed(107)
-    model = IWGRGCMA(
-        16,
-        correction_bound=0.05,
-        architecture_variant=ARCHITECTURE_SELECTIVE_CORRECTION,
-    ).eval()
-    batch = _batch()
-    with torch.no_grad():
-        for head in (model.motion_correction_head, model.appearance_correction_head):
-            torch.nn.init.normal_(head[-1].weight, std=0.1)
-            torch.nn.init.normal_(head[-1].bias, std=0.1)
-        outputs = _forward(model, batch)
-    assert ((outputs["correction_scale"] >= 0.0) & (outputs["correction_scale"] <= 1.0)).all()
-    torch.testing.assert_close(
-        outputs["gate_correction"],
-        outputs["raw_gate_correction"] * outputs["correction_scale"],
-    )
-
     controlled = dict(outputs)
     controlled["base_gate"] = batch["safe_gate_target"].clone()
     controlled["refined_gate"] = torch.clamp(
@@ -655,26 +437,6 @@ def test_selective_correction_scales_raw_delta_and_no_harm_is_explicit():
     )
 
 
-def test_clean_and_selective_variants_share_identical_common_initialization():
-    torch.manual_seed(109)
-    clean = IWGRGCMA(
-        16,
-        correction_bound=0.05,
-        architecture_variant=ARCHITECTURE_CLEAN_CROSS_MODAL,
-    )
-    torch.manual_seed(109)
-    selective = IWGRGCMA(
-        16,
-        correction_bound=0.05,
-        architecture_variant=ARCHITECTURE_SELECTIVE_CORRECTION,
-    )
-    clean_state = clean.state_dict()
-    selective_state = selective.state_dict()
-    assert set(clean_state).issubset(selective_state)
-    for key, value in clean_state.items():
-        torch.testing.assert_close(value, selective_state[key])
-
-
 _PREDICTION_KEYS = (
     "base_gate",
     "refined_gate",
@@ -683,45 +445,13 @@ _PREDICTION_KEYS = (
     "policy_probs",
     "cue",
 )
-_INFERENCE_VARIANTS = (
-    (False, ARCHITECTURE_CLEAN_CROSS_MODAL, 6),
-    (False, ARCHITECTURE_DIRECT_BASE, 6),
-    (False, ARCHITECTURE_LEGACY, 6),
-    (False, ARCHITECTURE_LEGACY_CLEAN_6X6_CMA, 6),
-    (False, ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA, 6),
-    (False, ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL, 6),
-    (False, ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED, 6),
-    (False, ARCHITECTURE_SELECTIVE_CORRECTION, 6),
-    (False, ARCHITECTURE_LEGACY, 8),
-    (True, ARCHITECTURE_CLEAN_CROSS_MODAL, 6),
-    (True, ARCHITECTURE_DIRECT_BASE, 6),
-    (True, ARCHITECTURE_LEGACY, 6),
-    (True, ARCHITECTURE_LEGACY_CLEAN_6X6_CMA, 6),
-    (True, ARCHITECTURE_LEGACY_CLEAN_BIDIRECTIONAL_CMA, 6),
-    (True, ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL, 6),
-    (True, ARCHITECTURE_LEGACY_CLEAN_CROSS_MODAL_BASE_CONDITIONED, 6),
-    (True, ARCHITECTURE_SELECTIVE_CORRECTION, 6),
-    (True, ARCHITECTURE_LEGACY, 8),
-)
 
 
-def _variant_model(variant: str, context_size: int) -> IWGRGCMA:
-    kwargs = {"context_size": context_size, "architecture_variant": variant}
-    if variant != ARCHITECTURE_LEGACY:
-        kwargs["correction_bound"] = 0.05
-    return IWGRGCMA(16, **kwargs).eval()
-
-
-@pytest.mark.parametrize(
-    "return_diagnostics, variant, context_size",
-    _INFERENCE_VARIANTS,
-)
-def test_inference_without_diagnostics_preserves_predictions(
-    return_diagnostics, variant, context_size
-):
+@pytest.mark.parametrize("return_diagnostics", [False, True])
+def test_inference_without_diagnostics_preserves_predictions(return_diagnostics):
     torch.manual_seed(41)
-    model = _variant_model(variant, context_size)
-    batch = _batch(length=context_size)
+    model = IWGRGCMA(16).eval()
+    batch = _batch(length=model.context_size)
     with torch.no_grad():
         with_diag = model(
             batch["track_feats"],

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -66,98 +65,6 @@ def make_model(reid_dim: int = 8, seed: int = 7, competition_enabled: bool = Tru
             competition_enabled=competition_enabled,
         )
     )
-
-
-def write_tiny_packed_dataset(
-    root: Path, *, reid_dim: int = 8, competition_enabled: bool = True
-) -> Path:
-    """Create a small self-contained packed train_data fixture."""
-
-    sequences = ["seqA", "seqB"]
-    timelines = {
-        "seqA": 10,
-        "seqB": 8,
-    }
-    samples = {
-        "seqA": [
-            # two left-padded cold-start samples and one full window
-            {"indices": [-1, -1, -1, 0, 1, 2], "track": 10, "segment": 0},
-            {"indices": [-1, 0, 1, 2, 3, 4], "track": 10, "segment": 0},
-            {"indices": [2, 3, 4, 5, 6, 7], "track": 11, "segment": 1},
-        ],
-        "seqB": [
-            {"indices": [-1, -1, -1, -1, 0, 1], "track": 20, "segment": 0},
-        ],
-    }
-    mean = [0.0] * 63
-    std = [1.0] * 63
-    metadata = {
-        "format": "train_data",
-        "index_format": "train_data",
-        "dataset": "Tiny",
-        "split": "train",
-        "train_sequences": sequences,
-        "context_size": CONTEXT_SIZE,
-        "max_frame_gap": 30,
-        "reid_dim": reid_dim,
-        "scalar_dim": 63,
-        "num_train_samples": sum(len(value) for value in samples.values()),
-        "timeline_counts": {
-            sequence: {"labeled_endpoints": len(samples[sequence])}
-            for sequence in sequences
-        },
-        "normalization_mean": mean,
-        "normalization_std": std,
-        "reid_feature_file": "reid_features.npy",
-    }
-    root.mkdir(parents=True)
-    (root / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
-
-    rng = np.random.RandomState(123)
-    for sequence in sequences:
-        timeline_count = timelines[sequence]
-        scalar = rng.randn(timeline_count, 63).astype(np.float32) * 0.25
-        # Evidence columns: 4 box residuals, 4 velocities, 2 center variances,
-        # detection score, observation gap.
-        scalar[:, 27:31] = np.linspace(0.1, 0.4, timeline_count).reshape(-1, 1)
-        scalar[:, 39:43] = np.linspace(1.0, 4.0, timeline_count).reshape(-1, 1)
-        scalar[:, 43:45] = np.linspace(-1.0, -2.0, timeline_count).reshape(-1, 1)
-        scalar[:, 9] = np.linspace(0.1, 0.9, timeline_count)
-        scalar[:, 59] = np.linspace(1.0, 0.0, timeline_count)
-        scalar[:, 26] = 1.0
-        # Competition columns: row gap, col gap, max IoU.
-        scalar[:, 15] = np.linspace(0.05, 0.5, timeline_count)
-        scalar[:, 21] = np.linspace(0.5, 0.05, timeline_count)
-        scalar[:, 25] = np.linspace(0.0, 0.25, timeline_count)
-        has_detection = np.ones(timeline_count, dtype=np.bool_)
-        event_indices = np.asarray(
-            [item["indices"] for item in samples[sequence]], dtype=np.int32
-        )
-        count = event_indices.shape[0]
-        arrays = {
-            "event_indices": torch.from_numpy(event_indices),
-            "track_ids": torch.tensor(
-                [item["track"] for item in samples[sequence]], dtype=torch.int64
-            ),
-            "segment_ids": torch.tensor(
-                [item["segment"] for item in samples[sequence]], dtype=torch.int64
-            ),
-            "safe_gate_target": torch.tensor(
-                [[0.8, 0.2], [0.4, 0.6], [0.9, 0.1], [0.3, 0.7]][:count],
-                dtype=torch.float32,
-            )[:count],
-            "valid_channels": torch.ones((count, 2), dtype=torch.bool),
-            "sample_weight": torch.ones(count, dtype=torch.float32),
-            "timeline_scalar_feats": torch.from_numpy(scalar),
-            "timeline_has_detection": torch.from_numpy(has_detection),
-        }
-        sequence_dir = root / sequence
-        sequence_dir.mkdir()
-        torch.save({"arrays": arrays, "metadata": metadata}, sequence_dir / "data.pt")
-        reid = rng.randn(timeline_count, 2, reid_dim).astype(np.float32)
-        reid /= np.linalg.norm(reid, axis=-1, keepdims=True) + 1e-6
-        np.save(sequence_dir / "reid_features.npy", reid)
-    return root
 
 
 def write_tiny_checkpoint(
@@ -253,11 +160,6 @@ class FakeTrack:
 
     def update_with_gates(self, frame_id, detection, motion_gate, appearance_gate):
         self.calls.append((frame_id, detection, motion_gate, appearance_gate))
-
-
-@pytest.fixture
-def tiny_packed_dir(tmp_path: Path) -> Path:
-    return write_tiny_packed_dataset(tmp_path / "packed")
 
 
 @pytest.fixture

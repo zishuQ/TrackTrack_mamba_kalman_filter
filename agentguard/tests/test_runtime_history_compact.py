@@ -397,8 +397,8 @@ def test_long_track_bounds_history_but_keeps_observation_count():
         assert compact_new.history[fid][1] == pytest.approx(compact_old.history[fid][1])
 
 
-@pytest.mark.parametrize("context_size", [6, 8])
-def test_maturity_uses_observation_count_not_window_length(context_size):
+def test_maturity_uses_observation_count_not_window_length():
+    context_size = 6
     from agentguard.runtime.manager import AgentGuardRuntime
 
     runtime = AgentGuardRuntime({"mode": "capture", "iwg_context_size": context_size})

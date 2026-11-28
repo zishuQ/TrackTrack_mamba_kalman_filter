@@ -23,8 +23,6 @@ from agentguard.datasets.iwg_rg_cma_dataset import (
 )
 from agentguard.models.iwg_rg_cma import (
     ARCHITECTURE_LEGACY,
-    IWG_RG_CMA_CONTEXT8_LEGACY_MODEL_SCHEMA,
-    IWG_RG_CMA_CONTEXT8_MODEL_SCHEMA,
     IWG_RG_CMA_LEGACY_MODEL_SCHEMA,
     IWG_RG_CMA_MODEL_SCHEMA,
     IWGRGCMA,
@@ -1118,8 +1116,6 @@ def _run_training_attempt(
                     device=device,
                     context_size=context_size,
                     cross_modal_token_count=model.cross_modal_token_count,
-                    uses_full_history_cma=model.uses_full_history_cma,
-                    uses_bidirectional_history_cma=model.uses_bidirectional_history_cma,
                     diagnostic_interval=diagnostic_interval,
                 )
                 epoch_log_interval = resolve_epoch_log_interval(

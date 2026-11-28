@@ -270,7 +270,7 @@ SUPPORTED_IWG_RG_CMA_DATASET_SCHEMA_SHA256 = frozenset(
         SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_SCHEMA_SHA256,
     }
 )
-SUPPORTED_IWG_CONTEXT_SIZES = frozenset({1, 2, 4, 6, 8, 10})
+SUPPORTED_IWG_CONTEXT_SIZES = frozenset({1, 2, 4, 6, 10})
 
 
 def _validate_context_size(context_size: int) -> int:
@@ -298,21 +298,6 @@ def _contextual_schema_sha256(descriptor: dict[str, Any], context_size: int) -> 
     ).hexdigest()
 
 
-IWG_RG_CMA_CONTEXT8_DATASET_SCHEMA_SHA256_BY_DATASET = {
-    dataset: _contextual_schema_sha256(
-        {
-            "MOT17": IWG_RG_CMA_DATASET_DESCRIPTOR,
-            "MOT20": MOT20_IWG_RG_CMA_DATASET_DESCRIPTOR,
-            "DanceTrack": DANCETRACK_IWG_RG_CMA_DATASET_DESCRIPTOR,
-            "SportsMOT": SPORTSMOT_IWG_RG_CMA_DATASET_DESCRIPTOR,
-        }[dataset],
-        8,
-    )
-    for dataset in IWG_RG_CMA_DATASET_SCHEMA_SHA256_BY_DATASET
-}
-SPORTSMOT_TRAINVAL_CONTEXT8_IWG_RG_CMA_DATASET_SCHEMA_SHA256 = (
-    _contextual_schema_sha256(SPORTSMOT_TRAINVAL_IWG_RG_CMA_DATASET_DESCRIPTOR, 8)
-)
 _IWG_RG_CMA_DATASET_DESCRIPTORS = {
     "MOT17": IWG_RG_CMA_DATASET_DESCRIPTOR,
     "MOT20": MOT20_IWG_RG_CMA_DATASET_DESCRIPTOR,
@@ -354,32 +339,17 @@ LEGACY_DATASET_SCHEMA_SHA256_BY_DATASET_CONTEXT = {
     ("MOT17", "all", 6): frozenset(
         {"cf1d1fc4731a53902157ee3a44584e384e5b61453dc51b2796a6437782440158"}
     ),
-    ("MOT17", "all", 8): frozenset(
-        {"a92a7c4146f5ebbf563777314fc8c3cb76043cb094b13f75ffaac9e5241f4357"}
-    ),
     ("MOT20", "all", 6): frozenset(
         {"3321c5bba6d06512614247d79e36faa483ffa0feb939c6a8d4b07427c5fd6709"}
     ),
-    ("MOT20", "all", 8): frozenset(
-        {"55f2e221dc43c3a0e261ba5925aeb0c9db206182e6a3046cb6bcb3b401db6136"}
-    ),
     ("DanceTrack", "train", 6): frozenset(
         {"e0ac984bee62c819fe84b7b25c652e4af9d020b60b52fe1f49b9c7dee3214175"}
-    ),
-    ("DanceTrack", "train", 8): frozenset(
-        {"f2a7cc928b6e1e7060ac53d373926f085a264ffda30749df1b9eb006a9e669c5"}
     ),
     ("SportsMOT", "train", 6): frozenset(
         {"17cee34dee8024a1472c97f2843e1769a70bb7321722509fb320ee3ff3654d56"}
     ),
     ("SportsMOT", "trainval", 6): frozenset(
         {"8135595698deb753202a6a884419838e19d6fc624a4e6829810e6f41e42fe574"}
-    ),
-    ("SportsMOT", "train", 8): frozenset(
-        {"d083bd7f35caa9f3e20971bd882289337103def8008adf0dc596552c17e60a1d"}
-    ),
-    ("SportsMOT", "trainval", 8): frozenset(
-        {"e5e6c13eb135492dac5c4bb2990c6cfadf6c0100e5ab9d97e0a32783a263f93b"}
     ),
 }
 SUPPORTED_IWG_RG_CMA_DATASET_SCHEMA_SHA256 = frozenset(

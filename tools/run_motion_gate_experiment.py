@@ -11,14 +11,19 @@ import time
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/"tools"))
-from arch_night_driver import SM_DATA, SM_VAL
 
+SM_DATA=ROOT/"outputs/agentguard/experiments/shutrack_bd_sportsmot_20261120/data"
+SM_VAL=tuple(
+    line.strip()
+    for line in (ROOT/"3. Tracker/trackeval/seqmap/sportsmot/val.txt").read_text().splitlines()
+    if line.strip() and line.strip() != "name"
+)
 BASE=ROOT/"outputs/agentguard/experiments/shutrack_architecture_night_20261120"
 DEFAULT_CONFIG=BASE/"ablation/SportsMOT/groups/appearance_row_column/config.json"
 DEFAULT_OUTPUT=ROOT/"outputs/agentguard/experiments/shutrack_motion_gate_targets_20261121/SportsMOT"
 PY=ROOT/".venv/bin/python"
 HEAVY={"train_supervision_groups.py","train_motion_gate_targets.py","run.py",
-       "arch_night_test_submit.py","generate_trainval_paired.py",
+       "collect_pending_data.py","generate_trainval_paired.py",
        "aflink_use.py","gbi_use.py","linear_interpolation_use.py","verify_feature_staging.py",
        "benchmark_inference_device_20261121.py","evaluate_motion_gate_targets.py"}
 
@@ -41,13 +46,6 @@ def resource_snapshot():
             scripts={Path(arg).name for arg in argv if arg.endswith(".py")}
             if scripts & HEAVY:
                 jobs.append({"pid":int(item.name),"scripts":sorted(scripts & HEAVY)})
-            elif "arch_night_driver.py" in scripts:
-                state=json.loads((BASE/"TASK_STATE.json").read_text())["tasks"]
-                pending=[name for name in ("final_mot20_train","test_submit_mot20",
-                         "final_mot17_train","test_submit_mot17")
-                         if state.get(name,{}).get("status")!="complete"]
-                if pending:
-                    jobs.append({"pid":int(item.name),"pending_formal_tasks":pending})
         except (OSError,ValueError):
             continue
     return {"time":time.strftime("%Y-%m-%d %H:%M:%S"),"host_available_mib":memory["MemAvailable"],

@@ -30,7 +30,7 @@ for path in (
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from sportsmot_supervision_pilot import DEFAULT_CKPT, SequencePilot, iou_xyxy  # noqa: E402
+from sportsmot_supervision_pilot import SequencePilot, iou_xyxy  # noqa: E402
 
 VAL_MAP = WORKTREE / "3. Tracker/trackeval/seqmap/sportsmot/val.txt"
 ONLINE_SCORE = 0.80
@@ -518,6 +518,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sequences", nargs="+", required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--log-root", default=str(MAIN / "outputs/agentguard/experiments/shutrack_a_appearance_template_20261119/logs"))
     args = parser.parse_args()
     val = {
@@ -531,7 +532,7 @@ def main() -> None:
     for sequence in args.sequences:
         split = "val" if sequence in val else "train"
         pilot = TemplateExperimentPilot(
-            sequence, split, DEFAULT_CKPT, Path(args.log_root) / sequence
+            sequence, split, args.checkpoint, Path(args.log_root) / sequence
         )
         pilot.run_replay()
         results[sequence] = summarize_sequence(pilot)

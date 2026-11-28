@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import sys
-from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -234,36 +233,6 @@ def test_offline_six_event_outputs_match_online_streaming_and_gap_reset():
     assert runtime.event_buffers[9].events == []
 
 
-def test_adapter_context_size_one_does_not_reuse_history_as_current_window():
-    from integrations.agentguard.adapter import AgentGuardTrackerAdapter
-
-    torch.manual_seed(33)
-    runtime = AgentGuardRuntime(
-        {
-            "mode": "iwg-rg-cma",
-            "iwg_context_size": 1,
-            "rg_cma_max_gap": 30,
-        },
-        rg_cma_model=IWGRGCMA(16, context_size=1).eval(),
-        device="cpu",
-    )
-    runtime.init_feature_builder(reid_dim=16)
-    adapter = AgentGuardTrackerAdapter(
-        SimpleNamespace(dataset="test", agentguard_mode="iwg-rg-cma"),
-        "seq",
-        agentguard_runtime=runtime,
-    )
-
-    first = _event(12, 1)
-    second = _event(12, 2)
-    adapter.get_iwg_decisions_batch([(12, first)])
-    runtime.get_or_create_event_buffer(12).push(first)
-
-    decisions = adapter.get_iwg_decisions_batch([(12, second)])
-
-    assert len(decisions) == 1
-
-
 def _model_reference(runtime, sequences, has_detection):
     """Original full-batch calculation, including attention diagnostics."""
     inputs = runtime.feature_builder.build_iwg_batch_input(sequences)
@@ -451,15 +420,15 @@ def test_runtime_uses_endpoint_detection_mask_and_preserves_override_semantics()
     assert not np.allclose(overridden["policy_probs"], [0.0, 0.0, 0.0, 1.0, 0.0])
 
 
-@pytest.mark.parametrize("context", [6, 8])
 @pytest.mark.parametrize("disabled", [None, "kf", "ema"])
 @pytest.mark.parametrize("threshold", [0.0, 1.0])
 @pytest.mark.parametrize("output", ["base", "final"])
 def test_fast_path_preserves_new_ablation_fallback_and_confidence_statistics(
-    context, disabled, threshold, output
+    disabled, threshold, output
 ):
     torch.manual_seed(219)
-    model = IWGRGCMA(16, context_size=context).eval()
+    model = IWGRGCMA(16).eval()
+    context = model.context_size
     for head in (model.motion_correction_head, model.appearance_correction_head):
         torch.nn.init.normal_(head[-1].weight, std=0.05)
     runtime = AgentGuardRuntime(
@@ -510,10 +479,8 @@ def test_fast_path_preserves_new_ablation_fallback_and_confidence_statistics(
 
 
 @pytest.mark.parametrize("ablation", [None, "kf", "ema"])
-@pytest.mark.parametrize("context_size", [6, 8])
-def test_all_unmatched_fast_path_keeps_new_fallback_statistics(
-    ablation, context_size, monkeypatch
-):
+def test_all_unmatched_fast_path_keeps_new_fallback_statistics(ablation, monkeypatch):
+    context_size = 6
     runtime = _runtime(
         IWGRGCMA(16, context_size=context_size).eval(),
         disable_kf_gate=ablation == "kf",
@@ -647,29 +614,10 @@ def test_left_padding_reset_is_first_valid_event_on_cpu():
     )
 
 
-@pytest.mark.parametrize("context_size", [6, 8])
-@pytest.mark.parametrize(
-    "architecture_variant,correction_bound",
-    [
-        ("legacy", 0.10),
-        ("direct-base", 0.05),
-        ("clean-cross-modal", 0.05),
-        ("selective-correction", 0.05),
-        ("legacy-clean-6x6-cma", 0.05),
-    ],
-)
-def test_packed_transfer_matches_reference_across_supported_models(
-    context_size, architecture_variant, correction_bound
-):
-    if architecture_variant != "legacy" and context_size != 6:
-        pytest.skip("structural variants require context_size=6")
+def test_packed_transfer_matches_reference():
     torch.manual_seed(401)
-    model = IWGRGCMA(
-        16,
-        context_size=context_size,
-        correction_bound=correction_bound,
-        architecture_variant=architecture_variant,
-    ).eval()
+    model = IWGRGCMA(16, correction_bound=0.10).eval()
+    context_size = model.context_size
     runtime = AgentGuardRuntime(
         {
             "mode": "iwg-rg-cma",

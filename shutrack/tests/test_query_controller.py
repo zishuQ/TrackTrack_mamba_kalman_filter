@@ -46,7 +46,6 @@ def test_exact_full_size_parameter_budget():
     assert report["event_fusion"] == 33_152
     assert model.appearance_encoder.reid_proj.weight.shape == (256, 2048)
     assert not hasattr(model, "event_norm")
-    assert model.competition_encoder is None
     assert model.rsc.condition_encoder[0].in_features == 3
 
 
@@ -162,25 +161,20 @@ def test_checkpoint_and_normal_runtime_loader_roundtrip(tmp_path):
                                    loaded(**batch)["gate_logits"], rtol=0, atol=0)
     payload["model_config"]["architecture_variant"] = "legacy"
     save_checkpoint_atomic(path, payload)
-    with pytest.raises(RuntimeError, match="state_dict"):
+    with pytest.raises(ValueError, match="Unsupported.*architecture_variant"):
         load_runtime_model(path)
 
 
-def test_legacy_config_without_variant_remains_legacy():
-    model = model_from_config({"reid_dim": 8})
-    assert model.config.architecture_variant == "legacy"
-    assert hasattr(model.rsc, "appearance_head")
-    assert not hasattr(model.rsc, "gate_heads")
-
-
 def test_unsupported_model_options_fail_clearly():
-    with pytest.raises(ValueError, match="Unknown architecture_variant"):
+    with pytest.raises(ValueError, match="Unsupported.*architecture_variant"):
+        model_from_config({"reid_dim": 8})
+    with pytest.raises(ValueError, match="Unsupported.*architecture_variant"):
         new_model(architecture_variant="typo")
     with pytest.raises(ValueError, match="does not support appearance_match_input"):
         new_model(appearance_match_input=True)
 
 
-def test_training_options_preserve_legacy_and_choose_256_for_new():
+def test_training_options_default_to_256():
     # Script imports its helpers as direct modules, as it does at the CLI.
     import sys
     from pathlib import Path
@@ -189,7 +183,6 @@ def test_training_options_preserve_legacy_and_choose_256_for_new():
         sys.path.insert(0, tools)
     from train_supervision_groups import resolve_model_options
     assert resolve_model_options(SimpleNamespace()) == ("query_film_bilinear", 256)
-    assert resolve_model_options(SimpleNamespace(architecture_variant="legacy")) == ("legacy", 64)
     assert resolve_model_options(SimpleNamespace(
         architecture_variant="query_film_bilinear", appearance_proj_dim=None,
     )) == ("query_film_bilinear", 256)
@@ -200,60 +193,25 @@ def test_training_options_preserve_legacy_and_choose_256_for_new():
         resolve_model_options(SimpleNamespace(appearance_proj_dim=0))
 
 
-def test_old_checkpoint_still_passes_generic_resume_contract(tmp_path):
-    from shutrack.training.train import _validate_resume_contract, build_model
-    model = new_model(architecture_variant="legacy")
-    payload = save_new(tmp_path / "old.pt", model)
-    payload["model_config"].pop("architecture_variant")
-    dataset = SimpleNamespace(
-        reid_dim=8, scalar_mean=np.zeros(63), scalar_std=np.ones(63),
-        competition_enabled=True, descriptor=lambda: {},
-    )
-    _validate_resume_contract(payload, model, dataset)
-    selected = build_model(dataset, {
-        "architecture_variant": "query_film_bilinear", "appearance_proj_dim": 256,
-    })
-    assert selected.config.architecture_variant == "query_film_bilinear"
-
-
-def test_weights_only_initialization_requires_same_architecture():
-    from shutrack.training.train import _load_init_state_with_extension
+def test_weights_only_initialization_requires_compatible_model_config():
+    from shutrack.training.checkpoint import load_init_weights
     source = new_model()
     target = new_model()
-    _load_init_state_with_extension(target, source)
+    load_init_weights(target, source)
     for name, value in source.state_dict().items():
         torch.testing.assert_close(target.state_dict()[name], value, rtol=0, atol=0)
     with pytest.raises(ValueError, match="model_config"):
-        _load_init_state_with_extension(new_model(architecture_variant="legacy"), source)
+        load_init_weights(new_model(appearance_proj_dim=8), source)
 
 
 def test_weights_only_initialization_allows_dropout_override():
     """Dropout has no parameters, so a fine-tune may enable it on a dropout-0 source."""
-    from shutrack.training.train import _load_init_state_with_extension
+    from shutrack.training.checkpoint import load_init_weights
     source = new_model()
     target = new_model(dropout=0.05)
-    _load_init_state_with_extension(target, source)
+    load_init_weights(target, source)
     assert target.config.dropout == 0.05
     assert any(isinstance(module, torch.nn.Dropout) and module.p > 0
                for module in target.modules())
     for name, value in source.state_dict().items():
         torch.testing.assert_close(target.state_dict()[name], value, rtol=0, atol=0)
-
-
-def test_new_model_uses_existing_tracker_adapter(tmp_path, monkeypatch):
-    import shutrack.tests.test_runtime_adapter as runtime_tests
-
-    def write_new(path, competition_enabled=True):
-        model = new_model(competition_enabled=competition_enabled)
-        save_new(path, model)
-        return model
-
-    monkeypatch.setattr(runtime_tests, "write_tiny_checkpoint", write_new)
-    runtime_tests.test_matched_event_produces_gates_and_delegates_update(tmp_path)
-
-
-def test_new_model_obeys_existing_offline_online_and_causality_checks(monkeypatch):
-    import shutrack.tests.test_offline_online_equivalence as parity
-    monkeypatch.setattr(parity, "make_model", new_model)
-    parity.test_offline_windows_match_per_event_online_evaluation()
-    parity.test_future_events_do_not_change_current_window_or_gate()

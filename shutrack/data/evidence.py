@@ -26,7 +26,6 @@ class EventEvidence:
     track_id: int
     segment_id: int
     observation_count: int
-    match_distance: float = 0.0
 
     def __post_init__(self) -> None:
         evidence = np.asarray(self.evidence, dtype=np.float32).reshape(-1)
@@ -66,10 +65,6 @@ class EventEvidence:
         object.__setattr__(self, "track_id", int(self.track_id))
         object.__setattr__(self, "segment_id", int(self.segment_id))
         object.__setattr__(self, "observation_count", int(self.observation_count))
-        match_distance = float(self.match_distance)
-        if not np.isfinite(match_distance):
-            raise ValueError("match_distance must be finite")
-        object.__setattr__(self, "match_distance", match_distance)
 
     @property
     def reid_dim(self) -> int:

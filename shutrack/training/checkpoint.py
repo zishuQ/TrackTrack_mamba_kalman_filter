@@ -15,6 +15,7 @@ import numpy as np
 import torch
 
 from shutrack.models.shutrack import ShutrackV2Config, ShutrackV2Model
+from shutrack.training.defaults import MAINLINE_ARCHITECTURE_VARIANT
 from shutrack.schema import (
     ARCHITECTURE_NAME,
     ARCHITECTURE_VERSION,
@@ -73,6 +74,20 @@ def cpu_state_dict(model: torch.nn.Module) -> dict[str, torch.Tensor]:
     }
 
 
+def load_init_weights(model: ShutrackV2Model, source_model: ShutrackV2Model) -> None:
+    """Strictly copy parameters, allowing a training-time dropout override."""
+    source_config = source_model.config.as_dict()
+    target_config = model.config.as_dict()
+    differences = {
+        key: (source_config[key], target_config[key])
+        for key in source_config
+        if key != "dropout" and source_config[key] != target_config[key]
+    }
+    if differences:
+        raise ValueError(f"Initialization checkpoint model_config mismatch: {differences}")
+    model.load_state_dict(source_model.state_dict(), strict=True)
+
+
 def model_from_config(model_config: Mapping[str, Any]) -> ShutrackV2Model:
     allowed = {
         "reid_dim",
@@ -91,6 +106,11 @@ def model_from_config(model_config: Mapping[str, Any]) -> ShutrackV2Model:
     if unknown:
         raise ValueError(
             f"SHUTrack checkpoint model_config has unsupported keys: {unknown}"
+        )
+    if model_config.get("architecture_variant") != MAINLINE_ARCHITECTURE_VARIANT:
+        raise ValueError(
+            f"Unsupported SHUTrack checkpoint architecture_variant: "
+            f"{model_config.get('architecture_variant', 'legacy')!r}"
         )
     return ShutrackV2Model(ShutrackV2Config(**dict(model_config)))
 
@@ -295,6 +315,7 @@ __all__ = [
     "build_checkpoint_payload",
     "save_checkpoint_atomic",
     "load_shutrack_checkpoint",
+    "load_init_weights",
     "model_from_config",
     "cpu_state_dict",
     "checkpoint_summary",

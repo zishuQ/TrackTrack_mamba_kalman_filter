@@ -96,15 +96,11 @@ class TrainingEpochStats:
         device: torch.device,
         context_size: int,
         cross_modal_token_count: int,
-        uses_full_history_cma: bool = False,
-        uses_bidirectional_history_cma: bool = False,
         diagnostic_interval: int = 1,
     ) -> None:
         self.device = torch.device(device)
         self.context_size = int(context_size)
         self.cross_modal_token_count = int(cross_modal_token_count)
-        self.uses_full_history_cma = bool(uses_full_history_cma)
-        self.uses_bidirectional_history_cma = bool(uses_bidirectional_history_cma)
         self.diagnostic_interval = int(diagnostic_interval)
         self.samples = 0
         self.batches = 0
@@ -125,22 +121,6 @@ class TrainingEpochStats:
         )
         self.appearance_positions = torch.zeros(
             self.context_size, device=self.device, dtype=torch.float64
-        )
-        self.appearance_to_motion_positions = torch.zeros(
-            self.context_size, device=self.device, dtype=torch.float64
-        )
-        self.motion_to_appearance_positions = torch.zeros(
-            self.context_size, device=self.device, dtype=torch.float64
-        )
-        self.appearance_to_motion_6x6_matrix = torch.zeros(
-            (self.context_size, self.context_size),
-            device=self.device,
-            dtype=torch.float64,
-        )
-        self.motion_to_appearance_6x6_matrix = torch.zeros(
-            (self.context_size, self.context_size),
-            device=self.device,
-            dtype=torch.float64,
         )
         self.cross_matrix = torch.zeros(
             (self.cross_modal_token_count, self.cross_modal_token_count),
@@ -197,36 +177,6 @@ class TrainingEpochStats:
             outputs["appearance_attention_entropy"].detach().double().mean()
             * int(count)
         )
-        if "appearance_to_motion_attention_weights" in outputs:
-            self.appearance_to_motion_positions += (
-                outputs["appearance_to_motion_attention_weights"]
-                .detach()
-                .double()
-                .mean(dim=1)
-                .sum(dim=0)
-            )
-            self.motion_to_appearance_positions += (
-                outputs["motion_to_appearance_attention_weights"]
-                .detach()
-                .double()
-                .mean(dim=1)
-                .sum(dim=0)
-            )
-        if "appearance_to_motion_6x6_attention_weights" in outputs:
-            self.appearance_to_motion_6x6_matrix += (
-                outputs["appearance_to_motion_6x6_attention_weights"]
-                .detach()
-                .double()
-                .mean(dim=1)
-                .sum(dim=0)
-            )
-            self.motion_to_appearance_6x6_matrix += (
-                outputs["motion_to_appearance_6x6_attention_weights"]
-                .detach()
-                .double()
-                .mean(dim=1)
-                .sum(dim=0)
-            )
         if "cross_modal_attention_weights" in outputs:
             self.cross_matrix += (
                 outputs["cross_modal_attention_weights"]
@@ -388,14 +338,7 @@ class TrainingEpochStats:
             metrics["appearance_attention_entropy"] = None
             metrics["motion_history_attention"] = None
             metrics["appearance_history_attention"] = None
-            if not self.uses_full_history_cma:
-                metrics["cross_modal_attention"] = None
-            if self.uses_bidirectional_history_cma:
-                metrics["appearance_to_motion_history_attention"] = None
-                metrics["motion_to_appearance_history_attention"] = None
-            if self.uses_full_history_cma:
-                metrics["appearance_to_motion_6x6_attention"] = None
-                metrics["motion_to_appearance_6x6_attention"] = None
+            metrics["cross_modal_attention"] = None
             return metrics
 
         metrics["motion_attention_entropy"] = (
@@ -410,22 +353,7 @@ class TrainingEpochStats:
         metrics["appearance_history_attention"] = (
             self.appearance_positions / diagnostic_divisor
         ).detach().cpu().tolist()
-        if not self.uses_full_history_cma:
-            metrics["cross_modal_attention"] = (
-                self.cross_matrix / diagnostic_divisor
-            ).detach().cpu().tolist()
-        if self.uses_bidirectional_history_cma:
-            metrics["appearance_to_motion_history_attention"] = (
-                self.appearance_to_motion_positions / diagnostic_divisor
-            ).detach().cpu().tolist()
-            metrics["motion_to_appearance_history_attention"] = (
-                self.motion_to_appearance_positions / diagnostic_divisor
-            ).detach().cpu().tolist()
-        if self.uses_full_history_cma:
-            metrics["appearance_to_motion_6x6_attention"] = (
-                self.appearance_to_motion_6x6_matrix / diagnostic_divisor
-            ).detach().cpu().tolist()
-            metrics["motion_to_appearance_6x6_attention"] = (
-                self.motion_to_appearance_6x6_matrix / diagnostic_divisor
-            ).detach().cpu().tolist()
+        metrics["cross_modal_attention"] = (
+            self.cross_matrix / diagnostic_divisor
+        ).detach().cpu().tolist()
         return metrics

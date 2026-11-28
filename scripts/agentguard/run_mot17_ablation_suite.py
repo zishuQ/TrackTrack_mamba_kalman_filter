@@ -32,9 +32,7 @@ DATASET_DIR_CONTEXT6 = Path(
     or os.environ.get("MOT17_DATASET_DIR")
     or str(ROOT / "outputs/agentguard/datasets/iwg_rg_cma/MOT17/nsa_all_v3_compact")
 )
-EVENT_CACHE_ROOT = ROOT / "outputs/agentguard/event_cache_v3_iwg_v2"
 DETECTION_CACHE_ROOT = ROOT / "outputs/agentguard/detection_cache"
-LABEL_DIR = ROOT / "outputs/agentguard/labels/iwg_rg_cma/MOT17/nsa_candidate_a_compact"
 DATA_ROOT = Path("/home/shang/datasets")
 BASELINE_CHECKPOINT = (
     ABLATION_ROOT
@@ -122,7 +120,7 @@ RUNS: tuple[dict[str, Any], ...] = (
 )
 
 
-for _context_size in (1, 2, 4, 8, 10):
+for _context_size in (1, 2, 4, 10):
     RUNS += (
         {
             "experiment_id": f"mot17_context{_context_size}_100e_epoch065",
@@ -394,8 +392,8 @@ def _spec_conflicts(spec: dict[str, Any]) -> list[str]:
     return conflicts
 
 
-def _build_temporal_datasets() -> None:
-    for context_size in (1, 2, 4, 8, 10):
+def _check_temporal_datasets() -> None:
+    for context_size in (1, 2, 4, 10):
         output_dir = DATASET_ROOT / f"mot17_context{context_size}_v3_compact"
         metadata_path = output_dir / "metadata.json"
         if metadata_path.is_file():
@@ -404,41 +402,12 @@ def _build_temporal_datasets() -> None:
             if int(metadata.get("context_size", -1)) != context_size:
                 raise ValueError(f"dataset context mismatch: {output_dir}")
             print(f"Using existing temporal dataset: {output_dir}", flush=True)
-            continue
-        if context_size not in {6, 8}:
+        else:
             print(
                 f"Skipping unsupported context={context_size} dataset build; "
-                "build_iwg_rg_cma_data only accepts context-size 6 or 8.",
+                "build_iwg_rg_cma_data only accepts context-size 6.",
                 flush=True,
             )
-            continue
-        command = [
-            str(PYTHON),
-            "-u",
-            "-m",
-            "agentguard.cli",
-            "build_iwg_rg_cma_data",
-            "--dataset",
-            "MOT17",
-            "--mode",
-            "all",
-            "--event-cache-root",
-            str(EVENT_CACHE_ROOT),
-            "--detection-cache-root",
-            str(DETECTION_CACHE_ROOT),
-            "--label-dir",
-            str(LABEL_DIR),
-            "--output-dir",
-            str(output_dir),
-            "--max-frame-gap",
-            "30",
-            "--context-size",
-            str(context_size),
-        ]
-        log_path = ABLATION_ROOT / "logs" / f"build_context{context_size}.log"
-        _run_logged(command, cwd=ROOT, log_path=log_path)
-        if not metadata_path.is_file():
-            raise FileNotFoundError(metadata_path)
 
 
 def _protocol(spec: dict[str, Any], run_root: Path) -> dict[str, Any]:
@@ -699,7 +668,7 @@ def main(argv: list[str] | None = None) -> None:
     ABLATION_ROOT.mkdir(parents=True, exist_ok=True)
     DATASET_ROOT.mkdir(parents=True, exist_ok=True)
     TRACKER_ROOT.mkdir(parents=True, exist_ok=True)
-    _build_temporal_datasets()
+    _check_temporal_datasets()
     git_commit = _git_value(["git", "rev-parse", "HEAD"])
     for spec in RUNS:
         try:
