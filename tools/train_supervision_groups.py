@@ -70,7 +70,7 @@ from shutrack.training.defaults import (
 )
 from shutrack.training.paired_pipeline import DeferredMetrics, move_batch, npz_array_view, prepared_batches
 from shutrack.training.feature_staging import (
-    aligned_stage_chunk_samples, feature_chunks, staged_sequence_rows,
+    aligned_stage_chunk_samples, feature_chunks, release_sequence_pages, staged_sequence_rows,
 )
 from paired_training_input import fit_input_statistics, official_sequences
 from shutrack.schema import EVIDENCE_SCALAR_INDICES, COMPETITION_SCALAR_INDICES
@@ -1084,8 +1084,14 @@ def train(group: str, args) -> None:
     prefetch = int(getattr(args, "prefetch", 1))
     pin_memory = device.type == "cuda" and not getattr(args, "no_pin_memory", False)
     compact_reid = not getattr(args, "no_compact_reid", False)
-    for sequence in sequence_dirs:
-        datasets[sequence].open_cache()
+    # MOT20’s feature pool competes with the Windows host for physical memory.
+    discard_staged_file_cache = dataset == "MOT20"
+    for data in datasets.values():
+        data.open_cache()
+        if discard_staged_file_cache:
+            if group in ("appearance_rank", "appearance_row_column", "appearance_rank_speed4"):
+                data.load_rank_arrays()
+            release_sequence_pages(data, discard_cache=True)
     feature_bytes = sum(
         data.event_track.nbytes + data.cache.features.nbytes
         + (data.dir / "samples.npz").stat().st_size
@@ -1097,6 +1103,7 @@ def train(group: str, args) -> None:
                                   "loading_mode": config["loading_mode"],
                                   "stage_features": config["stage_features"],
                                   "stage_chunk_samples": stage_chunk_samples,
+                                  "discard_staged_file_cache": discard_staged_file_cache,
                                   "feature_working_set_gib": feature_bytes / 2**30}))
     seed_rng = np.random.RandomState(int(args.seed))
     grad_norm_every = int(getattr(args, "grad_norm_every", 0))
@@ -1141,7 +1148,9 @@ def train(group: str, args) -> None:
                 sequence_staging_chunks = 0
                 sequence_staging_peak_bytes = 0
                 for chunk_rows in feature_chunks(rows, stage_chunk_samples, enabled=True):
-                    with staged_sequence_rows(data, chunk_rows, group) as staged, prepared_batches(
+                    with staged_sequence_rows(
+                        data, chunk_rows, group, discard_cache=discard_staged_file_cache,
+                    ) as staged, prepared_batches(
                         chunk_rows, batch_size,
                         lambda selected: batch_tensors(data, selected, targets[sequence], group,
                                                       compact_reid=compact_reid),

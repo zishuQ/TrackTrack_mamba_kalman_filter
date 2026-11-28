@@ -59,7 +59,7 @@ def release_mapped_pages(array, *, discard_cache=False):
 class SelectedFeatureRows:
     """A compact immutable copy addressed by the original global row indices."""
 
-    def __init__(self, source, indices, block_bytes=16 * 1024 * 1024):
+    def __init__(self, source, indices, block_bytes=16 * 1024 * 1024, *, discard_cache=False):
         indices = np.unique(np.asarray(indices, dtype=np.int64))
         self.shape = source.shape
         self.dtype = source.dtype
@@ -94,8 +94,7 @@ class SelectedFeatureRows:
                 end = min(start + block_rows, len(indices))
                 self.values[start:end] = source[indices[start:end]]
         self.values.flags.writeable = False
-        # Drop this mapping from RSS while keeping reusable file pages cached.
-        release_mapped_pages(source)
+        release_mapped_pages(source, discard_cache=discard_cache)
 
     @property
     def nbytes(self):
@@ -118,7 +117,7 @@ def release_sequence_pages(sequence, *, discard_cache=False):
 
 
 @contextmanager
-def staged_sequence_rows(sequence, rows, group, *, enabled=True):
+def staged_sequence_rows(sequence, rows, group, *, enabled=True, discard_cache=False):
     """Serve exactly the existing sample plan from bounded private RAM."""
     if not enabled or len(rows) == 0:
         yield {"seconds": 0.0, "bytes": 0}
@@ -142,9 +141,12 @@ def staged_sequence_rows(sequence, rows, group, *, enabled=True):
         original_rank = sequence._rank_arrays
         rank_ids = sequence.rank_pos[rows]
         rank_ids = np.unique(rank_ids[rank_ids >= 0])
-        rank = tuple(SelectedFeatureRows(array, rank_ids) for array in original_rank)
-    track = SelectedFeatureRows(original_track, events)
-    detection = SelectedFeatureRows(original_detection, detection_ids)
+        rank = tuple(
+            SelectedFeatureRows(array, rank_ids, discard_cache=discard_cache)
+            for array in original_rank
+        )
+    track = SelectedFeatureRows(original_track, events, discard_cache=discard_cache)
+    detection = SelectedFeatureRows(original_detection, detection_ids, discard_cache=discard_cache)
     size = track.nbytes + detection.nbytes + sum(array.nbytes for array in rank or ())
     sequence.event_track = track
     sequence.cache.features = detection

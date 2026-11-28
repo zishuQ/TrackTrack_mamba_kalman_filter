@@ -8,6 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from train_supervision_groups import batch_tensors
+from shutrack.training import feature_staging
 from shutrack.training.feature_staging import (
     SelectedFeatureRows, aligned_stage_chunk_samples, feature_chunks, staged_sequence_rows,
 )
@@ -77,6 +78,26 @@ def test_selected_rows_restore_order_and_reject_unstaged_rows():
     np.testing.assert_array_equal(staged[requested], source[requested])
     with pytest.raises(IndexError, match="not included"):
         staged[np.array([1])]
+
+def test_selected_rows_discard_clean_file_pages_only_when_requested(tmp_path, monkeypatch):
+    path = tmp_path / "features.npy"
+    values = np.arange(4096, dtype=np.float32).reshape(128, 32)
+    np.save(path, values)
+    source = np.load(path, mmap_mode="r")
+    calls = []
+    advice = 4
+    monkeypatch.setattr(feature_staging.os, "POSIX_FADV_DONTNEED", advice, raising=False)
+    monkeypatch.setattr(
+        feature_staging.os, "posix_fadvise",
+        lambda fd, offset, size, flag: calls.append((offset, size, flag)), raising=False,
+    )
+    rows = np.array([15, 1, 15])
+    retained = SelectedFeatureRows(source, rows)
+    assert calls == []
+    discarded = SelectedFeatureRows(source, rows, discard_cache=True)
+    assert calls == [(source.offset, source.nbytes, advice)]
+    np.testing.assert_array_equal(discarded[rows], retained[rows])
+
 
 def test_staging_reads_npz_member_offsets_and_sliced_mmap_views(tmp_path):
     from shutrack.training.paired_pipeline import npz_array_view
