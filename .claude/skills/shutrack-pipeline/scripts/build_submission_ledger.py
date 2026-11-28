@@ -46,8 +46,17 @@ LABELS = {
     1069017: 'MOT20 round2 harm=1 dropout=0.05 (sqrt-size)',
     1069047: 'MOT17 from r1-MOT20 harm=2 dropout=0.05 (50e)',
     1069361: 'SportsMOT harm=4 trainval90 e100 dropout=0 (post+AFLink)',
+    1069953: 'MOT17 harm=1.5 dropout=0 (init r1-MOT20 harm2 d0)',
+    1069954: 'SportsMOT harm=3 trainval90 e100 (post+AFLink)',
+    1070250: 'MOT20 harm=1.5 sqrt-size e100',
+    1070802: 'MOT17 harm=1.5 lr=2e-5 (init r1-MOT20 harm2 d0)',
+    1070817: 'MOT17 harm=1.5 lr=1e-5 (init MOT20 harm1 e100 #1063086)',
+    1070911: 'SportsMOT harm=4 trainval90 e100 lr=7.5e-5 (post+AFLink)',
+    1071265: 'SportsMOT harm=4 trainval90 e100 dropout=0.075 (post+AFLink)',
+    1071481: 'MOT20 harm=0.75 sqrt-size e100 (staged)',
+    1071744: 'MOT20 column=75 sqrt-size e100 (staged)',
 }
-ACCOUNT_OVERRIDES = {1066994: 'jojo0', 1067021: 'shangqingnie', 1068003: 'jojo0', 1068301: 'shangqingnie', 1068664: 'jojo0', 1068665: 'jojo0', 1069017: 'jojo0', 1069047: 'jojo0', 1069361: 'jojo0'}
+ACCOUNT_OVERRIDES = {1066994: 'jojo0', 1067021: 'shangqingnie', 1068003: 'jojo0', 1068301: 'shangqingnie', 1068664: 'jojo0', 1068665: 'jojo0', 1069017: 'jojo0', 1069047: 'jojo0', 1069361: 'jojo0', 1069953: 'shangqingnie', 1069954: 'shangqingnie', 1070250: 'shangqingnie', 1070802: 'jojo0', 1070817: 'shangqingnie', 1070911: 'jojo0', 1071265: 'shangqingnie', 1071481: 'jojo0', 1071744: 'shangqingnie'}
 
 
 def local_records():

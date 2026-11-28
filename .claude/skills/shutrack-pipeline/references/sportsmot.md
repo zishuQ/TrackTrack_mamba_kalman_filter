@@ -113,7 +113,7 @@ cd "3. Tracker"
 3. Package + validate the AFLink output:
 
 ```bash
-.venv/bin/python outputs/agentguard/experiments/shutrack_a_submit_20261117/scripts/make_package.py \
+.venv/bin/python tools/package_tracking_results.py \
   --source <..._post_aflink_post> --zip <exp>/submissions/SportsMOT.zip \
   --expected-count 150 --expected-names-file <exp>/logs/sportsmot_test_sequences.txt
 .venv/bin/python tools/codabench_submit.py validate --zip <exp>/submissions/SportsMOT.zip \

@@ -1,6 +1,6 @@
 # MOT17 dataset card
 
-> Last verified: 2026-11-26. Scores/bests are authoritative in
+> Last verified: 2026-11-27. Scores/bests are authoritative in
 > `submissions.json`; this page is the recipe snapshot.
 
 ## Data and sequences
@@ -32,6 +32,13 @@ Fine-tuning from a MOT20 checkpoint (typical):
 and the round-1 MOT20 harm=2 e100 checkpoint (68.023, #1068665). See
 `recipes/mot17_finetune.json` for the initializer path and SHA-256.
 The same initializer and harm with dropout 0.05 scored 68.007 (#1069047).
+With harm=1.5 and everything else identical the official score is 68.028
+(#1069953, 2026-11-27) — nominally the best by +0.005 pp (a tie within
+noise; AssA −0.35 / IDF1 −0.48 against DetA +0.34 / MOTA +0.30 / IDSW −6).
+Doubling the fine-tune LR to 2e-5 (same initializer) scores **68.229**
+(#1070802, 2026-11-27), the current best (+0.201 pp over #1069953);
+initialising from the MOT20 harm=1 e100 (#1063086) with LR 1e-5 scores
+68.167 (#1070817).
 The historical MOT20 formal e100 → MOT17 harm=1 recipe scored 67.827 (#1063098).
 
 The c (NSA reliability) MOT17 run used the old-gate ablation MOT20 e100 as

@@ -1,6 +1,6 @@
 # MOT20 dataset card
 
-> Last verified: 2026-11-26. Scores/bests are authoritative in
+> Last verified: 2026-11-27. Scores/bests are authoritative in
 > `submissions.json`; this page is the recipe snapshot.
 
 ## Data and sequences
@@ -23,7 +23,10 @@ tau 0.1 / column 50, harm 1.
 |---|---|---:|---|
 | formal e100 (sqrt-size) | harm=1, dropout 0, 4 shards × 100, warmup 271 | 27,100 | **66.637**, #1063086 |
 | harm=2 e100 (sqrt-size) | same schedule, dropout 0 | 27,100 | 65.213, #1068664 |
+| harm=1.5 e100 (sqrt-size) | same schedule, dropout 0 | 27,100 | 65.949, #1070250 |
 | harm=1 e100 (sqrt-size) | same schedule, dropout 0.05 | 27,100 | 66.481, #1069017 |
+| harm=0.75 e100 (sqrt-size) | same schedule, dropout 0, column 50 | 27,100 | 66.588, #1071481 |
+| column=75 e100 (sqrt-size) | harm=1, dropout 0 | 27,100 | 66.598, #1071744 |
 | sample-proportional e100 | default sampling, `--warmup-steps 270`, `--shards 4 --max-epochs 100` | 27,000 | 66.531, #1066968 |
 | low-LR continuation | `tools/continue_low_lr.py` from e100, 50 stage-epochs / 4 shards (`--allow-partial-cycles`), lr 1e-5 | — | 66.587 |
 
