@@ -39,33 +39,49 @@ def test_factor_one_preserves_loss_and_parameter_gradients_exactly():
         assert torch.equal(a,b)
 
 
-def test_weighting_emphasizes_harm_but_keeps_correct_gradient_directions():
+@pytest.mark.parametrize("factor", [0.5, 0.75, 8.0])
+def test_weighting_changes_relative_gradients_without_reversing_them(factor):
     data = batch()
     logits = torch.zeros(3, 2, requires_grad=True)
-    loss, stats = motion_box_diou_loss({"gate_logits": logits}, data, harm_weight=8.)
+    loss, stats = motion_box_diou_loss({"gate_logits": logits}, data, harm_weight=factor)
     grad, = torch.autograd.grad(loss, logits)
     # Row0 benefits from more writing; row1 benefits from less.
     assert grad[0, 0] < 0 < grad[1, 0]
-    assert torch.allclose(grad[1, 0], -8 * grad[0, 0])
+    assert torch.allclose(grad[1, 0], -factor * grad[0, 0])
     assert torch.equal(grad[:, 1], torch.zeros(3))  # No direct appearance-logit gradient.
     assert torch.equal(grad[2], torch.zeros(2))
     assert stats["harm_fraction"].item() == .5
-    assert stats["harm_weight_share"].item() == pytest.approx(8/9)
+    assert stats["harm_weight_share"].item() == pytest.approx(factor / (1 + factor))
     assert torch.isfinite(loss)
 
 
-def test_empty_mask_returns_zero_with_zero_gradients():
+def test_single_harmful_sample_uses_its_fractional_weight_as_denominator():
+    data = batch()
+    data["motion_gt_valid"][0] = False
+    logits = torch.zeros(3, 2, requires_grad=True)
+    outputs = {"gate_logits": logits}
+    weighted, stats = motion_box_diou_loss(outputs, data, harm_weight=0.75)
+    unweighted, _ = motion_box_diou_loss(outputs, data)
+    weighted_gradient, = torch.autograd.grad(weighted, logits)
+    unweighted_gradient, = torch.autograd.grad(unweighted, logits)
+    torch.testing.assert_close(weighted, unweighted)
+    torch.testing.assert_close(weighted_gradient, unweighted_gradient)
+    assert stats["harm_weight_share"].item() == 1.0
+
+
+@pytest.mark.parametrize("factor", [0.75, 8.0])
+def test_empty_mask_returns_zero_with_zero_gradients(factor):
     data = batch()
     data["motion_gt_valid"][:] = False
     logits = torch.zeros(3, 2, requires_grad=True)
-    loss, stats = motion_box_diou_loss({"gate_logits": logits}, data, harm_weight=8.)
+    loss, stats = motion_box_diou_loss({"gate_logits": logits}, data, harm_weight=factor)
     grad, = torch.autograd.grad(loss, logits)
     assert loss.item() == 0
     assert torch.equal(grad, torch.zeros_like(grad))
     assert stats["harm_fraction"] == stats["harm_weight_share"] == 0
 
 
-@pytest.mark.parametrize("factor", [0., .5, float("nan"), float("inf")])
+@pytest.mark.parametrize("factor", [0.0, -0.5, float("nan"), float("inf")])
 def test_bad_factors_rejected(factor):
     with pytest.raises(ValueError):
         motion_box_diou_loss({"gate_logits": torch.zeros(3,2)}, batch(), harm_weight=factor)

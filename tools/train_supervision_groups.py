@@ -66,7 +66,7 @@ from shutrack.training.train import _load_init_state_with_extension, _seed_every
 from shutrack.training.defaults import (
     LEGACY_APPEARANCE_PROJ_DIM, LEGACY_ARCHITECTURE_VARIANT,
     MAINLINE_APPEARANCE_PROJ_DIM, MAINLINE_ARCHITECTURE_VARIANT,
-    MAINLINE_STAGE_CHUNK_SAMPLES, MAINLINE_STAGE_FEATURES,
+    MAINLINE_STAGE_CHUNK_SAMPLES,
 )
 from shutrack.training.paired_pipeline import DeferredMetrics, move_batch, npz_array_view, prepared_batches
 from shutrack.training.feature_staging import (
@@ -865,15 +865,6 @@ def train(group: str, args) -> None:
         data = SequenceData(sequence, split, data_root, dataset)
         datasets[sequence] = data
         targets[sequence] = derive_targets(data.samples, taus)
-    preload_features = bool(getattr(args, "preload_features", False))
-    load_seconds = 0.0
-    preload_rss_gb = None
-    if preload_features:
-        preload_started = time.time()
-        for data in datasets.values():
-            data.preload()
-        load_seconds = time.time() - preload_started
-        preload_rss_gb = round(_process_rss_gb(), 3)
     batch_size = int(args.batch_size)
     epoch_steps = build_schedule(
         datasets, batch_size, epochs_total, shards, sequence_sampling, sampling_power
@@ -882,12 +873,7 @@ def train(group: str, args) -> None:
     warmup_override = int(getattr(args, "warmup_steps", -1))
     warmup_steps = int(epoch_steps[0]) if warmup_override < 0 else warmup_override
     warmup_steps = max(0, min(warmup_steps, total_steps))
-    stage_features = bool(getattr(args, "stage_features", MAINLINE_STAGE_FEATURES))
-    if preload_features:
-        stage_features = False
     stage_chunk_samples = resolve_stage_chunk_samples(args, batch_size)
-    loading_mode = ("preload" if preload_features else
-                    ("stage" if stage_features else "mmap"))
 
     full_write = bool(
         protocols and json.loads(next(iter(protocols))).get("full_write")
@@ -1020,10 +1006,9 @@ def train(group: str, args) -> None:
         "gap3_weight": args.gap3_weight,
         "snapshot_every": args.snapshot_every,
         "dropout": dropout,
-        "preload_features": preload_features,
-        "stage_features": stage_features,
+        "stage_features": True,
         "stage_chunk_samples": stage_chunk_samples,
-        "loading_mode": loading_mode,
+        "loading_mode": "stage",
         "warmup_steps_override": warmup_override,
         "grad_norm_every": int(getattr(args, "grad_norm_every", 0)),
     }
@@ -1044,10 +1029,10 @@ def train(group: str, args) -> None:
             "sampling_replacement", previous_sampling == "sqrt-size"
         )
         previous_config.setdefault("dropout", 0.0)
-        previous_config.setdefault("preload_features", False)
         previous_config.setdefault("warmup_steps_override", -1)
         previous_config.setdefault("grad_norm_every", 0)
         previous_config.setdefault("sequence_counts", config["sequence_counts"])
+        # Older checkpoints may record loader options that do not affect optimization.
         loader_keys = ("preload_features", "stage_features", "stage_chunk_samples",
                        "loading_mode")
         current_compare = {key: value for key, value in config.items()
@@ -1093,30 +1078,24 @@ def train(group: str, args) -> None:
         "model_config": model.config.as_dict(),
         "initial_parameter_sha256": parameter_digest.hexdigest(),
     }, sort_keys=True))
-    if preload_features:
-        log("preload: " + json.dumps({
-            "seconds": round(load_seconds, 2),
-            "rss_gb": preload_rss_gb,
-        }, sort_keys=True))
+    if getattr(args, "legacy_loader_flags", False):
+        log("Legacy loader flags use sequence staging.")
 
     prefetch = int(getattr(args, "prefetch", 1))
     pin_memory = device.type == "cuda" and not getattr(args, "no_pin_memory", False)
     compact_reid = not getattr(args, "no_compact_reid", False)
     for sequence in sequence_dirs:
         datasets[sequence].open_cache()
-    # Small pools retain their warm mmap cache. Stage large pools whose file
-    # working set competes with model/batch memory; no dataset-specific switch.
     feature_bytes = sum(
         data.event_track.nbytes + data.cache.features.nbytes
         + (data.dir / "samples.npz").stat().st_size
         for data in datasets.values()
     )
     log(json.dumps({"start": time.strftime("%Y-%m-%d %H:%M:%S"), **config}, sort_keys=True))
-    # Loader options affect execution only, not the resume/training protocol.
     log("pipeline: " + json.dumps({"prefetch": prefetch, "pin_memory": pin_memory,
                                   "compact_reid": compact_reid,
-                                  "loading_mode": loading_mode,
-                                  "stage_features": stage_features,
+                                  "loading_mode": config["loading_mode"],
+                                  "stage_features": config["stage_features"],
                                   "stage_chunk_samples": stage_chunk_samples,
                                   "feature_working_set_gib": feature_bytes / 2**30}))
     seed_rng = np.random.RandomState(int(args.seed))
@@ -1161,20 +1140,19 @@ def train(group: str, args) -> None:
                 sequence_staging_seconds = 0.0
                 sequence_staging_chunks = 0
                 sequence_staging_peak_bytes = 0
-                for chunk_rows in feature_chunks(rows, stage_chunk_samples, enabled=stage_features):
-                    with staged_sequence_rows(data, chunk_rows, group, enabled=stage_features) as staged, prepared_batches(
+                for chunk_rows in feature_chunks(rows, stage_chunk_samples, enabled=True):
+                    with staged_sequence_rows(data, chunk_rows, group) as staged, prepared_batches(
                         chunk_rows, batch_size,
                         lambda selected: batch_tensors(data, selected, targets[sequence], group,
                                                       compact_reid=compact_reid),
                         PAIRED_TENSOR_KEYS,
                         prefetch=prefetch, pin_memory=pin_memory,
                     ) as batches:
-                        if stage_features:
-                            sequence_staging_seconds += staged["seconds"]
-                            sequence_staging_chunks += 1
-                            sequence_staging_peak_bytes = max(
-                                sequence_staging_peak_bytes, staged["bytes"]
-                            )
+                        sequence_staging_seconds += staged["seconds"]
+                        sequence_staging_chunks += 1
+                        sequence_staging_peak_bytes = max(
+                            sequence_staging_peak_bytes, staged["bytes"]
+                        )
                         for batch_rows, cpu_batch in batches:
                             batch = to_device(cpu_batch, device)
                             outputs = model(**model_inputs(batch))
@@ -1307,17 +1285,16 @@ def train(group: str, args) -> None:
                             accumulator.add("motion_gate", gate_means[0], count)
                             accumulator.add("appearance_gate", gate_means[1], count)
                             gate_count += count
-                if stage_features:
-                    epoch_staging_seconds += sequence_staging_seconds
-                    epoch_staging_chunks += sequence_staging_chunks
-                    epoch_staging_peak_bytes = max(
-                        epoch_staging_peak_bytes, sequence_staging_peak_bytes
-                    )
-                    log("feature stage: " + json.dumps({
-                        "sequence": sequence, "chunks": sequence_staging_chunks,
-                        "seconds": sequence_staging_seconds,
-                        "peak_chunk_bytes": sequence_staging_peak_bytes,
-                    }))
+                epoch_staging_seconds += sequence_staging_seconds
+                epoch_staging_chunks += sequence_staging_chunks
+                epoch_staging_peak_bytes = max(
+                    epoch_staging_peak_bytes, sequence_staging_peak_bytes
+                )
+                log("feature stage: " + json.dumps({
+                    "sequence": sequence, "chunks": sequence_staging_chunks,
+                    "seconds": sequence_staging_seconds,
+                    "peak_chunk_bytes": sequence_staging_peak_bytes,
+                }))
             except Exception:
                 raise
         if totals["batches"] != epoch_steps[epoch - 1] or totals["samples"] != sum(quotas.values()):
@@ -1475,12 +1452,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Ordered CPU batch prefetch depth; 0 disables the producer.")
     parser.add_argument("--no-compact-reid", action="store_true",
                         help="Transport source ReID values as float32 instead of exact float16.")
-    staging = parser.add_mutually_exclusive_group()
-    staging.add_argument("--stage-features", dest="stage_features", action="store_true",
-                         default=MAINLINE_STAGE_FEATURES,
-                         help="Stage selected feature rows of the current sequence (default).")
-    staging.add_argument("--no-stage-features", dest="stage_features", action="store_false",
-                         help="Read mmap features per batch; use only for performance comparisons.")
+    # Accept archived launch commands with the current staging loader.
+    parser.add_argument("--stage-features", "--no-stage-features", "--preload-features",
+                        dest="legacy_loader_flags", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--stage-chunk-samples", type=int, default=None,
                         help="Override the stage chunk size, aligned to complete batches. "
                              "The MOT20 4-shard sqrt-size recipe stages each sequence once; "
@@ -1517,12 +1491,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gap3-weight", type=float, default=1.0)
     parser.add_argument("--rank-weight", type=float, default=1.0)
     parser.add_argument("--motion-harm-weight", type=float, default=1.0,
-                        help="Reweight GT-harmful motion events in B/D training; 1.0 keeps the original loss.")
+                        help="Positive loss weight for GT-harmful motion events in B/D training. "
+                             "Below 1.0 downweights them, above 1.0 upweights them.")
     parser.add_argument("--dropout", type=float, default=None,
                         help="Dropout inside the query HCE stack (query_film_bilinear); "
                              "default 0.0 from scratch, or the init checkpoint's value.")
-    parser.add_argument("--preload-features", action="store_true",
-                        help="Copy mapped event/rank features into resident RAM before training.")
     parser.add_argument("--warmup-steps", type=int, default=-1,
                         help="Scheduler warmup steps; -1 uses the first epoch's step count.")
     parser.add_argument("--grad-norm-every", type=int, default=0,

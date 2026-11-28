@@ -5,8 +5,8 @@ A: dropout 0.0, motion_harm_weight 1
 B: dropout 0.1, motion_harm_weight 1
 C: dropout 0.0, motion_harm_weight 8
 
-All runs: query_film_bilinear, from scratch, full parameters, seed 42, one shard
-(all samples resident in RAM), sample budget matched to the historical e80
+All runs: query_film_bilinear, from scratch, full parameters, seed 42, one shard,
+sample budget matched to the historical e80
 (20 full passes), cosine planned over 50 full epochs, stop after epoch 20.
 Checkpoints at epochs 10/15/20 get a full 45-sequence raw val evaluation and a
 motion-gate target analysis. No test submission in this round.
@@ -139,7 +139,6 @@ def run(label, command, cwd=ROOT):
 
 
 def probe():
-    import numpy as np
     sys.path.insert(0, str(ROOT / "tools"))
     import train_supervision_groups as trainer
 
@@ -150,19 +149,10 @@ def probe():
     for sequence in TRAIN_SEQS:
         datasets[sequence] = trainer.SequenceData(sequence, "train", DATA, "SportsMOT")
     load_seconds = time.time() - started
-    preload_started = time.time()
-    for data in datasets.values():
-        data.preload()
-    preload_seconds = time.time() - preload_started
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024)
     steps = trainer.build_schedule(datasets, 1024, PLANNED_EPOCHS, 1,
                                    "sample-proportional", 1.0)
     samples = sum(data.n for data in datasets.values())
-    array_bytes = sum(
-        sum(getattr(data, attr).nbytes for attr in
-            ("event_evidence", "event_track", "event_det", "event_has"))
-        + sum(array.nbytes for array in data._rank_arrays)
-        for data in datasets.values())
     for data in datasets.values():
         data.samples.close()
     del datasets
@@ -185,8 +175,6 @@ def probe():
         "old_e80_sample_budget": old_budget,
         "sample_budget_delta": samples * STOP_EPOCH - old_budget,
         "sequence_load_seconds": round(load_seconds, 2),
-        "preload_seconds": round(preload_seconds, 2),
-        "preload_array_gib": round(array_bytes / 2 ** 30, 3),
         "probe_rss_peak_gib": round(peak, 3),
         "mem_available_before_gib": round(mem_before, 2),
         "mem_available_gib": round(mem_available_gib(), 2),
@@ -231,7 +219,7 @@ def train_command(name, spec, preflight):
         "--rank-tau", "0.1", "--column-weight", "50",
         "--motion-harm-weight", str(spec["motion_harm_weight"]),
         "--dropout", str(spec["dropout"]),
-        "--preload-features", "--warmup-steps", str(preflight["warmup_steps"]),
+        "--warmup-steps", str(preflight["warmup_steps"]),
         "--grad-norm-every", "5", "--device", "cuda",
     ]
     last = group_dir(name) / "checkpoints/last.pt"
@@ -467,7 +455,7 @@ def analyze():
 def render_report(summary):
     lines = ["# SportsMOT A/B/C：Dropout 与 motion_harm_weight", "",
              "训练：官方 train 45 条，从头全参数，query_film_bilinear，seed 42；"
-             "全量驻留（shards=1），20 个全量轮（对齐旧 e80 样本预算）；"
+             "shards=1，20 个全量轮（对齐旧 e80 样本预算）。"
              "余弦按 50 轮规划。验证：官方 val 45 条 raw，正常双门控。", "",
              "| 组 | Dropout | motion_harm_weight | 加载 s | 平均轮时 s | RSS 峰值 GiB | CUDA 峰值 MiB |",
              "|---|---:|---:|---:|---:|---:|---:|"]

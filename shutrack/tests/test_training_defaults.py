@@ -4,6 +4,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
@@ -26,7 +28,6 @@ def test_bare_launch_selects_mainline_architecture_and_staging():
     variant, width = trainer.resolve_model_options(args)
     assert variant == MAINLINE_ARCHITECTURE_VARIANT
     assert width == MAINLINE_APPEARANCE_PROJ_DIM
-    assert args.stage_features is True
     assert trainer.resolve_stage_chunk_samples(args, 1024) == MAINLINE_STAGE_CHUNK_SAMPLES
 
 
@@ -55,9 +56,12 @@ def test_legacy_reproduction_opts_out_explicitly():
     assert width == LEGACY_APPEARANCE_PROJ_DIM
 
 
-def test_staging_can_only_be_disabled_for_performance_comparison():
-    args = _bare_args("--no-stage-features")
-    assert args.stage_features is False
+@pytest.mark.parametrize("flag", ["--stage-features", "--no-stage-features", "--preload-features"])
+def test_legacy_loader_flags_are_hidden_and_normalized(flag):
+    args = _bare_args(flag)
+    assert args.legacy_loader_flags
+    assert flag not in trainer.build_parser().format_help()
+    assert trainer.resolve_stage_chunk_samples(args, 1024) == MAINLINE_STAGE_CHUNK_SAMPLES
 
 
 def test_explicit_dropout_overrides_init_checkpoint():

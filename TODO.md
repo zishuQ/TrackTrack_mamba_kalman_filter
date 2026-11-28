@@ -1,4 +1,16 @@
-# SportsMOT TODO（2026-11-23，按最新讨论更新）
+# SHUTrack TODO
+
+## 2026-11-28 MOT17 底座与微调学习率对照
+
+- [ ] 补齐组合实验。复用 MOT20 harm=1 e100（#1063086，官方 HOTA 66.637）作为底座，MOT17 微调使用 `LR=2e-5`、`harm=1.5`。底座权重位于 `outputs/agentguard/keep/MOT20_66.637_1063086/weights/epoch_100.pt`。
+- [ ] 学习率上探。沿用 #1070802（HOTA 68.229）的 MOT20 harm=2 e100 底座（#1068664）和 MOT17 配方，只把微调学习率从 `2e-5` 提到 `3e-5`，用 #1070802 作对照。
+- 两组独立从指定的 MOT20 底座开始微调。沿用 11 月 27 日的 SHUTrack 双 gate 协议、MOT17 `harm=1.5`、7 条官方 train、50 轮 / 5,200 步、warmup 104、dropout 0、seed 42。用最终权重跑官方 test 和原后处理，跳过 raw val。
+- 补齐组合后，分别与同底座、低 LR 的 #1070817 和同 LR、另一底座的 #1070802 比较。两组都记录 HOTA、AssA、DetA、IDF1、IDSW 和 Frag。
+
+| MOT20 底座 | MOT17 LR=`1e-5` | MOT17 LR=`2e-5` |
+| --- | --- | --- |
+| harm=2 e100（#1068664） | 68.028（#1069953） | 68.229（#1070802） |
+| harm=1 e100（#1063086） | 68.167（#1070817） | 待测 |
 
 ## 最新追加：三帧连续harm1对照（2026-11-24）
 
@@ -27,7 +39,7 @@
 - 本地实验：官方train 45条训练，val 45条验证。
 - 模型保持query_film_bilinear，全参数训练；当前研究配方保留Dropout=0.05。
 - 当前沿用NSA KF与既有双门控写回。
-- SportsMOT当前全量加载，shards=1、batch1024、seed42；每轮305,631样本、321步。
+- SportsMOT 配对训练按序列暂存特征。shards=1、batch1024、seed42，每轮 305,631 样本、321 步。
 - 外观rank=18、column=50、tau=0.1、alpha=0.95。
 - 每组仅最终checkpoint做一次完整val评估及最终门控分析，中期权重保存。
 - 正式test阶段再按确定的方案组织训练与提交。

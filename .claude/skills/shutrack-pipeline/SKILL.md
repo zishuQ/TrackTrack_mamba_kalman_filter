@@ -25,10 +25,10 @@ project skill `.claude/skills/codabench`.
    detection cache. Check no heavy job is already running (`run.py`,
    `train_supervision_groups.py`, `train_stop_after.py`, `continue_low_lr.py`).
 2. **Train** — `tools/train_supervision_groups.py` (`--group appearance_row_column`,
-   `query_film_bilinear`, proj 256, staged features by default). Verify the
-   effective `config.json` after launch: `architecture_variant`,
-   `appearance_proj_dim`, `loading_mode`, `dropout`, `warmup_steps_override`,
-   `total_steps`, `sequences`. `--init` inherits the init checkpoint's dropout
+   `query_film_bilinear`, proj 256). The trainer stages the selected feature
+   rows for each sequence automatically. Use the dataset card for the training
+   recipe and verify `loading_mode="stage"`, model settings, warmup, step count
+   and sequence list in `config.json`. `--init` inherits the init checkpoint's dropout
    unless `--dropout` is passed explicitly.
 3. **Evaluate (raw val)** — `3. Tracker/run.py` with `--eval-json` and
    `--agentguard-stats-output`; seed 10000, NSA KF, CPU. Reproduce the old
@@ -113,9 +113,6 @@ Tuner policy highlights (full text in `mot_tuner.py`):
   same limit.
 - `--init` uses the init checkpoint's `model_config` (including dropout) unless
   `--dropout` is passed explicitly; verify the launch `verification:` line.
-- Staged feature loading is the default (`stage_features=true`); `--preload-features`
-  disables it. Loader choice must not affect the optimization protocol; staging
-  vs mmap equivalence is regression-tested.
 - Repo scripts (`run.py --use_post`) create `<...>_post`; AFLink writes
   `<...>_post_aflink_post`. When Rediscovering post dirs on a rerun, exclude
   names ending in `_aflink_post`.

@@ -93,7 +93,7 @@ def train_command(name, spec, preflight_payload):
         "--rank-tau", "0.1", "--column-weight", "50",
         "--motion-harm-weight", str(spec["motion_harm_weight"]),
         "--dropout", str(spec["dropout"]),
-        "--preload-features", "--warmup-steps", str(preflight_payload["warmup_steps"]),
+        "--warmup-steps", str(preflight_payload["warmup_steps"]),
         "--grad-norm-every", "5", "--device", "cuda", "--resume",
     ]
 

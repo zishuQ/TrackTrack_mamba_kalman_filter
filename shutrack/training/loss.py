@@ -244,11 +244,13 @@ def motion_box_diou_loss(
     t+1 GT box.  Events without a valid GT box are masked out.
 
     Optional harm_weight reweights only events where the fixed g=1 endpoint
-    has worse GT DIoU loss than g=0 (tolerance 1e-6). It changes importance,
-    never assigns a target gate. Default 1 preserves the original path.
+    has worse GT DIoU loss than g=0 (tolerance 1e-6). Weights below 1
+    deemphasize those events; weights above 1 emphasize them. Default 1
+    preserves the original unweighted path.
     """
-    if not math.isfinite(float(harm_weight)) or float(harm_weight) < 1.0:
-        raise ValueError("harm_weight must be finite and >= 1")
+    harm_weight = float(harm_weight)
+    if not math.isfinite(harm_weight) or harm_weight <= 0.0:
+        raise ValueError("harm_weight must be finite and positive")
     gate = torch.sigmoid(outputs["gate_logits"].float())[:, 0]
     box0 = batch["pred_box_g0"].float()
     box1 = batch["pred_box_g1"].float()
@@ -271,13 +273,14 @@ def motion_box_diou_loss(
         "valid_ratio": mask.mean().detach(),
         "diou_at_gate_mean": ((elementwise * mask).sum() / denominator).detach(),
     }
-    if float(harm_weight) != 1.0:
+    if harm_weight != 1.0:
         with torch.no_grad():
             loss0 = 1.0 - _diou_xyxy(box0, target)
             loss1 = 1.0 - _diou_xyxy(box1, target)
             harmful = valid & (loss1 > loss0 + 1e-6)
-            effective_weights = mask * (1.0 + (float(harm_weight) - 1.0) * harmful.float())
-            effective_sum = effective_weights.sum().clamp_min(1.0)
+            effective_weights = torch.where(harmful, harm_weight, mask)
+            effective_sum = effective_weights.sum()
+            effective_sum = torch.where(effective_sum > 0, effective_sum, 1.0)
         weighted_loss = (elementwise * effective_weights).sum() / effective_sum
         components.update({
             "loss": weighted_loss * float(weight),

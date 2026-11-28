@@ -44,7 +44,7 @@ def arguments_from_config(config, groups_root, resume):
     args.update(groups_root=str(groups_root), resume=resume,
                 max_epochs=config["epochs"], limit_sequences=0, sequences=None,
                 device="cuda", prefetch=1, no_compact_reid=False,
-                no_pin_memory=False, stage_features=None, motion_harm_weight=1.0)
+                no_pin_memory=False, motion_harm_weight=1.0)
     args["from_scratch"] = config["from_scratch"]
     args["init"] = config.get("init")
     return SimpleNamespace(**args)

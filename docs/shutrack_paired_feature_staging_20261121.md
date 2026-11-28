@@ -35,10 +35,9 @@ D 方案损失、batch=1024、sqrt-size 采样及原学习率计划。
 5. 使用 MADV_DONTNEED 和 POSIX_FADV_DONTNEED 释放已用完的干净文件页，
    文件内容保持原样，当前训练使用独立内存副本。
 
-训练入口 tools/train_supervision_groups.py 自动根据工作集与物理内存选择加载路径。
-默认工作集超过物理内存的 75% 时启用预载；较小池保留原热缓存路径。
---stage-features / --no-stage-features 可用于执行性能对照。
-这些选项只控制数据搬运，训练配置与断点协议保持原样。
+当前配对训练统一在每条序列开始时暂存采样计划需要的特征行。MOT20 的
+4 分片 sqrt-size 配方每个分片内每条序列暂存一次。旧 checkpoint 可以通过
+`--resume` 接着训练，恢复原优化器、学习率调度和随机数状态。
 
 训练配置文件 SHA-256 与修复前相同：
 d3aa9a86cf2bbf1467561ed217b7b612cf2e32f09159355194019d641bc6e9d8

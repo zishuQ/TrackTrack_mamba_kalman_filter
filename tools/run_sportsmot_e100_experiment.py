@@ -84,7 +84,7 @@ def train_command(preflight_payload):
         "--rank-tau", "0.1", "--column-weight", "50",
         "--motion-harm-weight", str(SPEC["motion_harm_weight"]),
         "--dropout", str(SPEC["dropout"]),
-        "--preload-features", "--warmup-steps", str(preflight_payload["warmup_steps"]),
+        "--warmup-steps", str(preflight_payload["warmup_steps"]),
         "--grad-norm-every", "5", "--device", "cuda",
     ]
     last = abc.group_dir(NAME) / "checkpoints/last.pt"
@@ -114,7 +114,7 @@ def verify(preflight_payload):
         "epochs": TOTAL_EPOCHS, "total_steps": preflight_payload["total_steps"],
         "warmup_steps": preflight_payload["warmup_steps"], "shards": 1,
         "batch_size": 1024, "seed": 42, "snapshot_every": 5,
-        "preload_features": True, "grad_norm_every": 5,
+        "grad_norm_every": 5,
         "architecture_variant": "query_film_bilinear", "appearance_proj_dim": 256,
     }
     mismatched = {key: {"expected": value, "actual": config.get(key)}

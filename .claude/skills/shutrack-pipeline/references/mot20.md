@@ -27,8 +27,10 @@ tau 0.1 / column 50, harm 1.
 | sample-proportional e100 | default sampling, `--warmup-steps 270`, `--shards 4 --max-epochs 100` | 27,000 | 66.531, #1066968 |
 | low-LR continuation | `tools/continue_low_lr.py` from e100, 50 stage-epochs / 4 shards (`--allow-partial-cycles`), lr 1e-5 | — | 66.587 |
 
-Training data loader: staged features by default; `--preload-features` is the
-old mode. Resume compares the full config minus loader keys.
+The 4-shard sqrt-size recipe stages each sequence's selected rows once per
+shard. Check `loading_mode="stage"` and `stage_chunk_samples=null` in the
+effective config. Use `--resume` with the original training recipe to restore
+a checkpoint and continue with this loader.
 
 ## Evaluation (raw val)
 
